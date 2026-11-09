@@ -523,6 +523,13 @@ mod tests {
     }
 
     #[test]
+    fn cuda_deformable_passes_repeat() {
+        if let Some(cuda) = cuda() {
+            checks::deformable_passes_repeat(&cuda);
+        }
+    }
+
+    #[test]
     fn cuda_deformable_passes_take_the_start_classes() {
         if let Some(cuda) = cuda() {
             checks::deformable_passes_take_the_start_classes(&cuda);

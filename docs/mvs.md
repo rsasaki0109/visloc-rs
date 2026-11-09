@@ -1025,9 +1025,44 @@ listed in the checkerboard grid's order with the weak ones last, and
 | playground | 70.6%, 835 s; 70.7%, 824 s | 71.0%, 716 s |
 
 - **10 to 15% less time, the same F1.** Two runs of the same code already
-  differ by 0.3 points (office). The deformable patches' runs are not
-  bit for bit repeatable.
+  differ by 0.3 points (office). The deformable patches' runs were not
+  bit for bit repeatable (fixed below).
 - **The default patches** have no weak pixels and keep the grid's order.
+
+**Repeatable runs, in APD's order.**
+
+- **The race.** A weak pixel's candidates are its anchors' planes, and an
+  anchor can be of the pixel's own colour. On CUDA a weak pixel read such
+  a plane while the same launch rewrote it. A run's result then depended
+  on the order the GPU ran the pixels in.
+- **APD-MVS's order.** Each deformable iteration now takes it, on the CPU
+  and on CUDA. First the pixels without anchors, of both colours; then the
+  weak pixels with anchors, of both colours. Each colour is a launch of its
+  own. The anchors are strong pixels, so no anchor is rewritten while a
+  weak pixel reads it, and the weak pixel sees it as this iteration left
+  it.
+- **Result.** Two runs of office now give the same depth maps and cloud,
+  bit for bit.
+
+APD with 20 sources at 1600 px, F1 at 2 cm:
+
+| Scene | Weak pixels last (above) | The planes copied before each propagation | APD's order |
+|---|---|---|---|
+| office | 77.5% | 77.2% | 77.3% |
+| kicker | 83.9% | 83.5% | 83.7% |
+| playground | 71.0% | 70.3% | 70.5% |
+
+- **The first fix tried** gave the weak pixels a copy of the planes taken
+  before each propagation, as the CPU path read the state each colour's
+  pass started from. Its runs repeat too, but they score 0.2 to 0.7 points
+  lower: the weak pixels no longer see their anchors' new planes.
+- **APD's order recovers part of that,** 0.1 to 0.2 points on each scene.
+  It runs as fast: office 373 s, kicker 597 s, playground 720 s, with a
+  CPU-heavy job alongside.
+- **The CPU path** takes the same order, so its deformable passes change
+  too. Passes without deformable patches are unchanged.
+- **wgpu** still runs each colour's pixels together and keeps the race.
+  There is no NVIDIA Vulkan driver here to test a change.
 
 ### Fusion settings
 

@@ -6,13 +6,19 @@
 //
 // The kernels follow the shader line by line, and so the CPU path
 // (`patch_match.rs`): the same sampling regions, view selection, refinement
-// and random streams. Two differences, both towards the CPU path:
+// and random streams. Three differences, all towards the CPU path:
 //
 // - The sources' grey levels are f32 and sampled bilinearly in software,
 //   where the shader samples a half-float texture with the texture unit's
 //   fixed-point weights.
 // - Every WGSL variable and private array starts at zero, as WGSL defines
 //   them; here they are zeroed explicitly.
+// - A deformable iteration takes APD-MVS's order: the pixels without anchors
+//   of both colours, then the weak ones with anchors of both colours. A weak
+//   pixel's anchors are strong pixels of either colour, so none is rewritten
+//   while it reads them. The shader runs each colour's pixels together, and
+//   a weak pixel there reads a same-colour anchor's plane while the dispatch
+//   rewrites it: its result depends on the order the GPU runs the pixels in.
 //
 // The host side mirrors `GpuPatchMatch::run`: `begin` uploads a pass's inputs
 // and runs `init`; `classify`, `set_classes` and `find_anchors` handle
@@ -1121,8 +1127,10 @@ struct Ctx {
     bool begun = false;
     Buf sources, images, layers, priors, planes, costs, best_views, init_planes, prior_planes, pre_costs, classes,
         nearest, anchors, order;
-    // Colour c's pixels in b.order: [order_start[c], order_start[c + 1]).
+    // Colour c's pixels in b.order: [order_start[c], order_start[c + 1]),
+    // its weak ones with anchors from weak_start[c].
     uint32_t order_start[3] = {0, 0, 0};
+    uint32_t weak_start[2] = {0, 0};
 };
 
 #define MVS_CHECK(ctx, expr)                                                      \
@@ -1287,8 +1295,9 @@ MVS_EXPORT int visloc_mvs_cuda_find_anchors(void* handle, const MvsParams* param
     if (finish(ctx) != 0) return -1;
     // The propagations' pixels: per colour, the checkerboard grid's order
     // (blocks, then threads), with the weak pixels that took anchors (class
-    // 3) after the others. Their cost also samples the anchors' patches, and
-    // a warp holding both kinds runs at the weak ones' pace.
+    // 3) after the others. They run as a launch of their own (see
+    // visloc_mvs_cuda_propagate), and their cost also samples the anchors'
+    // patches: a warp holding both kinds would run at the weak ones' pace.
     const uint32_t w = ctx->w, h = ctx->h;
     std::vector<uint32_t> classes(size_t(w) * h);
     MVS_CHECK(ctx, cudaMemcpy(classes.data(), ctx->b.classes, classes.size() * sizeof(uint32_t),
@@ -1308,6 +1317,7 @@ MVS_EXPORT int visloc_mvs_cuda_find_anchors(void* handle, const MvsParams* param
                         const uint32_t i = y * w + x;
                         (classes[i] == 3u ? weak : order).push_back(i);
                     }
+        ctx->weak_start[c] = uint32_t(order.size());
         order.insert(order.end(), weak.begin(), weak.end());
     }
     ctx->order_start[2] = uint32_t(order.size());
@@ -1317,14 +1327,26 @@ MVS_EXPORT int visloc_mvs_cuda_find_anchors(void* handle, const MvsParams* param
     return 0;
 }
 
-// One propagation of the pixels of colour params->color.
+// One propagation of the pixels of colour params->color. In a deformable pass
+// (after find_anchors) that is APD-MVS's order: colour 0's call runs its
+// pixels without anchors, colour 1's call its own, then the weak pixels with
+// anchors of colour 0 and of colour 1.
 MVS_EXPORT int visloc_mvs_cuda_propagate(void* handle, const MvsParams* params) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx || !params || !ctx->begun) return -1;
     if (ctx->b.order) {
+        const auto run = [&](const MvsParams& p, uint32_t first, uint32_t end) {
+            if (end > first) propagate_kernel<<<(end - first + 127) / 128, 128>>>(p, ctx->b, first, end - first);
+        };
         const uint32_t c = params->color % 2u;
-        const uint32_t n = ctx->order_start[c + 1] - ctx->order_start[c];
-        if (n > 0) propagate_kernel<<<(n + 127) / 128, 128>>>(*params, ctx->b, ctx->order_start[c], n);
+        run(*params, ctx->order_start[c], ctx->weak_start[c]);
+        if (c == 1u) {
+            for (uint32_t cc = 0; cc < 2u; cc++) {
+                MvsParams p = *params;
+                p.color = cc;
+                run(p, ctx->weak_start[cc], ctx->order_start[cc + 1]);
+            }
+        }
     } else {
         const uint32_t half = (ctx->w + 1) / 2;
         propagate_kernel<<<dim3((half + 15) / 16, (ctx->h + 7) / 8), dim3(16, 8)>>>(*params, ctx->b, 0, 0);

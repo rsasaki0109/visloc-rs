@@ -252,9 +252,7 @@ pub fn estimate(
         ctx.start_deformable(&state, &maps[view], d);
     }
     for iteration in 0..options.iterations {
-        for color in [0, 1] {
-            ctx.pass(&mut state, iteration, color);
-        }
+        ctx.iterate(&mut state, iteration);
     }
     ctx.finish(&state)
 }
@@ -305,9 +303,7 @@ pub fn estimate_from(
         DetailRestorer::Infinity(margin) => Some((ctx.infinity_costs(), margin)),
     };
     for iteration in 0..options.iterations {
-        for color in [0, 1] {
-            ctx.pass(&mut state, iteration, color);
-        }
+        ctx.iterate(&mut state, iteration);
     }
     ctx.finish(&state)
 }
@@ -350,9 +346,7 @@ pub fn estimate_with_prior(
         ctx.start_deformable(&state, start, d);
     }
     for iteration in 0..options.iterations {
-        for color in [0, 1] {
-            ctx.pass(&mut state, iteration, color);
-        }
+        ctx.iterate(&mut state, iteration);
     }
     ctx.finish(&state)
 }
@@ -1127,18 +1121,45 @@ impl<'a> Context<'a> {
         State::from_rows(rows, w * h)
     }
 
+    /// One iteration: each checkerboard colour in turn. With deformable
+    /// patches, APD-MVS's order: the pixels without anchors of both colours
+    /// first, then the weak ones with anchors, so that a weak pixel reads
+    /// its anchors (strong pixels of either colour) as this iteration left
+    /// them.
+    fn iterate(&self, state: &mut State, iteration: usize) {
+        if self.anchors.is_none() {
+            for color in [0, 1] {
+                self.pass(state, iteration, color, None);
+            }
+            return;
+        }
+        for anchored in [false, true] {
+            for color in [0, 1] {
+                self.pass(state, iteration, color, Some(anchored));
+            }
+        }
+    }
+
     /// Updates the pixels of one checkerboard colour (`(x + y) % 2 ==
-    /// color`) from the other's current state.
-    fn pass(&self, state: &mut State, iteration: usize, color: usize) {
+    /// color`) from the other's current state; with `anchored`, only the
+    /// weak pixels with anchors (`true`) or only the others (`false`).
+    fn pass(&self, state: &mut State, iteration: usize, color: usize, anchored: Option<bool>) {
         let (w, h) = (self.reference.width, self.reference.height);
+        let has_anchors = |i: usize| {
+            self.anchors
+                .as_ref()
+                .is_some_and(|a| a.index[i] != u32::MAX)
+        };
         let updates: Vec<Vec<(usize, Plane, f32, u32)>> = (0..h)
             .into_par_iter()
             .map(|y| {
                 let mut row = Vec::with_capacity(w / 2 + 1);
                 let mut x = (y + color) % 2;
                 while x < w {
-                    let (plane, cost, views) = self.update_pixel(state, x, y, iteration, color);
-                    row.push((x, plane, cost, views));
+                    if anchored.is_none_or(|a| a == has_anchors(y * w + x)) {
+                        let (plane, cost, views) = self.update_pixel(state, x, y, iteration, color);
+                        row.push((x, plane, cost, views));
+                    }
                     x += 2;
                 }
                 row

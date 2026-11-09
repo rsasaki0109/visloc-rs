@@ -633,6 +633,26 @@ pub(crate) mod checks {
         assert_ne!(strong_median.depth, strong_unfiltered.depth);
     }
 
+    /// A deformable pass gives the same depths every time on the device: a
+    /// weak pixel's anchors, strong pixels of either colour, are updated
+    /// before it in APD-MVS's order, as on the CPU, and not while it reads
+    /// them. (The wgpu shader still runs each colour's pixels together.)
+    #[cfg(feature = "cuda")]
+    pub(crate) fn deformable_passes_repeat(device: &impl Device) {
+        let (ws, _) = textureless_scene();
+        let options = PatchMatchOptions::default();
+        let photometric = device.estimate(&ws, 0, &options, None);
+        let deformable = PatchMatchOptions {
+            deformable: Some(Deformable::default()),
+            ..options
+        };
+        let run = || device.estimate_from(&ws, 0, &deformable, &photometric, DetailRestorer::Off);
+        let first = run();
+        for _ in 0..4 {
+            assert_eq!(run().depth, first.depth);
+        }
+    }
+
     /// `deformable_passes_take_the_start_classes` on the device.
     pub(crate) fn deformable_passes_take_the_start_classes(device: &impl Device) {
         let (ws, inner) = textureless_scene();
