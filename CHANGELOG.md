@@ -1333,6 +1333,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **`gsplat_mesh_cuda --depth-maps`: the splat's depth in the maps' holes
+  weighs half a map's (`--fill-weight 0.5`; was 1).**
+  - **Why.** Where the splat's depth is wrong it adds wrong surface, and
+    its free space carves away real surface that other views' maps saw:
+    terrains' MVS depth alone beat every hybrid.
+  - **How.** `DepthMaps::fill_weight` and `TsdfParams::fill_weight` (CUDA
+    ABI 17) weigh it for its surface, colour and carving alike. At 0.5 a
+    voxel only it reaches needs two views.
+  - **Result.** Over office / terrains / playground each hybrid's mean
+    gains 0.3–2.0 points: the plain splat with the default maps 66.0 →
+    68.0%, the geometry copy with the APD maps 76.5 → 76.7%
+    (docs/gsplat_cuda.md, "The splat's depth at half the weight").
+  - **Unchanged** without maps, or at weight 1: the same surface bit for
+    bit.
+
 - **visloc-mvs on CUDA: with deformable patches, the weak pixels propagate
   in warps of their own.**
   - **Why.** A weak pixel's cost also samples its anchors' patches (36 +
