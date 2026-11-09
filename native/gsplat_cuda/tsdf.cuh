@@ -80,6 +80,11 @@ __device__ inline int tsdf_find(const unsigned long long* keys, const uint32_t* 
 struct TsdfArgs {
     float voxel, trunc, max_depth, min_weight;
     int carve, free_space;
+    // Whether a negative depth is the splat's in a depth map's hole
+    // (override_depth_kernel), and the weight it is fused with; otherwise a
+    // negative depth is no depth.
+    int fill;
+    float fill_weight;
 };
 
 // Allocation: for every second pixel in x and y with a surface (median depth
@@ -92,8 +97,9 @@ __global__ void tsdf_alloc_kernel(GscCamera cam, TsdfArgs a, const float* __rest
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= hw * hh) return;
     const uint32_t x = (i % hw) * 2, y = (i / hw) * 2;
-    const float z = depth_out[(size_t(y) * cam.width + x) * 2];
-    if (z <= 0.f || z > a.max_depth) return;
+    float z = depth_out[(size_t(y) * cam.width + x) * 2];
+    if (a.fill) z = fabsf(z);
+    if (!(z > 0.f) || z > a.max_depth) return;
     float pc[3] = {(float(x) + 0.5f - cam.cx) / cam.fx * z, (float(y) + 0.5f - cam.cy) / cam.fy * z, z};
     if (cam.lens_kind != kLensPinhole) {
         // Along the lens's ray (scaled so that the depth times it is the point).
@@ -211,15 +217,20 @@ __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, T
         }
         if (u < 0.f || vv < 0.f || u >= wf || vv >= hf) continue;
         const size_t pix = size_t(vv) * cam.width + size_t(u);
-        const float d = depth[pix * depth_stride];
-        // Unknown (a depth map's hole, override_depth_kernel): no update.
-        if (d < 0.f) continue;
+        float d = depth[pix * depth_stride];
+        // Unknown (-inf, a depth map's hole, override_depth_kernel) or no
+        // depth: no update. With `fill`, negative (the sign bit, -0
+        // included): the splat's depth in a map's hole, fused with weight
+        // fill_weight.
+        if (!isfinite(d) || (!a.fill && d < 0.f)) continue;
+        const float wd = a.fill && signbit(d) ? a.fill_weight : 1.f;
+        d = fabsf(d);
         const size_t i = size_t(blockIdx.x) * kTsdfBV + v;
         if (d == 0.f || d > a.max_depth) {
             // Nothing opaque (or only background) along this pixel: free space.
             if (a.carve && (d <= 0.f || depth_v < d - a.trunc)) {
-                const float w0 = wt[i], wn = w0 + 1.f;
-                sdf[i] = (sdf[i] * w0 + 1.f) / wn;
+                const float w0 = wt[i], wn = w0 + wd;
+                sdf[i] = (sdf[i] * w0 + wd) / wn;
                 wt[i] = wn;
             }
             continue;
@@ -227,9 +238,9 @@ __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, T
         const float s = d - depth_v;
         if (s < -a.trunc || (!a.free_space && s > a.trunc)) continue;
         const float t = fminf(s / a.trunc, 1.f);
-        const float w0 = wt[i], wn = w0 + 1.f;
-        sdf[i] = (sdf[i] * w0 + t) / wn;
-        for (int c = 0; c < 3; ++c) col[i * 3 + c] = (col[i * 3 + c] * w0 + rgb[pix * 3 + c]) / wn;
+        const float w0 = wt[i], wn = w0 + wd;
+        sdf[i] = (sdf[i] * w0 + wd * t) / wn;
+        for (int c = 0; c < 3; ++c) col[i * 3 + c] = (col[i * 3 + c] * w0 + wd * rgb[pix * 3 + c]) / wn;
         wt[i] = wn;
     }
 }
@@ -334,18 +345,17 @@ __global__ void expected_depth_kernel(uint32_t npix, const float* __restrict__ a
     depth_out[i * 2] = a > 0.5f ? acc[i] / a : 0.f;
 }
 
-// A depth map's value where it has one (> 0); elsewhere the rendered depth,
-// or with `only` unknown (-1): a map without a depth at a pixel did not see
-// free space there, so tsdf_integrate_kernel leaves its ray alone.
+// A depth map's value where it has one (> 0); elsewhere the rendered depth
+// negated (-0 for no surface), which tsdf_integrate_kernel fuses as the
+// splat's, or with `only` unknown (-inf): a map without a depth at a pixel
+// did not see free space there, so tsdf_integrate_kernel leaves its ray
+// alone. A negative rendered depth is unknown too.
 __global__ void override_depth_kernel(uint32_t npix, const float* __restrict__ map, bool only,
                                       float* __restrict__ depth_out) {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= npix) return;
-    const float m = map[i];
-    if (m > 0.f)
-        depth_out[i * 2] = m;
-    else if (only)
-        depth_out[i * 2] = -1.f;
+    const float m = map[i], d = depth_out[i * 2];
+    depth_out[i * 2] = m > 0.f ? m : (only || !(d >= 0.f) ? -INFINITY : -d);
 }
 
 uint32_t next_pow2(uint64_t n) {
@@ -386,6 +396,7 @@ struct GscTsdfParams {
     uint32_t cache_mb;     // keep the views' depth and colour on the device up to this (0 = never)
     uint32_t expected;     // fuse the expected depth D / (1 - T) where 1 - T > 0.5 instead (planar ignored)
     uint32_t override_mode;  // with `maps`: 1 a map's depth where it has one, the splat's elsewhere; 2 the maps' alone
+    float fill_weight;       // mode 1: the weight of the splat's depth in a map's holes (> 0; a map's weighs 1)
 };
 
 // Render the current scene's median depth from each of `num_views` cameras,
@@ -407,6 +418,10 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
         ctx->error = "tsdf_mesh: override_mode needs depth maps";
         return -1;
     }
+    if (p->override_mode > 2 || (p->override_mode == 1 && !(p->fill_weight > 0.f))) {
+        ctx->error = "tsdf_mesh: override_mode must be 0 to 2, and filling a map's holes needs a positive fill_weight";
+        return -1;
+    }
     std::vector<size_t> view_px(num_views + 1, 0);
     for (int v = 0; v < num_views; ++v) view_px[v + 1] = view_px[v] + size_t(cams[v].width) * cams[v].height;
     ctx->tsdf_cells.clear();
@@ -414,8 +429,9 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
     ctx->tsdf_pos.clear();
     ctx->tsdf_col_host.clear();
     const float bg[3] = {0.f, 0.f, 0.f};
-    const TsdfArgs args = {p->voxel, p->trunc, p->max_depth, p->min_weight, int(p->carve != 0),
-                           int(p->free_space != 0)};
+    const TsdfArgs args = {p->voxel,      p->trunc,           p->max_depth,
+                           p->min_weight, int(p->carve != 0), int(p->free_space != 0),
+                           int(p->override_mode == 1), p->fill_weight};
     auto render = [&](int v) -> int {
         GSC_TRY(set_camera(ctx, &cams[v], bg, p->sh_active_degree));
         float* d;

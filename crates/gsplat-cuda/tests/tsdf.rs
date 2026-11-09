@@ -277,6 +277,7 @@ fn slabs_do_not_change_the_surface() {
         cache_mb,
         expected: 0,
         override_mode: 0,
+        fill_weight: 1.0,
     };
     let one = gs.tsdf_surface(&views, &params(0, 64)).expect("one slab");
     let many = gs.tsdf_surface(&views, &params(3, 64)).expect("many slabs");
@@ -377,6 +378,7 @@ fn depth_maps_replace_the_rendered_depth() {
         cache_mb: 64,
         expected: 0,
         override_mode,
+        fill_weight: 1.0,
     };
     let mut planar_maps = Vec::new();
     for v in &views {
@@ -423,9 +425,47 @@ fn depth_maps_replace_the_rendered_depth() {
         key(&plain) == key(&filled),
         "empty maps changed the surface"
     );
+    // With empty maps the splat fills every hole. At half the weight with
+    // half the minimum weight, the same surface: every update (surface,
+    // colour, carving) scales by a power of two. With the minimum weight
+    // kept, a voxel needs twice the views.
+    let [half_both, half] = [0.5, 1.0].map(|min_weight| {
+        gs.tsdf_surface_with_maps(
+            &views,
+            &TsdfParams {
+                fill_weight: 0.5,
+                min_weight,
+                ..params(0, 1)
+            },
+            Some(&empty),
+        )
+        .expect("half weight")
+    });
+    assert!(
+        key(&plain) == key(&half_both),
+        "the splat's depth at half the weight changed the surface"
+    );
+    let two_views = gs
+        .tsdf_surface(
+            &views,
+            &TsdfParams {
+                min_weight: 2.0,
+                ..params(0, 0)
+            },
+        )
+        .expect("two views");
+    assert!(
+        key(&two_views) == key(&half),
+        "at half the weight a voxel does not need two views"
+    );
+    assert!(
+        key(&two_views) != key(&plain),
+        "a second view changed nothing, so the test cannot tell the weights apart"
+    );
     eprintln!(
-        "maps: planar {} vertices, plain {} vertices, both reproduced exactly",
+        "maps: planar {} vertices, plain {} vertices, two views {}, all reproduced exactly",
         planar.cells.len(),
-        plain.cells.len()
+        plain.cells.len(),
+        half.cells.len()
     );
 }

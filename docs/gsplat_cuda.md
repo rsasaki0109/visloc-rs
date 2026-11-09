@@ -35,7 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
-| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too); over six scenes, with map holes unknown and no component filter, 71.4% and 76.5% (MVS depth alone 70.2%) |
+| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too); over six scenes, with map holes unknown and no component filter, 71.4% and 76.5% (MVS depth alone 70.2%); the splat's depth at half a map's weight (`--fill-weight 0.5`, the default) adds 0.3–2.0 points over three scenes |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 | Label votes: each splat's blending weight per pixel class, summed over views (`CudaGsplat::vote_labels`, example `gsplat_semantic_cuda`) | Done; SAM 3 classes on FIORD's MeetingRoom_In, 82.6% of held-out pixels ([semantic_splat.md](semantic_splat.md)) |
@@ -651,8 +651,10 @@ can go into the mesh instead.
 visloc-mvs's depth (`--save-fused-depth`, resampled to each view)
 wherever it has one, and the splat's depth elsewhere.
 `--depth-maps-only` fuses the maps alone. The meshes are built from all
-views, on the GPU TSDF at 1 cm with depths up to 20 m. F1 at 2 cm, with
-accuracy / completeness:
+views, on the GPU TSDF at 1 cm with depths up to 20 m. The hybrids in this
+section weigh the splat's depth as a map's; it now weighs half
+([below](#the-splats-depth-at-half-the-weight)). F1 at 2 cm, with accuracy
+/ completeness:
 
 | Mesh | Splat | terrains | playground | office | mean | Splat's held-out PSNR |
 |---|---|---|---|---|---|---|
@@ -915,6 +917,43 @@ And on office alone:
   and raising the SH degree again from 0 costs 0.36 dB without a prior.
 - **So it stays two splats.** Weight 3 is the middle ground: 0.85 dB below
   the plain splat, and 0.8 points below the copy's hybrid.
+
+#### The splat's depth at half the weight
+
+terrains' MVS depth alone beat every hybrid. In the maps' holes the
+splat's depth went in with a map's weight. Where it is wrong it adds wrong
+surface, and its free space carves away real surface that other views'
+maps saw. `gsplat_mesh_cuda --fill-weight` (`DepthMaps::fill_weight`) now
+weighs it, for its surface, colour and carving alike. The default is 0.5;
+it was 1. Below 1, a voxel that only the splat's depth reaches needs more
+views to pass `--min-weight`: two at 0.5. Where a map has a depth too, the
+map counts twice as much as the splat.
+
+F1 at 2 cm, weight 1 → 0.5, the meshes of the tables above:
+
+| Mesh | Maps | office | terrains | playground | mean |
+|---|---|---|---|---|---|
+| MVS + plain splat (planar median) | defaults | 52.3 → 55.4% | 80.3 → 81.7% | 65.3 → 67.1% | 66.0 → 68.0% |
+| MVS + copy | defaults | 65.2 → 67.0% | 81.0 → 81.7% | 66.6 → 66.6% | 71.0 → 71.8% |
+| MVS + plain splat (planar median) | APD | 68.9 → 71.4% | 82.9 → 84.0% | 68.0 → 68.8% | 73.3 → 74.8% |
+| MVS + copy | APD | 75.3 → **75.6%** | 83.7 → 84.3% | 70.4 → 70.2% | 76.5 → **76.7%** |
+
+- **Every mean gains**, by 0.3 to 2.0 points, and so do 10 of the 12
+  meshes. The copy's hybrids on playground lose 0.1 and 0.2 points.
+- **The weight mostly sets how many views the splat's depth needs.**
+  Every weight from 0.5 up to 1 needs two. The copy's hybrid with the APD
+  maps scores 76.5% at 0.7, 76.0% at 0.35 (three views) and 73.3% at 0.2
+  (five). At 0.2 office and playground lose the holes the splat filled:
+  office's completeness falls from 69.4% to 55.8%.
+- **terrains** reaches 84.3%, against 84.6% for its MVS depth alone.
+- **Tried and not kept:**
+  - **The splat's depth only where it has a surface**, so that its empty
+    pixels carve nothing. It moved no score by more than 0.04 points: the
+    splat covers these views.
+  - **Its truncation band only**: no carving and no free space in front
+    of it. It raised terrains' completeness from 81.9% to 85.2%, but cost
+    office 6.6 points (68.7%) and playground 9.0 (61.4%), with their
+    floaters left in.
 
 ## TSDF on the GPU
 

@@ -8,7 +8,8 @@
 //!   --ply scene.ply --data <colmap_root> --out mesh.ply \
 //!   [--voxel V] [--trunc-voxels 4] [--max-depth D] [--min-component 500] \
 //!   [--min-weight 3] [--no-carve] [--support-voxels 10] [--planar-depth] \
-//!   [--expected-depth] [--gpu-tsdf [--slab-blocks 65536] [--depth-maps <dir> [--depth-maps-only]]]
+//!   [--expected-depth] [--gpu-tsdf [--slab-blocks 65536] [--depth-maps <dir>
+//!   [--depth-maps-only | --fill-weight 0.5]]]
 //! ```
 //!
 //! Renders the median depth of the splat from every dataset view, fuses the
@@ -24,8 +25,12 @@
 //! `<dir>/<image name>.bin` (visloc-mvs `--save-fused-depth`) in place of the
 //! splat's depth wherever a map has one, and the splat's elsewhere
 //! (`--depth-maps-only`: nowhere else; a map's hole is unknown, not free
-//! space). With depth maps `--min-component` defaults to 0: their small
-//! components are mostly surface, not floaters.
+//! space). `--fill-weight` weighs the splat's depth there against a map's
+//! (which weighs 1). At the default 0.5, a voxel only the splat's depth
+//! reaches needs twice the views to pass `--min-weight`, and where a map
+//! has a depth too it counts twice as much as the splat's. With depth maps
+//! `--min-component` defaults to 0: their small components are mostly
+//! surface, not floaters.
 
 use std::path::PathBuf;
 
@@ -49,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut slab_blocks = 0u32;
     let mut depth_maps: Option<PathBuf> = None;
     let mut maps_only = false;
+    let mut fill_weight = 0.5f32;
     let mut min_component = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
@@ -69,11 +75,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--slab-blocks" => slab_blocks = next()?.parse()?,
             "--depth-maps" => depth_maps = Some(PathBuf::from(next()?)),
             "--depth-maps-only" => maps_only = true,
+            "--fill-weight" => fill_weight = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
     let ply = ply.ok_or("--ply <scene.ply> is required")?;
     let data = data.ok_or("--data <colmap root> is required")?;
+    if fill_weight.is_nan() || fill_weight <= 0.0 {
+        return Err("--fill-weight must be positive".into());
+    }
     // Depth maps' small components are mostly surface, not floaters.
     opts.min_component = min_component.unwrap_or(if depth_maps.is_some() {
         0
@@ -136,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             maps.as_deref().map(|m| DepthMaps {
                 maps: m,
                 fill_from_splat: !maps_only,
+                fill_weight,
             }),
         )?
     } else {
