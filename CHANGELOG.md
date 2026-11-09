@@ -782,6 +782,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **visloc-mvs `--deformable`: repeatable runs, in APD-MVS's order.**
+  - **The race.** A weak pixel's anchors can be of its own colour. On CUDA
+    it read their planes while the same propagation rewrote them, so two
+    runs differed (office: 0.3 points of F1).
+  - **The fix.** Each deformable iteration now updates the pixels without
+    anchors of both colours first, then the weak pixels with anchors, on
+    the CPU and on CUDA.
+  - **Result.** Two runs of office give the same maps bit for bit. With 20
+    sources at 1600 px, office / kicker / playground score 77.3 / 83.7 /
+    70.5% (docs/mvs.md, "Repeatable runs, in APD's order").
+  - **Unchanged.** The wgpu shader, and passes without deformable patches.
+
 - **A fisheye pixel past the lens's reach unprojected to a ray.** An
   `OPENCV_FISHEYE` (or radial fisheye) lens's radius peaks at some angle,
   and the pixels beyond it, such as the corners past a 200° lens's image
