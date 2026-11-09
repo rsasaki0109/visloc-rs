@@ -362,7 +362,24 @@ before the two-pixel backward:
   and within that of the three earlier dense runs (22.71–23.22 dB).
 - **Time saved.** It saves 4–6% of the training time. Refines and the
   other stages make up the rest of a step.
-- **Still opt-in** until it has been checked on more scenes.
+
+Four ETH3D scenes at 1600 px, with the two-pixel backward, 30k steps,
+every 8th view held out, one run each. PSNR / SSIM of the held-out views:
+
+| Scene | float | bf16 | Training time (float / bf16) |
+|---|---|---|---|
+| office | 21.82 / 0.909 | 21.19 / 0.912 | 340 / 345 s |
+| terrains | 26.20 / 0.897 | 25.77 / 0.896 | 476 / 462 s |
+| playground | 19.36 / 0.701 | 19.54 / 0.701 | 743 / 696 s |
+| kicker | 23.45 / 0.802 | 22.96 / 0.802 | 414 / 380 s |
+
+- **bf16 is 0.34 dB lower on average.** It is lower on three of the four
+  scenes; the SSIM is the same.
+- **The spread is as large.** The same float training before the
+  two-pixel backward gave 22.31 dB on office and 25.79 on terrains: one
+  run moves by about 0.5 dB. The gap lies within that, but three of the
+  four scenes point the same way.
+- **It stays opt-in.** It saves 5% of the training time on these scenes.
 
 ## Rasterizer timing on synthetic views
 
@@ -866,6 +883,38 @@ better depth. The meshes above, made again from those maps
   as with the default maps.
 - **Cost.** The APD maps take about four times as long: 397, 905 and
   824 s, against 108, 209 and 194 s.
+
+**One splat for both?** The copy renders worse than the plain splat. These
+runs tried to keep one splat good for both. Each is 3k steps from the plain
+splat on the default maps' prior, without refine. The table gives the
+held-out PSNR, then F1 of the hybrid with the APD maps (from the expected
+depth; the plain splat's from the planar median):
+
+| Splat | office | terrains | playground | mean |
+|---|---|---|---|---|
+| plain | 22.31 dB, 68.9% | 25.79 dB, 82.9% | 19.27 dB, 68.0% | 22.46 dB, 73.3% |
+| copy, prior 30 (above) | 20.05 dB, 75.3% | 23.53 dB, 83.7% | 18.45 dB, 70.4% | 20.68 dB, 76.5% |
+| prior 30, every SH band from the start | 20.38 dB, 74.9% | 23.93 dB, 83.5% | 18.34 dB, 70.5% | 20.88 dB, 76.3% |
+| prior 10, every SH band | 20.13 dB, 74.6% | 24.57 dB, 83.5% | 18.62 dB, 70.0% | 21.10 dB, 76.0% |
+| prior 3, every SH band | 20.81 dB, 73.1% | 25.04 dB, 83.4% | 18.97 dB, 70.5% | 21.61 dB, 75.7% |
+
+And on office alone:
+
+| Splat | PSNR | Hybrid |
+|---|---|---|
+| no prior, every SH band | 22.22 dB | 63.5% |
+| the copy's colours alone trained 3k / 10k more steps (shapes frozen) | 19.94 / 19.83 dB | 75.3% (the copy's mesh) |
+| prior 30 at the final learning rates, no aux losses, 3k / 10k steps | 20.41 / 20.49 dB | 73.1 / 75.6% |
+
+- **The prior costs the images.** Without it, 3k steps keep office at
+  22.22 dB. At weight 3 it already loses 1.5 dB.
+- **The colours cannot win them back.** The copy's shapes are what the
+  mesh needs, and its images suffer from them. Training its colours alone
+  lowers the held-out PSNR further (19.9 dB).
+- **Neither does the schedule.** The final learning rates do not help,
+  and raising the SH degree again from 0 costs 0.36 dB without a prior.
+- **So it stays two splats.** Weight 3 is the middle ground: 0.85 dB below
+  the plain splat, and 0.8 points below the copy's hybrid.
 
 ## TSDF on the GPU
 
