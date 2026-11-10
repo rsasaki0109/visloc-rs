@@ -170,5 +170,60 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual((late / "mav0" / "cam0" / "data").resolve(), (inner / "mav0" / "cam0" / "data").resolve())
 
 
+class FillLateStartTests(unittest.TestCase):
+    """The poses before a late start come from the VIO run backwards, unless that run fails or misses the late one."""
+
+    def fill(self, speed=1.2, drift=0.0, crash=False):
+        """fill_late_start on a walk whose VIO started 60 s in; the VIO run backwards walks at `speed` and drifts
+        `drift` m/s away from the late one. Returns (the late trajectory, the result, the VIO's --euroc-dir)."""
+        import tempfile
+        from unittest import mock
+        root = Path(tempfile.mkdtemp())
+        inner = root / "seq"
+        for cam in ("cam0", "cam1"):
+            (inner / "mav0" / cam / "data").mkdir(parents=True)
+            (inner / "mav0" / cam / "data.csv").write_text(
+                "#timestamp [ns],filename\n" + "".join(f"{t * 50_000_000},{t}.png\n" for t in range(2000)))
+        (inner / "mav0" / "imu0").mkdir(parents=True)
+        (inner / "mav0" / "imu0" / "data.csv").write_text(
+            "#timestamp [ns],w_x,w_y,w_z,a_x,a_y,a_z\n" + "".join(f"{t * 10_000_000},0,0,0,0,0,9.81\n" for t in range(10_000)))
+        late = root / "late.tum"
+        late.write_text("".join(f"{t * 0.05:.9f} {1.2 * t * 0.05:.9f} 0 0 0 0 0 1\n" for t in range(1200, 2000)))
+        folders = []
+
+        def vio(command, **kwargs):  # the reversed folder's frames, walked back from where the late VIO is at 80 s
+            folder = command[command.index("--euroc-dir") + 1]
+            folders.append(folder)
+            if crash:
+                raise RuntimeError("the VIO crashed")
+            rows = (folder / "mav0" / "cam0" / "data.csv").read_text().splitlines()[1:]
+            first = int(rows[0].split(",")[0])
+            out = command[command.index("--out-dir") + 1] / "trajectory.tum"
+            out.write_text("".join(
+                f"{int(r.split(',')[0]) // 10 ** 9}.{int(r.split(',')[0]) % 10 ** 9:09d} "
+                f"{96.0 - speed * (int(r.split(',')[0]) - first) * 1e-9:.9f} "
+                f"{drift * (int(r.split(',')[0]) - first) * 1e-9:.9f} 0 0 0 0 1\n" for r in rows))
+
+        with mock.patch.object(submission, "run", vio), mock.patch.object(submission, "log", lambda m: None):
+            result = submission.fill_late_start(make_args(), "sequence_4_2", inner, Path("calib.json"),
+                                                Path("cfg.json"), late, 60, 4, root, True)
+        return late, result, folders[0]
+
+    def test_a_walk_run_backwards_fills_the_first_minute(self):
+        late, filled, folder = self.fill()
+        self.assertEqual(folder.name, "reversed")
+        self.assertNotEqual(filled, late)
+        rows = [[float(v) for v in r.split()] for r in filled.read_text().splitlines()]
+        self.assertEqual(len(rows), 2000)  # a pose at every frame
+        for i in (0, 600, 1299, 1300, 1999):  # joined at 65 s
+            self.assertAlmostEqual(rows[i][0], i * 0.05, places=6)
+            self.assertAlmostEqual(rows[i][1], 1.2 * i * 0.05, places=4)
+
+    def test_a_run_backwards_that_runs_away_or_misses_the_late_one_is_not_used(self):
+        for failed in ({"speed": 6.0}, {"drift": 1.0}, {"crash": True}):
+            late, result, _ = self.fill(**failed)
+            self.assertEqual(result, late, failed)
+
+
 if __name__ == "__main__":
     unittest.main()

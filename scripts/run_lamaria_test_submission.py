@@ -104,6 +104,12 @@ On a walking track (not Moving platform) averaging more than 4 m/s over
 10 s counts as diverging too (`runaway`; test sequence_4_2 ran away for
 60 s at up to 12 m/s from 10 s), and the last starts follow the end of the
 runaway; if every start fails, the attempt that ran away least is used.
+A late start's missing poses are filled in from the same VIO run backwards in
+time over the recording's first seconds and joined to the late one 5 s after
+its start (scripts/lamaria_reversed_start.py; `--no-fill-late-start` skips
+it): on seven training sequences started 60 s late the chain gains a median
+4.2 with them (docs/lamaria_batch_ba.md#the-poses-before-a-late-start). They
+stay missing if that run diverges too or the two do not meet within 0.5 m.
 If the BA chain still fails, the VIO trajectory is submitted.
 By day the chain then matches once more after its pass, guided by the pass's
 trajectory, and solves again (lamaria_ba_chain.py --rematch; `--no-ba-rematch`
@@ -384,6 +390,43 @@ def late_start(inner: Path, out: Path, seconds: float) -> Path:
     return out
 
 
+FILL_OVERLAP_S = 20.0  # the reversed run starts this long after the late start, to settle before the join
+# The two runs' distance at the join from which the fill is dropped: 0.01-0.15 m on seven training sequences
+# started 60 s late, 24 m on sequence_1_19, whose late VIO diverges
+FILL_MAX_RESIDUAL_M = 0.5
+
+
+def fill_late_start(args, seq: str, inner: Path, calibration: Path, config: Path, trajectory: Path,
+                    seconds: float, track: int, work: Path, submit_vio: bool) -> Path:
+    """`trajectory`, of a VIO started `seconds` into the recording, with the poses before that start from
+    the same VIO run backwards in time (lamaria_reversed_start.py); `trajectory` itself if that run fails as
+    a VIO does (`vio_failure`) or the two do not meet within FILL_MAX_RESIDUAL_M."""
+    try:
+        import lamaria_reversed_start as fill  # numpy and scipy, the BA's dependencies
+        folder = work / "reversed"
+        mirror = fill.reversed_start(inner, folder, seconds + FILL_OVERLAP_S)
+        out = work / "vio_reversed"
+        out.mkdir(exist_ok=True)
+        command, candidates = estimator_command(args, folder, calibration, out, config, submit_vio)
+        run(command, check=True)
+        backward = fill.forward_times(next(t for t in candidates if t.is_file()), mirror, work / "vio_reversed.tum")
+        failure = vio_failure(backward, track)
+        if failure:
+            log(f"{seq}: WARN the VIO run backwards diverged ({failure:.0f} s); the first {seconds:.0f} s stay empty")
+            return trajectory
+        filled = work / "vio_filled.tum"
+        residual = fill.join(trajectory, backward, inner / "mav0", filled, log=lambda m: log(f"{seq}: {m}"))
+        if residual > FILL_MAX_RESIDUAL_M:
+            log(f"{seq}: WARN the VIO run backwards meets the late one at {residual:.2f} m; "
+                f"the first {seconds:.0f} s stay empty")
+            return trajectory
+        log(f"{seq}: the first {seconds:.0f} s filled from the VIO run backwards")
+        return filled
+    except Exception as error:  # the late start's trajectory scores without them
+        log(f"{seq}: WARN filling the late start failed ({error!r}); the first {seconds:.0f} s stay empty")
+        return trajectory
+
+
 def keep_attempt(trajectory: Path, out: Path) -> Path:
     """A copy of a VIO attempt's trajectory, which the next attempt overwrites."""
     shutil.copyfile(trajectory, out)
@@ -501,6 +544,9 @@ def main() -> int:
                         help="re-align the IMU in time and rotate the camera rig by the "
                              "per-device refinement learned on training data (default on; "
                              "needs --imu-rectify; docs/lamaria_drift_analysis.md)")
+    parser.add_argument("--fill-late-start", action=argparse.BooleanOptionalAction, default=True,
+                        help="fill the poses before a late VIO start from the VIO run backwards in time "
+                             "(scripts/lamaria_reversed_start.py; default on)")
     parser.add_argument("--threads", type=int, default=12)
     parser.add_argument("--work-dir", type=Path, default=Path("lamaria_submission/work"))
     parser.add_argument("--slam-dir", type=Path, default=Path("lamaria_submission/slam"))
@@ -632,6 +678,9 @@ def main() -> int:
                     failure, trajectory = min(attempts, key=lambda a: a[0])
                     log(f"{seq}: WARN the VIO diverged at every start; submitting {trajectory.name} "
                         f"({failure:.0f} s run away)")
+                elif tried and args.fill_late_start:  # test sequence_4_2: no poses over its first minute
+                    trajectory = fill_late_start(args, seq, inner, variant_a, fallback, trajectory, tried, track,
+                                                 work, submit_vio)
             if args.ba_chain:
                 learned = pass_features(args, track, device_serial(calib_dir, seq))
                 log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass)" if learned else ")"))
