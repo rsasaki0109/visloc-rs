@@ -107,6 +107,9 @@ SfM:
   --back-camera-mask FILE  the back lens's --camera-mask
   --no-refine-intrinsics   keep the intrinsics fixed
   --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
+  --focal-prior-sigma S    a focal length known well (--focal or EXIF): the mapper
+                           holds it, the final refinement keeps it within S of it
+                           (relative; 1e-5 holds it)
   --exhaustive-max 300     match every pair up to this many photos
   --window 20              past --exhaustive-max: match a sliding window
   --retrieval K            past --exhaustive-max: also the K most similar photos
@@ -186,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Skip the final intrinsics refinement above this many
             // registered photos (default: never).
             "--refine-intrinsics-max" => sfm.refine_intrinsics_max_images = next()?.parse()?,
+            "--focal-prior-sigma" => sfm.focal_prior_sigma = Some(next()?.parse()?),
             // Match every pair up to this many photos; beyond it, a sliding
             // window of `--window` photos over the sorted file names.
             "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,

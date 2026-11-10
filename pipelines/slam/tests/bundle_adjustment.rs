@@ -190,6 +190,50 @@ fn refine_intrinsics_recovers_perturbed_focal_length() {
 }
 
 #[test]
+fn focal_prior_holds_the_focal_length_by_its_weight() {
+    // The perturbed-focal setup (truth fx = fy = 500), with a prior at 510:
+    // a tight one holds the focal there, a loose one leaves it to the data,
+    // and one in between lands between, with the dense and the sparse solver.
+    let solve = |sigma: f64, linear_solver: LinearSolver| {
+        let mut ba = truth_bundle();
+        ba.camera = Camera::pinhole(1, 640, 480, 520.0, 515.0, 326.0, 233.0);
+        ba.fix_pose(10);
+        ba.fix_pose(20);
+        for (id, _) in world_grid() {
+            ba.fix_landmark(id);
+        }
+        ba.optimize(&BaConfig {
+            refine_intrinsics: true,
+            focal_prior: Some((510.0, sigma)),
+            linear_solver,
+            ..BaConfig::default()
+        })
+        .expect("BA with a focal prior");
+        let (fx, fy, _, _) = ba.camera.intrinsics().unwrap();
+        (fx, fy)
+    };
+    for linear_solver in [LinearSolver::Dense, LinearSolver::Sparse] {
+        let (fx, fy) = solve(1e-3, linear_solver);
+        assert!(
+            (fx - 510.0).abs() < 0.05 && (fy - 510.0).abs() < 0.05,
+            "{linear_solver:?}, tight prior: fx={fx}, fy={fy} (prior 510)"
+        );
+        let (fx, fy) = solve(1e4, linear_solver);
+        assert!(
+            (fx - 500.0).abs() < 0.5 && (fy - 500.0).abs() < 0.5,
+            "{linear_solver:?}, loose prior: fx={fx}, fy={fy} (truth 500)"
+        );
+        // Two free cameras' worth of data weigh the focal length about as
+        // much as a prior of 2 px.
+        let (fx, fy) = solve(2.0, linear_solver);
+        assert!(
+            fx > 500.5 && fx < 509.5 && fy > 500.5 && fy < 509.5,
+            "{linear_solver:?}, prior in between: fx={fx}, fy={fy}"
+        );
+    }
+}
+
+#[test]
 fn shared_focal_keeps_fx_equal_to_fy_while_recovering_focal_and_distortion() {
     // Same setup as the perturbed-focal test, but with distortion in the data
     // and an anisotropic wrong start (fx 520 / fy 515). With `shared_focal` the

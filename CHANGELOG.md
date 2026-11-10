@@ -6,6 +6,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`gsplat_photos --focal-prior-sigma S`: a known focal length (opt-in).**
+  - **How.** The mapper holds `--focal` (or EXIF's) and refines only the
+    principal point. The final refinement keeps `fx` and `fy` within `S`
+    (relative) by a Gaussian prior (`BaConfig::focal_prior`). 1e-5 holds
+    it on a few hundred photos.
+  - **SmallCity's three 500-photo subsets.** The median camera error falls
+    from 16.7 to 14.3 cm on average (500–999 25.1 → 20.5, 1000–1499 8.6 →
+    3.6, 0–499 16.3 → 18.7), and every maximum falls.
+  - **ETH3D from the ground-truth focal length.** Seven scenes go from
+    0.46 to 0.37 cm (docs/photos_to_splat.md, "A known focal length").
+  - Also on `gsplat_photos_cuda`, with `--retrieval` and
+    `--no-refine-intrinsics`.
+
 - **`gsplat_train_cuda --init <scene.ply>`: training from a trained
   splat.**
   - **A geometry copy.** A plain splat's copy is fine-tuned for 3k steps

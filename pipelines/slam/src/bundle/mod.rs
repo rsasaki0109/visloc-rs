@@ -698,6 +698,14 @@ pub struct BaConfig {
     /// `refine_intrinsics`; a camera whose `fx != fy` starts from their mean.
     /// **`false` by default** (the joint solve is then bit-identical to before).
     pub shared_focal: bool,
+    /// A Gaussian prior `(f0, sigma)`, in pixels, on `fx` and `fy` while
+    /// `refine_intrinsics` refines them: each adds `((f - f0) / sigma)^2` to
+    /// the cost, where a reprojection residual of one pixel adds 1. For a
+    /// focal length known well enough (a trusted EXIF value or a
+    /// calibration) on captures that observe it weakly, such as a street
+    /// circuited by car or bicycle. **`None` by default** (the joint solve is
+    /// then bit-identical to before).
+    pub focal_prior: Option<(f64, f64)>,
     /// Run the per-observation assembly, per-landmark Schur reduction, and
     /// back-substitution loops of [`BundleAdjustment::optimize_weighted`]'s
     /// Levenberg-Marquardt iteration on the `rayon` pool (see the module's
@@ -745,6 +753,7 @@ impl Default for BaConfig {
             refine_distortion: false,
             refine_tangential_distortion: false,
             shared_focal: false,
+            focal_prior: None,
             parallel: false,
             matrix_free_ba: false,
         }
