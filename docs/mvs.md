@@ -1064,6 +1064,34 @@ APD with 20 sources at 1600 px, F1 at 2 cm:
 - **wgpu** still runs each colour's pixels together and keeps the race.
   There is no NVIDIA Vulkan driver here to test a change.
 
+**Tried and not adopted: APD's fusion rule for weak pixels.** APD-MVS's
+fusion asks more of the pixels its last pass classes as weak: a mean
+consistency of 0.45, against 0.3 for the others
+([notes](apd_mvs_code_notes.md), §6). For this test the last pass sorted
+its pixels too, which left the cloud the same bit for bit. Each scene's
+maps were saved once, with their classes, and fused again with other
+thresholds. APD with 20 sources at 1600 px, F1 at 2 cm:
+
+| Weak pixels / the others | office | playground | kicker | terrace | pipes | mean |
+|---|---|---|---|---|---|---|
+| 0.15 / 0.15 (the default) | 77.29% | 70.54% | 83.72% | **88.67%** | **81.13%** | 80.27% |
+| 0.2 / 0.15 | 77.32% | 70.80% | 84.13% | 88.67% | 80.82% | 80.35% |
+| 0.25 / 0.15 | **77.33%** | 70.98% | 84.51% | 88.64% | 80.45% | **80.38%** |
+| 0.3 / 0.15 | 77.29% | **71.06%** | 84.89% | 88.61% | 79.99% | 80.37% |
+| 0.35 / 0.15 | 77.15% | 70.99% | **85.22%** | 88.56% | 79.35% | 80.25% |
+| 0.45 / 0.15 | 76.23% | 70.43% | | | | |
+| 0.45 / 0.3 (APD's) | 75.99% | 66.80% | | | | |
+| 0.3 / 0.3 | 77.12% | 68.33% | | | | |
+
+- **A trade, scene by scene.** A stricter weak pixel buys accuracy with
+  completeness. kicker gains up to 1.5 points, playground 0.5. pipes, whose
+  maps are the least complete, loses as much. The mean moves by 0.1 point
+  at most.
+- **APD's own thresholds** cost office 1.3 points and playground 3.7.
+  Raising every pixel's threshold to 0.3 costs them 0.2 and 2.2.
+- The default stays one threshold for every pixel, as ACMMP's mean rule
+  ([below](#fusion-settings)) already trades the same way.
+
 ### Fusion settings
 
 The same depth maps fused with different rules (CPU runs with one
