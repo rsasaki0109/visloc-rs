@@ -391,7 +391,7 @@ def late_start(inner: Path, out: Path, seconds: float) -> Path:
 
 
 FILL_OVERLAP_S = 20.0  # the reversed run starts this long after the late start, to settle before the join
-# The two runs' distance at the join from which the fill is dropped: 0.01-0.15 m on seven training sequences
+# The two runs' distance at the join from which the fill is dropped: 0.01-0.13 m on seven training sequences
 # started 60 s late, 24 m on sequence_1_19, whose late VIO diverges
 FILL_MAX_RESIDUAL_M = 0.5
 

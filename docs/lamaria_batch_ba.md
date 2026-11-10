@@ -2536,6 +2536,119 @@ VIO's trajectories), the ratio of the path length to the pseudo-GT's
 correlates with the |accel| spread at −0.15 … +0.30, with the sign changing
 between sequences.
 
+### What a perfect height would add
+
+The glasses record a barometer, which the chain does not read. Before reading
+it: what is the height worth? The evaluator aligns the estimate to the control
+points in 3D, weighted by the surveyed sigmas (0.01 m horizontally, 0.03 m in
+height on the 3–14 control points per sequence whose height was surveyed), and
+scores the horizontal error only. The height counts through the fit alone.
+
+On the seeds' runs ([All twelve training sequences under the
+seeds](#all-twelve-training-sequences-under-the-seeds)), the evaluator's
+triangulated control points are kept and the Sim(3) is fitted again with their
+height set to the surveyed one, which is more than any height sensor could
+give:
+
+| Seed | As evaluated | With a perfect height | Difference |
+|---|---:|---:|---:|
+| 1 | 66.99 | 67.07 | +0.09 |
+| 2 | 66.83 | 67.02 | +0.20 |
+| 3 | 67.82 | 67.97 | +0.15 |
+
+The means are over the twelve sequences; the refit with the heights as they
+are gives the evaluator's score back within 0.06 on each. Per sequence, seed 1
+moves by −0.90 (sequence_3_18) to +0.63 (sequence_1_19).
+
+- **The barometer was not read.** A perfect height adds 0.1–0.2 to the mean,
+  below what decides anything here ([How far the chain moves for
+  nothing](#how-far-the-chain-moves-for-nothing)).
+- **The height is not what the chain gets wrong.** After the alignment the
+  control points are 0.13–0.83 m rms off in height on nine sequences of seed
+  1, 1.72 m on sequence_3_18, 2.10 m on 5_11 and 4.80 m on 5_12, against
+  0.10–1.89 m horizontally on the walks and 8.8–25.2 m on the two Moving
+  ones.
+
+### The poses before a late start
+
+A VIO that diverges from the recording's first seconds starts again 10, 30 or
+60 s in (`LATE_STARTS_S` in
+[`run_lamaria_test_submission.py`](../scripts/run_lamaria_test_submission.py)),
+and the estimate then has no poses before that start. In submission 7 that is the
+first 60 s of test sequence_4_2 and the first 10 s of sequence_1_15: their
+estimates begin 59.7 s and 9.6 s after the recording's first GPS row. The
+other 61 begin before theirs, and all 63 run at 20 Hz without a gap, to within
+1 s of the last GPS row.
+
+The missing start is not free. In each of the twelve training recordings one
+control point is seen only within the first 60 s (first seen at 5–23 s, last
+at 18–48 s). In six of them it is seen only within the first 30 s, and in
+none only within the first 10 s.
+
+[`scripts/lamaria_reversed_start.py`](../scripts/lamaria_reversed_start.py)
+fills the start from the same VIO, run backwards in time:
+- **The reversed recording.** The first minute's frames in reverse order under
+  mirrored timestamps (t′ = C − t), the gyroscope negated, the accelerometer
+  as it is: the specific force does not change under time reversal. The run
+  starts 20 s after the late start, where the VIO holds, and ends at the
+  recording's first frame.
+- **The join.** The reversed run's poses, back under the frames' own times,
+  are moved onto the late VIO's by one rigid transform, fitted over the 5 s
+  of common poses around 5 s after the late start. Every frame before that
+  gets the reversed run's pose; the late VIO's poses from there on stay as
+  they are.
+- **The guards.** The reversed run goes through the same divergence check as
+  any VIO, and the two runs must meet within 0.5 m rms at the join. Otherwise
+  the estimate keeps its late start.
+
+The chain then runs from the filled trajectory as from any VIO. Checked on
+seven walking training sequences, one run each: the VIO started 60 s late on
+purpose, on the IMU as recorded, and the chain run from it as seed 1 runs it
+([All twelve training sequences under the
+seeds](#all-twelve-training-sequences-under-the-seeds): seed 1's IMU noise,
+the run's SIFT keyframes; from the late VIO alone, without the keyframes
+before its first pose). The first column is seed 1 itself, whose VIO starts
+with the recording, and "first 60 s cut" is that estimate without its first
+60 s of poses:
+
+| Sequence | VIO from the start | First 60 s cut | Started 60 s late | Filled | Filled − late | Join |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_1_20 | 84.33 | 77.99 | 84.78 | 87.41 | +2.6 | 0.046 m |
+| sequence_2_11 | 88.12 | 84.24 | 71.47 | 76.28 | +4.8 | 0.007 m |
+| sequence_2_12 | 50.80 | 47.55 | 47.59 | 51.80 | +4.2 | 0.054 m |
+| sequence_3_17 | 80.08 | 76.50 | 43.65 | 76.64 | +33.0 | 0.028 m |
+| sequence_3_18 | 55.01 | 55.08 | 55.00 | 56.53 | +1.5 | 0.027 m |
+| sequence_4_10 | 58.03 | 56.03 | 27.14 | 26.28 | −0.9 | 0.130 m |
+| sequence_4_11 | 70.86 | 64.94 | 65.10 | 70.11 | +5.0 | 0.048 m |
+
+- **Six of the seven rise, by a median of 4.2.** On those six the pose recall
+  at 5 m goes from 92.7–96.5 % to 100 %. Losing the first 60 s of poses alone
+  costs 2.0–6.3 on six sequences and nothing on sequence_3_18.
+- **sequence_4_11**: the first control point, seen at 14–48 s, comes back
+  0.96 m off, against 0.27 m with the VIO from the start. The control-point
+  recall at 1 m goes from 66.7 to 80.0 %.
+- **sequence_3_17** loses 36 points to the late start itself and gets 33 back
+  (control-point recall at 1 m 7.4 → 92.6 %). Why its chain from the late VIO
+  falls that far was not looked into.
+- **sequence_4_10**, the night walk, is not helped. The late VIO alone
+  scores 26.8 against 34.7 from the start: the late start costs it the whole
+  sequence, not the first minute. Its pose recall at 5 m falls from 88.9 to
+  72.2 % with the fill.
+- **The join** leaves 0.007–0.130 m rms and 0.12–0.36° between the two runs.
+  The reversed runs' fastest 10 s are 0.99–1.78 m/s, a walk's. Joined 3–10 s
+  after the late start, five of the sequences leave 0.01–0.21 m.
+- **The filled minute** stays 0.12–0.89 m (median over the minute) from the
+  VIO that ran from the recording's start, 0.54–2.04 m at most and 0.28–1.64 m
+  at the first frame, with that VIO moved onto the late one at the join.
+- **sequence_1_19 is not a sample.** Its VIO from 60 s diverges, and both
+  chains fail. The join shows it: 24.2 m and 7.8°. The guard's 0.5 m lies
+  between that and the seven good joins.
+- **The cost** is one more VIO run over 80 s: 19–25 s.
+
+One seed, and 60 s only: a start 10 s late, as on test sequence_1_15, was not
+tried on training. The test driver fills every late start unless
+`--no-fill-late-start` is given.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO

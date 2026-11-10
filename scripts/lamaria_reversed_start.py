@@ -15,7 +15,7 @@ rigid transform that fits the two over --window seconds around --join-after seco
 both have settled. Before the join every frame gets the reversed run's pose, from it on the late VIO's stay as
 they are.
 
-The join's position residual says whether the two runs agree: 0.01-0.15 m on seven training sequences started 60 s
+The join's position residual says whether the two runs agree: 0.01-0.13 m on seven training sequences started 60 s
 late, 24 m on one whose late VIO diverges (docs/lamaria_batch_ba.md#the-poses-before-a-late-start). No ground
 truth is used.
 """
