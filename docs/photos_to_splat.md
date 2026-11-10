@@ -72,6 +72,65 @@ The pipeline has three stages:
    `--normal-weight 0.005` depth-normal loss makes surfaces smoother for
    -0.2 dB.
 
+## A known focal length: `--focal-prior-sigma`
+
+By default the mapper refines the focal length from `--focal` (or EXIF's),
+and the final bundle adjustment refines it again. A capture that observes
+it weakly can then drift: a street circuited on a bicycle, or a few dozen
+photos. `--focal-prior-sigma S` is for a focal length known well, such as a
+calibration or a trusted EXIF value:
+
+- **The mapper holds it.** It refines the principal point only.
+- **The final refinement keeps it near.** A Gaussian prior holds `fx` and
+  `fy` within `S` (relative) of it. A few hundred photos weigh the focal
+  length so heavily that 1e-5 holds it to a hundredth of a pixel, while
+  0.003 lets it drift as far as with no prior at all.
+- **Both.** A prior in the final refinement alone, after a mapper that
+  drifted, did worse on the third subset below (13.6 cm against 8.6): the
+  structure had been built for the other focal length.
+
+SmallCity, three 500-photo subsets of the first pass (CPU SIFT, CUDA
+matching, `--focal 487 --retrieval 15 --max-keypoints 2048`), camera-centre
+error against the release model (median / p90 / max, cm):
+
+| Subset | Default | `--no-refine-intrinsics` | `--focal-prior-sigma 1e-4` | `--focal-prior-sigma 1e-5` |
+|---|---|---|---|---|
+| 0–499 | **16.3** / 41 / 67 | 17.3 / 41 / 1313 | 18.2 / 40 / 57 | 18.7 / 41 / **55** |
+| 500–999 | 25.1 / 31 / 70 | **14.2** / 19 / 41 | 22.6 / 28 / 61 | 20.5 / 25 / 54 |
+| 1000–1498 | 8.6 / 16 / 23 | 3.5 / 8 / 12 | **3.0** / 6 / 8 | 3.6 / 8 / 12 |
+
+- **The median of the three falls from 16.7 to 14.3 cm** with 1e-5, and
+  every subset's maximum falls.
+- **0–499 needs the final refinement.** Without it, a segment the mapper
+  left bent stays up to 13 m off. With the prior it is still repaired, at
+  about 2 cm more median error.
+- **500–999 is not the focal length's alone.** Holding the focal length
+  from the start leaves 20.5 cm. The fixed intrinsics also hold the
+  principal point and skip the final refinement, and reach 14.2 cm.
+
+ETH3D, seven DSLR scenes resampled onto one camera as
+`scripts/eth3d_photos_pose_check.sh` does, resized to 1,600 px
+beforehand, from the ground-truth focal length instead of one 5% off,
+4,096 keypoints; camera-centre error against the ground truth (median /
+p90 / max, cm):
+
+| Scene | Default | `--focal-prior-sigma 1e-5` |
+|---|---|---|
+| pipes | 0.42 / 0.63 / 1.8 | **0.33** / 0.58 / 1.8 |
+| terrace | 0.48 / 1.05 / 1.7 | **0.38** / 0.68 / 1.0 |
+| office | 0.39 / 141 / 146 | **0.26** / 0.54 / 2.7 |
+| kicker | 0.38 / 0.86 / 2.4 | **0.36** / 0.99 / 1.8 |
+| playground | 0.22 / 0.32 / 0.5 | **0.20** / 0.34 / 0.5 |
+| terrains | **0.49** / 0.76 / 1.2 | 0.52 / 0.81 / 1.2 |
+| courtyard | 0.85 / 2.72 / 4.5 | **0.56** / 2.06 / 3.4 |
+
+- **A right focal length is better held.** The median falls on six of the
+  seven scenes, from 0.46 to 0.37 cm on average.
+- **office's p90.** The default refinement leaves at least a tenth of
+  office's cameras about 1.4 m off; held, every one is within 3 cm.
+- **It stays opt-in.** A focal length a few percent off is what the
+  default refinement corrects, and EXIF is not always right.
+
 ## Masks
 
 `--masks DIR` keeps an operator, a monopod or any other object that moves

@@ -102,6 +102,13 @@ pub struct PhotoSfmConfig {
     /// Skip that refinement above this many registered images (its global
     /// bundle adjustments dominate the SfM time on large models).
     pub refine_intrinsics_max_images: usize,
+    /// A focal length known well (`focal_px` or EXIF's), on captures that
+    /// observe it weakly: the mapper holds it, and that refinement keeps
+    /// `fx` and `fy` near it by a Gaussian prior whose standard deviation is
+    /// this fraction of it. A few hundred photos weigh the focal length so
+    /// much that 1e-5 holds it within a hundredth of a pixel, and 0.003
+    /// leaves it free. `None`: the mapper refines it too.
+    pub focal_prior_sigma: Option<f64>,
     /// Past `exhaustive_max`, also match every image with its `retrieval_k`
     /// most similar images by VLAD appearance (0: window only), among the
     /// images more than `window` positions away in file order. The window
@@ -287,6 +294,7 @@ impl Default for PhotoSfmConfig {
             gpu: true,
             refine_intrinsics: true,
             refine_intrinsics_max_images: usize::MAX,
+            focal_prior_sigma: None,
             retrieval_k: 0,
             sift_overrides: Vec::new(),
             match_u8: true,
@@ -2966,8 +2974,13 @@ pub fn build_photo_dataset(
             "ba_refine_extra_params=1".into(),
         ]
     } else if refine_intrinsics {
+        // With `focal_prior_sigma` the focal length is known: the mapper
+        // holds it, and the global refinement keeps it near.
         vec![
-            "ba_refine_focal_length=1".into(),
+            format!(
+                "ba_refine_focal_length={}",
+                u8::from(cfg.focal_prior_sigma.is_none())
+            ),
             "ba_refine_principal_point=1".into(),
         ]
     } else {
@@ -3077,6 +3090,9 @@ pub fn build_photo_dataset(
         // mapper left bent from staying 1–3 m off (max error 282 → 23 cm on
         // one, within about a centimetre on the other two).
         sfm_cfg.ba_config.initial_lambda = Some(1e4);
+        sfm_cfg.ba_config.focal_prior = cfg
+            .focal_prior_sigma
+            .map(|s| (focal_prior, s * focal_prior));
         let r = visloc_slam::incremental_sfm_with_initial_poses(
             &cam,
             &features,

@@ -9,6 +9,7 @@
 //!   cargo run --release -p visloc-gsplat-cuda --features photos --example gsplat_photos_cuda -- \
 //!   --images <folder> --out <work dir> [--max-size 1600] [--focal F] \
 //!   [--camera "MODEL W H PARAMS..." [--refine-camera]] [--exhaustive-max 300] [--window 20] \
+//!   [--retrieval K] [--no-refine-intrinsics | --focal-prior-sigma S] \
 //!   [--max-keypoints 8192] [--mask-black N] [--max-angle DEG] [--masks DIR] \
 //!   [--camera-mask MASK.png] [--flip-mask] \
 //!   [--back-images <folder> --back-camera "MODEL W H PARAMS..." [--back-camera-mask MASK.png]] \
@@ -16,8 +17,10 @@
 //! ```
 //!
 //! `--cpu-match` matches on the CPU instead, for comparison: the matches are
-//! the same, bit for bit. `--mask-black N` writes the working images with
-//! alpha 0 over near-black regions (channels <= N), and `--max-angle DEG`
+//! the same, bit for bit. `--retrieval K`, `--no-refine-intrinsics` and
+//! `--focal-prior-sigma S` are `gsplat_photos`'s. `--mask-black N` writes
+//! the working images with alpha 0 over near-black regions (channels <= N),
+//! and `--max-angle DEG`
 //! past DEG off `--camera`'s axis (e.g. 100: a 200° fisheye's image
 //! circle); `gsplat_train_cuda --alpha-mask` leaves them out of the loss.
 //! `--masks DIR` is `gsplat_photos`'s: per-image PNG masks keep SIFT keypoints
@@ -61,6 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--refine-camera" => sfm.refine_camera = true,
             "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,
             "--window" => sfm.window = next()?.parse()?,
+            "--retrieval" => sfm.retrieval_k = next()?.parse()?,
+            "--no-refine-intrinsics" => sfm.refine_intrinsics = false,
+            "--focal-prior-sigma" => sfm.focal_prior_sigma = Some(next()?.parse()?),
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
             "--masks" => sfm.mask_dir = Some(PathBuf::from(next()?)),

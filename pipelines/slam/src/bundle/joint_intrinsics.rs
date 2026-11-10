@@ -90,7 +90,15 @@ impl BundleAdjustment {
             self.camera.params[1] = f;
         }
 
-        let initial_cost = self.robust_cost_weighted(&kernel, None);
+        // `focal_prior`: ((fx - f0) / sigma)^2 + ((fy - f0) / sigma)^2 on top
+        // of the reprojection cost.
+        let prior_cost = |params: &[f64]| {
+            config.focal_prior.map_or(0.0, |(f0, sigma)| {
+                ((params[0] - f0).powi(2) + (params[1] - f0).powi(2)) / (sigma * sigma)
+            })
+        };
+        let initial_cost =
+            self.robust_cost_weighted(&kernel, None) + prior_cost(&self.camera.params);
         let mut iterations: Vec<BaIterationStats> = Vec::with_capacity(config.max_iterations);
         let mut current_cost = initial_cost;
         let mut current_nonprojectable = self.nonprojectable_observation_count();
@@ -121,7 +129,7 @@ impl BundleAdjustment {
             // intrinsics, so the next iteration's linearization would be
             // identical: reuse it and only re-solve with the larger damping.
             if system.is_none() {
-                let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
+                let (cam_dim_n, mut h_cc, mut b_c, lm_blocks) = self.build_joint_intrinsics_system(
                     &pose_index,
                     &landmark_index,
                     &kernel,
@@ -131,6 +139,17 @@ impl BundleAdjustment {
                     sparse,
                 );
                 debug_assert_eq!(cam_dim_n, cam_dim);
+                if let Some((f0, sigma)) = config.focal_prior {
+                    // Residual (f - f0) / sigma on fx and fy: J^T J and J^T r.
+                    let w = 1.0 / (sigma * sigma);
+                    for j in 0..2 {
+                        b_c[k_off + j] += w * (self.camera.params[j] - f0);
+                        match &mut h_cc {
+                            JointCameraHessian::Dense(h) => h[(k_off + j, k_off + j)] += w,
+                            JointCameraHessian::Sparse { kk, .. } => kk[(j, j)] += w,
+                        }
+                    }
+                }
                 system = Some((h_cc, b_c, lm_blocks));
             }
             let (h_cc, b_c, lm_blocks) = system.as_ref().expect("built above");
@@ -283,7 +302,8 @@ impl BundleAdjustment {
             }
 
             let t_cost = std::time::Instant::now();
-            let cost_after = self.robust_cost_weighted(&kernel, None);
+            let cost_after =
+                self.robust_cost_weighted(&kernel, None) + prior_cost(&self.camera.params);
             let nonprojectable_after = self.nonprojectable_observation_count();
             if std::env::var_os("VISLOC_JOINT_BA_TIMING").is_some() {
                 eprintln!(
