@@ -391,9 +391,11 @@ the filter of upstream's older `keypoint_vio.cpp`.
 - It removes landmarks left with fewer than four observations.
 - It then re-solves for the three iterations after `vio_filter_iteration`.
 
-The default trajectory is bit-identical. The filter has been measured only on
-the ride above, where it changes nothing. A full-sequence comparison is
-still open.
+The default trajectory is bit-identical. On the ride above the filter changes
+nothing. On whole sequences it helps the VIO alone on the night walk
+(sequence_4_10, 34.69 to 57.41), but the chain from the filtered VIO loses 4.0
+on the mean of nine training sequences, so it stays off ([The VIO's outlier
+filter](lamaria_batch_ba.md#the-vios-outlier-filter)).
 
 ### Earth-rotation compensation
 
