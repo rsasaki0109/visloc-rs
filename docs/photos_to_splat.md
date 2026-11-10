@@ -72,7 +72,7 @@ The pipeline has three stages:
    `--normal-weight 0.005` depth-normal loss makes surfaces smoother for
    -0.2 dB.
 
-## A known focal length: `--focal-prior-sigma`
+## A known focal length
 
 By default the mapper refines the focal length from `--focal` (or EXIF's),
 and the final bundle adjustment refines it again. A capture that observes

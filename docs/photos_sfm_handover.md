@@ -121,7 +121,7 @@
    - 配布ビルドでしか起きない問題（足りないファイル、GPU のない環境での動作など）を拾う。
 4. **SfM の精度（CPU、優先度は低い）**:
    - SmallCity 500〜999 の歪みの残り半分（±1.3%）の原因は分かっていない。
-   - 既知の焦点距離を保つ `--focal-prior-sigma`（オプトイン、2026-11-10）は、500〜999 を 25.1 → 20.5 cm、1000〜1499 を 8.6 → 3.6 cm にする（[photos_to_splat.md](photos_to_splat.md#a-known-focal-length---focal-prior-sigma)）。残りの歪みは、主点の補正か最後の BA から来ている（内部パラメータの固定で 14.2 cm）。
+   - 既知の焦点距離を保つ `--focal-prior-sigma`（オプトイン、2026-11-10）は、500〜999 を 25.1 → 20.5 cm、1000〜1499 を 8.6 → 3.6 cm にする（[photos_to_splat.md](photos_to_splat.md#a-known-focal-length)）。残りの歪みは、主点の補正か最後の BA から来ている（内部パラメータの固定で 14.2 cm）。
 
 ## 注意点
 
