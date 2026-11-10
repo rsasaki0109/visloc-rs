@@ -1019,8 +1019,9 @@ completeness:
 - **Accuracy.** The surface only the splat adds is 8% of the hybrid's
   points. It is 42% accurate where the scan sees it, but the scan sees only
   5% of it, so accuracy drops little (86.4% → 86.1%).
-- **Not tried.** A fill that leaves alone the voxels some map has seen
-  would keep those cells.
+- **Tried since.** A fill that leaves alone the voxels some map has seen
+  does not keep them
+  ([below](#tried-and-not-adopted-keeping-the-splat-out-of-the-maps-voxels)).
 
 **Why the median depth lags in a splat trained on a prior.** Each view's
 three depths of the plain splat and of its geometry copy were rendered and
@@ -1050,6 +1051,47 @@ the pixels both have. The relative error, its median and the share within
   depth sits behind the surface (signed median +2.5% on office, +35% on
   terrains), pulled back by what the surface lets through. There the median
   depth is the better one, as the meshes above found.
+
+#### Tried and not adopted: keeping the splat out of the maps' voxels
+
+The analysis above suggested a fill that keeps the splat's depth out of
+the voxels a map has seen. A prototype fused every view's map first,
+marked the voxels the maps updated, then fused every view's splat depth
+(weight 0.5) into the unmarked ones only. Three variants:
+
+1. **Every voxel a map updated**: its truncation band and the free space
+   in front of it.
+2. **Only the maps' truncation bands.** The splat's depth may still go
+   into a map's free space.
+3. **The splat's surface only.** Its truncation band stays out of the
+   maps' bands; its free space goes everywhere, as before.
+
+F1 at 2 cm with the APD maps (GPU TSDF at 1 cm, as above; variant 0 is
+the default, which gave the same scores as the tables above):
+
+| Splat | Variant | office | terrains | playground | mean |
+|---|---|---|---|---|---|
+| geometry copy (expected) | 0 | 75.6% | 84.3% | 70.2% | **76.7%** |
+| | 1 | 75.2% | 84.3% | 68.5% | 76.0% |
+| | 2 | 75.0% | 84.3% | 68.4% | 75.9% |
+| | 3 | 75.7% | 84.3% | 70.2% | **76.7%** |
+| plain (planar median) | 0 | 71.4% | 84.0% | 68.8% | **74.8%** |
+| | 1 | 70.7% | 84.5% | 67.8% | 74.4% |
+| | 2 | 69.9% | 84.4% | 66.9% | 73.7% |
+| | 3 | 71.4% | 84.0% | 68.8% | **74.8%** |
+
+- **The splat's free space keeps the hybrids accurate.** Variants 1 and 2
+  also keep it out of the maps' voxels. Completeness rises by 2.4 to 3.2
+  points on the geometry copy, but accuracy falls by 2.4 to 6.2: office
+  85.4% → 79.9%, playground 71.4% → 65.6% (variant 1). The splat's free
+  space carved away the maps' wrong surface there.
+- **Its surface in the maps' voxels costs nothing.** Variant 3 keeps the
+  free space and drops only that surface. No score moves by more than
+  0.05 points.
+- **terrains stays below its MVS depth alone** (84.6%). Only the plain
+  splat with variant 1 comes close (84.5%), and it loses on the other two
+  scenes. So the moved surface found above does not set terrains' F1.
+- The prototype (`gsplat_mesh_cuda --fill-unseen`) is not merged.
 
 ## TSDF on the GPU
 
@@ -1161,8 +1203,9 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
      does). The median depth lags because it is one splat's depth, while
      the prior trains their blend
      ([where terrains' hybrid loses](#where-terrains-hybrid-loses-and-why-the-median-depth-lags)).
-   - **Open.** A fill that leaves alone the voxels a map has seen, for
-     terrains.
+   - **Tried and not adopted.** A fill that leaves alone the voxels a map
+     has seen: the splat's free space is what keeps the hybrids accurate
+     ([keeping the splat out of the maps' voxels](#tried-and-not-adopted-keeping-the-splat-out-of-the-maps-voxels)).
 2. **Speed.** Per-warp staging takes raster_bwd from about 6 ms to 5 ms
    ([per-warp staging](#per-warp-staging-in-the-backward-pass)); the opt-in
    bf16 moments save 1.9 ms more ([two pixels per thread, and bf16
