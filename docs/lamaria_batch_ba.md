@@ -1253,6 +1253,168 @@ diagnosis only):
 A quarter of the drift goes, the rest stays: it is the VIO's short window,
 which the chain's matches and revisits take out, not its calibration.
 
+### The magnetometer as a compass
+
+The recordings' magnetometer (`mag0`, 10 Hz, in the raw VRS files) is the one
+sensor that measures heading in the world. To see what it could tell the
+chain at best, its field, rectified by the factory model, is fitted against
+the pseudo-GT's rotations over each whole recording: m(t) = R_mag_world(t) F +
+b, with the Earth's field F, a hard-iron offset b and a small correction of the
+CAD magnetometer-to-camera rotation (Cauchy loss, 2 µT). The fit knows the
+answer, so it is an upper bound. Each sample then gives a heading, the
+azimuth of R_world_mag(t) (m(t) − b) against F's, and its error is what the
+magnetometer would tell the chain wrongly. The pseudo-GT's rotations are
+interpolated at the magnetometer's times.
+
+| Sequence | Residual (median) | Heading error, 60 s windows: median, max | 256 s windows: median, max |
+|---|---:|---:|---:|
+| sequence_1_19 | 5.09 µT | 3.75°, 15.16° | 1.55°, 6.77° |
+| sequence_1_20 | 5.67 µT | 4.20°, 20.06° | 2.92°, 5.49° |
+| sequence_2_11 | 6.44 µT | 3.53°, 20.50° | 2.56°, 8.00° |
+| sequence_2_12 | 5.33 µT | 3.38°, 18.11° | 2.07°, 5.36° |
+| sequence_3_17 | 5.34 µT | 2.99°, 32.43° | 0.43°, 3.22° |
+| sequence_3_18 | 5.22 µT | 2.54°, 13.49° | 1.01°, 3.59° |
+| sequence_4_10 | 4.77 µT | 2.56°, 20.55° | 1.50°, 4.77° |
+| sequence_4_11 | 3.56 µT | 1.63°, 9.63° | 1.11°, 1.76° |
+
+A window's error is the median of its samples' errors, and the table gives the
+median and the largest of the windows' absolute errors.
+
+- **The fit itself is sound.** F comes out alike on every recording: 45–47 µT,
+  21–23 µT of it horizontal, inclined by 60–62°. b is 2.0–5.2 µT.
+- **The street's field is not.** The residual, 3.6–6.4 µT at the median, is a
+  sixth to more than a quarter of the horizontal field. A soft-iron fit (a
+  general 3 × 3 in place of the rotation) leaves the residual and the heading
+  errors nearly as they are, so the error does not come from the device: it is
+  the local field along the streets.
+- **The chain holds the heading better.** Its heading changes over 256 s by
+  0.00° on average on sequence_1_20, +0.03° on 2_11, −0.30° on 1_19 and
+  −0.71° on 3_18 ([The gyroscope's share of the
+  drift](#the-gyroscopes-share-of-the-drift)). The magnetometer, even with
+  the fit that knows the answer, is 0.4–2.9° off over 256 s at the median and
+  up to 8°. The heading from the GPS failed the same way: the reference is
+  worse than what the chain already has ([Heading from
+  GPS](lamaria_gps.md#heading-from-gps-a-negative-result)).
+
+### The raw fisheye images
+
+The ASL release's pinhole images keep 115° × 100° of the SLAM cameras' view
+([Far points out of view](#far-points-out-of-view)). The raw VRS images were
+resampled once to a double-sphere camera fitted to the factory model, which
+keeps the whole fisheye, and the chain ran on them from the VIO as it ran on
+the pinhole images. A second run resampled the ASL pinhole images to the same
+double-sphere camera: the same pixels as the pinhole run, through the fisheye
+path. Both against seed 1 of [All twelve training sequences under the
+seeds](#all-twelve-training-sequences-under-the-seeds) (the same noisy IMU,
+the same command), one run each:
+
+| Sequence | Pinhole images | Pinhole images, double sphere | Raw fisheye, double sphere |
+|---|---:|---:|---:|
+| sequence_1_19 | 82.95 | 87.99 | 84.10 |
+| sequence_1_20 | 84.33 | 83.77 | 84.21 |
+| sequence_2_11 | 88.12 | 81.00 | 81.14 |
+| sequence_3_17 | 80.08 | 60.61 | 59.06 |
+| sequence_3_18 | 55.01 | 58.66 | 60.94 |
+| sequence_4_10 | 58.03 | 48.55 | 41.67 |
+| sequence_4_11 | 70.86 | 55.22 | 65.44 |
+| sequence_5_11 | 51.55 | 56.97 | 62.13 |
+| sequence_5_12 | 5.77 | 5.80 | 5.62 |
+| **Mean of nine** | **64.08** | 59.84 | 60.48 |
+| sequence_2_12 | 50.80 | 60.33 | 42.49 |
+
+- **The fisheye path loses on its own.** With the same pixels it costs 4.2 on
+  the mean of nine, up to 19.5 on sequence_3_17. Why is not known: the
+  resampling, or chain settings chosen for the pinhole images.
+- **The wider view then gains little back:** 0.6 on the mean, from −6.9 on
+  sequence_4_10 to +10.2 on 4_11. Dropping the raw fisheye's keypoints beyond
+  60° off each camera's axis lands between the two (sequence_2_11 84.07,
+  3_17 68.11, 4_10 51.73).
+- So the field of view was not tested on its own terms. The loss of the path
+  hides what it could bring, and the chain stays on the pinhole images.
+
+### Both IMUs' gyroscopes
+
+Aria carries two IMUs. imu-left's rectified gyroscope, rotated into
+imu-right's frame and aligned in time (lag fitted, 2.3 ms on sequence_3_18),
+was averaged with the chain's (imu-right's, with the device's corrections),
+so that the two gyroscopes' independent noise and bias would average out. The
+accelerometer stayed imu-right's. The chain ran on it from the VIO as it ran,
+against seed 1 as above:
+
+| Sequence | Seed 1 | Averaged | imu-left mapped onto imu-right first |
+|---|---:|---:|---:|
+| sequence_1_19 | 82.95 | 81.97 | 82.47 |
+| sequence_1_20 | 84.33 | | 82.27 |
+| sequence_2_11 | 88.12 | 74.90 | 85.14 |
+| sequence_3_17 | 80.08 | | 67.56 |
+| sequence_3_18 | 55.01 | 65.46 | 56.64 |
+| sequence_4_10 | 58.03 | | 8.59 |
+| sequence_4_11 | 70.86 | | 55.92 |
+| sequence_5_11 | 51.55 | | 52.40 |
+| sequence_5_12 | 5.77 | | 6.46 |
+| sequence_2_12 | 50.80 | | 63.19 |
+
+The second variant first maps imu-left's gyroscope onto imu-right's by a
+3 × 3 and an offset, least squares over the recording, so that only the
+independent wander averages out. It loses on six of the nine sequences other
+than sequence_2_12. sequence_4_10 falls from 58.03 to 8.59, and the mean of
+the other eight drops by 3.7. The two gyroscopes do not agree to the precision
+the heading needs: on sequence_3_18, after the mapping, their difference
+wanders by 0.4–0.7 mrad/s (std over 10 s windows, per axis), against the
+0.15 mrad/s of vertical bias that drifts sequence_2_12 ([Where the second
+sequences' heading drift comes
+from](#where-the-second-sequences-heading-drift-comes-from)).
+
+### The VIO's outlier filter
+
+The VIO keeps every visual observation, bounded only by its Huber weight.
+`config.vio_filter_outliers` removes those beyond 3 px after each solve ([VIO
+outlier filter](lamaria_drift_analysis.md#vio-outlier-filter)). The VIO alone,
+on the IMU as it is and on seed 1's, one run each:
+
+| Sequence | VIO as it ran | With the filter | Seed 1's IMU | Seed 1's IMU, with the filter |
+|---|---:|---:|---:|---:|
+| sequence_2_11 | 29.94 | 30.44 | 29.96 | 31.61 |
+| sequence_3_18 | 19.94 | 21.18 | 21.05 | 20.87 |
+| sequence_4_10 | 34.69 | 57.41 | 35.89 | 55.17 |
+
+On sequence_4_10, the night walk, the filter takes the VIO's mean error from
+3.4 m to 1.3–1.4 m. The other two move no further than the seed moves them.
+
+The chain then ran from the filtered VIO, against seed 1 of [All twelve
+training sequences under the
+seeds](#all-twelve-training-sequences-under-the-seeds) (the same noisy IMU for
+the VIO and the chain, the same command, the run's SIFT keyframes), one run
+each:
+
+| Sequence | Seed 1 | From the filtered VIO | Difference |
+|---|---:|---:|---:|
+| sequence_1_19 | 82.95 | 80.27 | −2.7 |
+| sequence_1_20 | 84.33 | 74.98 | −9.3 |
+| sequence_2_11 | 88.12 | 85.97 | −2.1 |
+| sequence_3_17 | 80.08 | 71.27 | −8.8 |
+| sequence_3_18 | 55.01 | 54.02 | −1.0 |
+| sequence_4_10 | 58.03 | 43.81 | −14.2 |
+| sequence_4_11 | 70.86 | 70.95 | +0.1 |
+| sequence_5_11 | 51.55 | 54.48 | +2.9 |
+| sequence_5_12 | 5.77 | 5.01 | −0.8 |
+| **Mean of nine** | **64.08** | 60.08 | −4.0 |
+| sequence_2_12 | 50.80 | 50.59 | −0.2 |
+
+- **The filter is not adopted.** Seven of the nine fall and the mean falls by
+  4.0, where the seeds move a sequence by 0.2–0.8 ([How far the chain moves
+  for nothing](#how-far-the-chain-moves-for-nothing)). The other two seeds
+  were not run. Neither were R_11_5cp and R_12_10cp, whose extracted images
+  are no longer on disk.
+- **A better VIO did not make a better chain.** On sequence_4_10 the filtered
+  VIO scores 55.17 alone and the chain from it 43.81. Over the first 256 s,
+  against the pseudo-GT, the filtered VIO is 0.00° off in heading and 2.20 m
+  in position. The chain from it is +6.16° and 6.03 m off there, and the chain
+  from the VIO as it ran +1.70° and 1.96 m. Later the filter's chain holds its
+  scale better (std over 256 s windows 0.0084 against 0.0151). The loss is at
+  the online stage's start, not in the VIO. Why the start goes wrong is not
+  known.
+
 ### A device's gyroscope correction
 
 The rectified gyroscope still leaves a correction that depends on the device.

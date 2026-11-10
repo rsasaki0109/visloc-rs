@@ -42,6 +42,68 @@ comes out as +0.11 ± 0.03°/min and costs 8 points. Only sequence_3_18, whose
 heading is off by several degrees, gains clearly, and nothing without ground
 truth tells it from the others.
 
+### What GPS measures of the heading
+
+Per window, the chain's heading against the fixes (a robust 2D similarity in
+the window, relative to the whole sequence's) and against the pseudo ground
+truth. The second is the chain's own error, and the difference of the two is
+the error of measuring it by GPS. Ranges over the six sequences (at 600 s
+over five, of three or four windows each; sequence_1_19 is too short):
+
+| Window | Chain's heading error (RMS) | GPS's error in measuring it | Chain's scale error | GPS's error in measuring it |
+|---|---:|---:|---:|---:|
+| 60 s | 0.1–1.1° | 2.7–6.5° | 0.4–2.2 % | 6.9–14 % |
+| 300 s | 0.07–0.86° | 0.8–1.9° | 0.2–1.0 % | 1.5–5.6 % |
+| 600 s | 0.09–0.75° | 0.14–1.2° | 0.08–0.6 % | 0.3–1.8 % |
+
+The drift rate through the 300 s windows, in °/min:
+
+| Sequence | By the pseudo ground truth | By GPS |
+|---|---:|---:|
+| sequence_1_19 | +0.008 | +0.368 |
+| sequence_1_20 | −0.008 | −0.184 |
+| sequence_2_11 | +0.010 | −0.160 |
+| sequence_3_18 | +0.026 | +0.176 |
+| sequence_4_10 | +0.094 | +0.078 |
+| sequence_4_11 | +0.017 | +0.102 |
+
+On five of the six, GPS's rate is 6–46 times the true one, on two of them
+with the other sign. They agree only on sequence_4_10, whose drift is the
+largest. sequence_3_18 and 4_11
+look alike to GPS (0.10–0.18°/min); both are at 0.02–0.03°/min.
+
+### Taking out only a large drift
+
+A drift can be taken out only when GPS measures it well above its own bias.
+With the rate fitted to all fixes at once (the trajectory's steps turned by
+k·t, then one robust similarity), the six trajectories as they are measure
+−0.02 to +0.22°/min. The test is that of the missed rides: a drift of
+0.3, 0.6 or 1.0°/min is turned into the trajectory, and the measured rate is
+taken out when it is 0.45°/min or more, twice the largest of the six.
+
+| Sequence | As run | +0.3°/min (left as it is) | +0.6°/min | Taken out | +1.0°/min | Taken out |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_1_19 | 82.25 | 55.67 | 39.17 | measured 0.38, left | 27.41 | 62.79 |
+| sequence_1_20 | 88.65 | 48.09 | 34.58 | 79.23 | 22.84 | 79.23 |
+| sequence_2_11 | 89.25 | 45.36 | 28.62 | 85.60 | 15.81 | 85.60 |
+| sequence_3_18 | 54.27 | 44.23 | 22.20 | 59.96 | 9.53 | 59.96 |
+| sequence_4_10 | 59.80 | 43.35 | 23.73 | 61.08 | 10.08 | 61.08 |
+| sequence_4_11 | 71.07 | 50.58 | 39.92 | 62.85 | 29.00 | 62.85 |
+
+- A drift of 0.6°/min or more comes back to 60–86 from 10–40. The result does
+  not depend on the drift put in: the trajectory lands on the heading GPS
+  holds for right, bias included, which is why sequence_1_20 and 4_11 end
+  below their scores as run.
+- A drift of 0.3°/min already costs 10–44 points, and GPS cannot tell it from
+  its bias.
+
+On the walking test sequences (no ground truth involved), the measured rates
+stay within ±0.37°/min but for three. sequence_4_9 measures −0.47 ± 0.21
+(538 fixes); sequence_1_11 and 1_16 sit at the edge of the search with 42
+and 12 fixes. The lowest-scoring walks are below the threshold: sequence_1_2
+at −0.34, 3_3 at −0.24 and 3_12 at −0.14°/min. No submission was made from
+this: the rule would move one sequence, by a rate barely over the threshold.
+
 ## Where GPS helps: jumps of tens of metres
 
 The evaluator fits the trajectory to the control points with a robust Sim(3)
@@ -169,6 +231,8 @@ gain the most: 5_5 by 60.6 and 5_6 by 32.8.
     shortened from 600 m to 214 m.
   - sequence_5_9's falls around its ride at 5.2–7.0 min.
 - **sequence_5_10** has no fix before 7.8 min, after its ride at 56–162 s.
+  It has no fix of any accuracy before 343 s, so nothing could bridge that
+  ride.
   The other nine have fixes from their first 40 s.
 - **Close to the threshold.** sequence_5_1's step is 28.0 m and 5_3's 25.1 m.
   Whether they are rides or a stretch of biased fixes is not known; their
