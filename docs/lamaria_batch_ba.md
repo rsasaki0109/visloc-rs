@@ -2647,7 +2647,52 @@ with the recording, and "first 60 s cut" is that estimate without its first
 
 One seed, and 60 s only: a start 10 s late, as on test sequence_1_15, was not
 tried on training. The test driver fills every late start unless
-`--no-fill-late-start` is given.
+`--no-fill-late-start` is given, and
+[`lamaria_assemble_submission.py`](../scripts/lamaria_assemble_submission.py)
+takes a replacement that adds poses to the base estimate's.
+
+**Test sequence_4_2, rebuilt with the fill** (2026-11-11; not scored when this
+was written, and nothing below uses ground truth):
+
+- **The driver takes submission 4's path again.** The VIO diverges from the
+  recording's start with either configuration and from 10 s and 30 s, and
+  holds from 60 s. The reversed run passes both guards: its fastest 10 s are
+  1.68 m/s, and it meets the late VIO within 0.089 m rms and 0.18°. The
+  estimate has a pose for each of the 32,114 frames, against 30,914.
+- **What the first minute holds**, by eye from the frames: from about 10 to
+  28.5 s the wearer stands over a marker on the ground, and from about 31.5
+  to 35.5 s a lit tram passes alongside. The walk begins at about 34 s: the
+  accelerometer's norm peaks at 14.6 m/s² at most over 10–34 s and at
+  18.1–26.2 m/s² in every 2 s from there to 60 s.
+- **The reversed run does not pass the tram cleanly.** Over 28.5–32 s it
+  moves 10.9 m. The chain's estimate moves 0.60 m there, and the three VIO
+  runs forwards from 0 s and 10 s, which fail only after 32 s, 0.59–0.84 m.
+  Neither guard sees it: over no 10 s does the run exceed the 1.68 m/s
+  above, a walk's, and the join is 30 s later.
+- **The chain takes the 10.9 m out, not all of the damage.** Over 10.5–28.5 s,
+  the stand at the marker (0.98 m rms radius in the chain's estimate), the
+  three forward runs agree in shape within 0.06–0.10 m rms. The reversed run
+  is 1.56–1.63 m rms from them, and the chain's estimate lies between: 0.87–
+  0.95 m from the forward runs, 0.76 m from the reversed one. Over 32–34 s no
+  VIO run holds (the forward ones move 3.7–4.7 m, the reversed one 3.2 m);
+  the chain's estimate moves 0.07 m, as a wearer standing would. Its largest
+  step between two poses in the first 65 s is 0.32 m, at 28.2 s.
+- **The recording's GPS does not decide.** Its reported accuracy over the
+  first minute is 3–13 m, and the chain's estimate lies 7.5 m rms from it
+  over 60–300 s.
+- **Against the submitted estimate**, with a rigid fit over the poses after
+  200 s: from 115 s on the two stay within 0.06–0.25 m (medians per window).
+  Over 60–115 s they do not. The submitted estimate moves at 6.3 m/s over
+  60–65 s (median between poses; 13.1 m/s at most) and at 3.5 m/s over
+  65–70 s, the rebuilt one at 1.6 m/s; over 60–65 s the two are 16 m apart
+  (median) and up to 30 m.
+
+So on sequence_4_2 the fill gives a first minute whose stand at the marker is
+about a metre uncertain in shape and is tied to the rest across the tram by
+the chain's images alone, and a start after 60 s that walks. A guard on the
+reversed run's speed over a few seconds would have tripped here and kept the
+late start; none is added, since no training run has such a case to set it
+on.
 
 ## Usage
 

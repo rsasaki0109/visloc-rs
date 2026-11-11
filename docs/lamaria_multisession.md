@@ -87,8 +87,8 @@ The scripts run in this order:
      sigmas scale by how far it had to bend, relative to the median recording, and the graph is solved again.
    - Each trajectory is corrected between its keyframes by the interpolated change and written as TUM.
 5. Then the usual steps: `basalt_tum_to_lamaria_estimate.py`, a check against the recordings' GPS
-   (`lamaria_gps_agreement.py`), and the zip (`lamaria_assemble_submission.py`, which refuses an estimate whose
-   timestamps differ or that holds a NaN).
+   (`lamaria_gps_agreement.py`), and the zip (`lamaria_assemble_submission.py`, which refuses an estimate that
+   lacks one of the base's timestamps or that holds a NaN).
 
 The odometry weights loosen the recordings that drift. In submission 8's solve the scales run from 0.44 to 2.20
 (median 1.00). The loosest are sequence_2_2, 3_3, 2_5, 1_18, 1_2 and 2_7. sequence_3_3 and 1_2 were among the

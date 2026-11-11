@@ -4,8 +4,8 @@
     python scripts/lamaria_assemble_submission.py BASE.zip NEW_SLAM_DIR OUT.zip SEQ [SEQ ...]
 
 Only the named sequences are taken from NEW_SLAM_DIR (SEQ.txt); every other entry of BASE.zip is copied as it is.
-Each replacement must keep the base estimate's timestamps and have only finite values, so a submission never loses
-a pose or carries a NaN.
+Each replacement must have a pose at every timestamp of the base estimate and only finite values, so a submission
+never loses a pose or carries a NaN. It may add poses, as a filled late start does (`lamaria_reversed_start.py`).
 """
 import argparse
 import io
@@ -17,10 +17,14 @@ import numpy as np
 
 
 def check(new, old):
-    """Why an estimate cannot replace another (timestamps differ, non-finite values), or None."""
+    """Why an estimate cannot replace another (a pose missing, timestamps out of order, non-finite values), or
+    None."""
     a, b = np.loadtxt(new), np.loadtxt(old)
-    if len(a) != len(b) or not np.array_equal(a[:, 0].astype(np.int64), b[:, 0].astype(np.int64)):
-        return "timestamps differ"
+    ta, tb = a[:, 0].astype(np.int64), b[:, 0].astype(np.int64)
+    if not np.isin(tb, ta).all():
+        return "poses missing"
+    if (np.diff(ta) <= 0).any():
+        return "timestamps not increasing"
     if not np.isfinite(a).all():
         return "non-finite values"
     return None
