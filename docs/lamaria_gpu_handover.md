@@ -46,7 +46,7 @@
   - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。VIO では今も見落とすが、提出 7 から GPS でつないでいる。
   - 提出 9 では、同じ道を通るほかの録画がこのずれの大半を消したが、取り下げた。1 系列ずつ解く限り、このずれは残っている。
 
-## GPU の PC でやったこと（2026-10-27〜11-10）
+## GPU の PC でやったこと（2026-10-27〜11-11）
 
 | やったこと | 結果 | 記録 |
 |---|---|---|
@@ -68,13 +68,16 @@
 | 2 つの IMU のジャイロを平均する（2026-11-04） | 9 系列中 6 系列で下がる（4_10 は 58.0 → 8.6）。2 つのジャイロの差のゆらぎ（0.4〜0.7 mrad/s）が、向きのずれを生む鉛直バイアス（0.15 mrad/s）より大きい。採らない | [Both IMUs' gyroscopes](lamaria_batch_ba.md#both-imus-gyroscopes) |
 | VIO の外れ値フィルター（`config.vio_filter_outliers`）を入れる（2026-11-10） | VIO だけなら夜の 4_10 が 34.7 → 57.4 に上がるが、そこからチェーンを通すと 9 系列中 7 系列で下がり、平均が 4.0 下がる（種 1 どうしの比較。4_10 は 58.0 → 43.8）。採らない | [The VIO's outlier filter](lamaria_batch_ba.md#the-vios-outlier-filter) |
 | マッチャーを FlexGlue や VisMatch のものに替える | FlexGlue は固定ペアで位置が決まる数が 2〜5 倍になるが、学習 8 系列のグラフでは LightGlue を超えない（504〜505 対 510.1）。RoMa v2 は GPU を共有した状態で、最初のマップの分も 1 時間で終わらなかった。採らない | [Other matchers](lamaria_multisession.md#other-matchers-a-negative-result) |
+| 乗車の前後で区間ごとに回転を持たせる（GPS で測る。2026-11-11） | 両側の区間が大きい 5_5 と 5_9 では、回転の差は 1.1° と 6.8° で、乗車のない歩行を同じ時刻で切ったときの差に収まる。差が大きく出る区間は、GPS の点が中心から 7〜21 m にしか広がっておらず、回転が決まらない。採らない | [A rotation per piece: not measurable](lamaria_gps.md#a-rotation-per-piece-not-measurable) |
+| 気圧計で高さを抑える（2026-11-11） | 評価は水平の誤差だけを採点する。基準点の高さを測量値に置き換えて合わせ直しても、学習 12 系列の平均は +0.09〜+0.20。気圧計は読んでいない | [What a perfect height would add](lamaria_batch_ba.md#what-a-perfect-height-would-add) |
+| VIO を途中から始めた録画の、欠けた最初の区間を埋める（時間を逆にした録画に同じ VIO をかけ、遅く始めた VIO につなぐ。2026-11-11） | 学習の歩行 7 系列で、わざと 60 秒遅く始めて確かめた。6 系列が上がる（中央値 +4.2。3_17 は 43.7 → 76.6）。夜の 4_10 は遅い開始そのもので崩れ、埋めても戻らない（27.1 → 26.3）。逆向きの VIO が発散するか、つなぎ目が 0.5 m 以上ずれるときは埋めない。テストで当てはまるのは 4_2（60 秒）と 1_15（10 秒）。テストのドライバーに入れた | [The poses before a late start](lamaria_batch_ba.md#the-poses-before-a-late-start) |
 
 ## 残っている案
 
 - 今の構成（Basalt の VIO と SIFT のバッチ BA）の調整は、どれも 1 回 ±0.3 点以下。学習系列が少ないので、その大きさでは選び方自体があてにならない（提出 6）。
 - **評価の進め方**: 改善案は、IMU に雑音を少し足した種 1〜3 の実行どうしで比べる。対象は学習 12 系列のうち sequence_2_12 を除く 11 系列（基準は種 1〜3 の平均 68.59 ± 0.13）。平均を 0.4 以上上げ、過半の系列を上げれば採る。sequence_2_12 は種だけで 47.5〜57.9 動くので、結果は記録するが判断には使わない。3 種で約 11 時間かかる（[All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds)）。
   - 同じ入力のままの実行は、チェーンの設定を選ぶのに使った 5 系列で約 1.2 点甘く出る。ほかの 7 系列では甘くならない。
-- **条件付きのプラットフォームフィルター**: IMU の速度変化と VIO の速度が食い違うときだけ条件を緩める。学習系列は変わらないはずだが、効果は学習で確かめられない。当たっても平均 +0.4〜0.8。
+- **見落とした乗車**: 提出 7 から GPS でつないでいる（[lamaria_gps.md](lamaria_gps.md)）。以前ここに挙げていた、条件付きでプラットフォームフィルターを緩める案は、これで要らなくなった。乗車（56〜162 秒）の間に GPS の点がない 5_10 は、つなげない。
 - **上位との差（SLAM Dunk と約 18 点）**: 中身の決まった案はない。
   - 残っているずれの大半は、片道のルートで決まらないジャイロの鉛直バイアス。カメラと IMU のどちらからも決まらない（[Where the second sequences' heading drift comes from](lamaria_batch_ba.md#where-the-second-sequences-heading-drift-comes-from)）。
   - 向きを外から押さえる手がかりは、GPS も磁気センサーも、チェーンより粗い。

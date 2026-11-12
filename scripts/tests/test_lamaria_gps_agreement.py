@@ -71,6 +71,24 @@ class AssembleTest(unittest.TestCase):
                 self.assertEqual(a.read("slam/sequence_1_2.txt"), b.read("slam/sequence_1_2.txt"))
                 self.assertEqual(b.read("slam/sequence_1_1.txt"), (d / "new" / "sequence_1_1.txt").read_bytes())
 
+    def test_a_replacement_may_add_poses(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "new").mkdir()
+            t, xy = walk(50)
+            base = d / "base.zip"
+            estimate(d / "a.txt", t[10:], xy[10:])  # a late start
+            with zipfile.ZipFile(base, "w") as z:
+                z.write(d / "a.txt", "slam/sequence_1_1.txt")
+            estimate(d / "new" / "sequence_1_1.txt", t, xy)
+            self.assertEqual(assemble.assemble(base, d / "new", d / "out.zip", ["sequence_1_1"]), 1)
+            with zipfile.ZipFile(d / "out.zip") as z:
+                self.assertEqual(z.read("slam/sequence_1_1.txt"), (d / "new" / "sequence_1_1.txt").read_bytes())
+            order = np.r_[1, 0, np.arange(2, 50)]
+            estimate(d / "new" / "sequence_1_1.txt", t[order], xy[order])
+            with self.assertRaises(SystemExit):
+                assemble.assemble(base, d / "new", d / "out2.zip", ["sequence_1_1"])
+
     def test_a_replacement_must_keep_the_timestamps(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

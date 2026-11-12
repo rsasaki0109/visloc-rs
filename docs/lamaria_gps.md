@@ -167,6 +167,37 @@ the way, to 44–69 from 0–9; over the ramp itself the bridged trajectory is a
 straight line at constant speed. The eight trajectories as they are come out
 unchanged.
 
+## A rotation per piece: not measurable
+
+The model gives the pieces one rotation. Whether the heading also steps
+across a ride was checked on the eight bridged test sequences ([Test set:
+submission 7](#test-set-submission-7)), without ground truth: each piece
+between the ramps gets its own rotation against its fixes, with the shared
+fit's scale, and the turn between two neighbouring pieces is set against the
+same cut on the walking test sequences, which have no ride.
+
+| Sequence | Pieces: length, rms radius of the fixes | Turn | The walks' turn at the same cut: median, largest | Walks |
+|---|---|---:|---:|---:|
+| sequence_5_5 | 648 s, 114 m; 1397 s, 173 m | +1.1° | 1.4°, 10.3° | 44 |
+| sequence_5_9 | 208 s, 63 m; 1029 s, 113 m | −6.8° | 2.3°, 16.9° | 36 |
+| sequence_5_2 | 79 s, 31 m; 1739 s, 213 m | −0.1° | 3.1°, 38.7° | 23 |
+| sequence_5_4 | 63 s, 11 m; 1516 s, 236 m | −3.6° | 3.2°, 27.5° | 21 |
+| sequence_5_7 | 60 s, 3 m; 990 s, 88 m | +0.8° | 2.3°, 23.5° | 26 |
+| sequence_5_1 | 140 s, 7 m; 2212 s, 262 m | −16.1° | 2.4°, 15.2° | 34 |
+| sequence_5_3 | 2089 s, 214 m; 73 s, 10 m | +32.1° | 1.9°, 11.4° | 3 |
+| sequence_5_6 | 126 s, 14 m; 89 s, 21 m; 264 s, 16 m; 1563 s, 143 m | +85.2°, −61.3°, −14.3° | 1.2–5.2°, 11.4–86.8° | 21–38 |
+
+- **Where both pieces are large, there is no step.** sequence_5_5 turns by
+  1.1°, less than 24 of the 44 walks cut at the same time. sequence_5_9 turns
+  by 6.8°; 5 of 36 walks turn by more.
+- **The large turns come from small pieces.** Three turns are beyond every
+  walk's: sequence_5_1's, 5_3's and 5_6's last. Each has a piece whose fixes
+  lie 7–16 m (rms) from their centre, with a median residual of 1.8–4.0 m.
+  sequence_5_6's other two, 85° and 61°, are each passed by one walk, between
+  pieces of 14–21 m with residuals of 4.7–7.6 m. A piece that small does not
+  fix a rotation against fixes that far off.
+- **The pieces keep one rotation.** Nothing is submitted from this.
+
 ## Fetching the GPS without the images
 
 The ten Moving test recordings are 10–31 GB each, 196 GB in all.
