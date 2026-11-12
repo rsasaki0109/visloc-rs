@@ -2651,8 +2651,9 @@ tried on training. The test driver fills every late start unless
 [`lamaria_assemble_submission.py`](../scripts/lamaria_assemble_submission.py)
 takes a replacement that adds poses to the base estimate's.
 
-**Test sequence_4_2, rebuilt with the fill** (2026-11-11; not scored when this
-was written, and nothing below uses ground truth):
+**Test sequence_4_2, rebuilt with the fill** (2026-11-11; nothing below uses
+ground truth, and it was written before the estimate was scored: 59.7 against
+55.9, see [the test results](lamaria_test_results.md#what-changed-between-the-submissions)):
 
 - **The driver takes submission 4's path again.** The VIO diverges from the
   recording's start with either configuration and from 10 s and 30 s, and

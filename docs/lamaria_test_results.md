@@ -1,6 +1,6 @@
 # LaMAria test-set results
 
-Eight evaluated submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
+Nine evaluated submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
 to the 63 test sequences, run on GitHub Actions
 ([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)); the
 fifth and the sixth reran five Short sequences locally, on an 8 GB GPU, the
@@ -15,35 +15,42 @@ together across recordings, offline
 entry went back to submission 7, uploaded again on 2026-11-10 ([What changed
 between the submissions](#what-changed-between-the-submissions)).
 Submission 8 was built but never evaluated: the site was unreachable until
-submission 9 replaced it. Scores are the leaderboard's means per challenge.
+submission 9 replaced it. Submission 10 is submission 7 with sequence_4_2
+rebuilt locally, its first minute filled
+([The poses before a late start](lamaria_batch_ba.md#the-poses-before-a-late-start)).
+Scores are the leaderboard's means per challenge.
 
 | Submission | Short | Medium | Long | Low light | Moving platform | Mean |
 |---|---:|---:|---:|---:|---:|---:|
 | 1 (2026-10-23) | 67.7 | 54.8 | 54.1 | 53.6 | 27.5 | 51.5 |
 | 2 (2026-10-24) | 67.7 | 54.8 | 54.1 | 59.3 | 26.9 | 52.6 |
-| 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | **60.9** | 26.9 | 52.9 |
+| 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | 60.9 | 26.9 | 52.9 |
 | 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | 30.6 | 54.2 |
 | 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | 30.6 | 54.4 |
 | 6 (2026-10-30) | 69.7 | **56.8** | 54.1 | 60.6 | 30.6 | 54.3 |
-| 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
+| 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
 | 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
-| 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
+| 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
+| 10 (2026-11-12) | 69.7 | **56.8** | 54.1 | **61.1** | **47.3** | **57.8** |
 | Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
+| FlexVIO (listed 2026-11-13) | 88.5 | 81.8 | 79.3 | 82.4 | 34.0 | 73.2 |
 | GroundedSLAM (2026-10-29) | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
-| FlexVIO | 73.1 | 62.9 | 56.7 | 69.7 | 28.1 | 58.1 |
 | FPV-SLAM, binocular (2026-10-28) | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
-The other methods' scores are those listed on 2026-11-10, unchanged since
-2026-11-06. Bold marks visloc-rs's best per challenge, leaving out the
-withdrawn submission 9.
+The other methods' scores are those listed on 2026-11-13. FlexVIO's are a
+newer upload's: on 2026-11-10 it stood at 73.1, 62.9, 56.7, 69.7 and 28.1
+(mean 58.1). The others are unchanged since 2026-11-06. Bold marks
+visloc-rs's best per challenge, leaving out the withdrawn submission 9.
 
 On 2026-11-06, and again on 2026-11-10, visloc-rs ranked sixth by the mean of
 the five challenges (the leaderboard itself lists the methods by their Short
 score). Ahead of it were
 Aria's SLAM (reproduced by the LaMAria team, 75.9), SLAM Dunk, GroundedSLAM,
-RedComet and FlexVIO; the leaderboard lists all of them as bino + imu. On the
+RedComet and FlexVIO; the leaderboard lists all of them as bino + imu. On
+2026-11-13, with submission 10, it is still sixth, behind the same five;
+FlexVIO, 0.4 ahead until then, is now 15.4 ahead. On the
 Moving platform track visloc-rs was fifth, behind Aria's SLAM (55.0), RedComet,
 SLAM Dunk and GroundedSLAM. Before submission 7, SLAM Dunk and FlexVIO had
 joined, and the last uploads had raised GroundedSLAM's mean from 62.3 to 72.4
@@ -247,6 +254,23 @@ not evaluated, because the site could not be reached; submission 9 contains it.
   - **From now on, each sequence's estimate comes from its own recording
     only.** Submission 9's scores and estimates are not used to choose or tune
     anything.
+
+**Submission 10.** Submission 7 with sequence_4_2 rebuilt
+([The poses before a late start](lamaria_batch_ba.md#the-poses-before-a-late-start)):
+- **Change.** sequence_4_2's VIO holds only from 60 s into the recording, and
+  its estimate had no poses before that. The first 80 s now also run through
+  the same VIO backwards in time, the two runs are joined 5 s after the late
+  start, and the chain runs over the whole recording. The other 62 estimates
+  are submission 7's files. The settings come from training runs; no test
+  ground truth was used.
+- **Result.** sequence_4_2 goes from 55.9 to 59.7, the Low light track from
+  60.6 to 61.1 and the mean from 57.7 to 57.8. Its pose recall at 5 m goes
+  from 94.1 to 99.9 %. Its CP recall at 1 m stays at 37.5 %: no control point
+  came within 1 m that was not before.
+- **As expected from the checks without ground truth.** The reversed run
+  goes wrong where a tram passes, and the chain's first minute stayed about
+  a metre uncertain where the wearer stands at the first marker. On the
+  seven training sequences the fill adds a median of 4.2; here it adds 3.8.
 
 ## Against GroundedSLAM, sequence by sequence
 
