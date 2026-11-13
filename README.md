@@ -39,7 +39,7 @@ results plug into existing tools.
 | **Photo SfM** (unordered images) | ETH3D Electro 1,200 images: **3.46× faster**, **25% lower** camera-centre error; 9,996 / 10,008 cameras registered across all ten ETH3D many-view scenes | COLMAP 3.9 CPU |
 | **GPU SfM** (video frames) | EuRoC: **faster on 8/8** sequences (1.4–7.5×), **more accurate on 4/8**, equal on 1; COLMAP breaks on MH_05 (194 cm vs 2.6 cm) | COLMAP 4.1 CUDA |
 | **Stereo-inertial VI-SLAM** (Basalt port + online mapper) | **Real time on 11/11** EuRoC sequences on the dev machine (1.06–1.68×, thin margin on the slowest); **beats ORB-SLAM3 on 9/11** | ORB-SLAM3, Basalt |
-| **Egocentric VI-SLAM** (Project Aria, both SLAM cameras + IMU) | LaMAria, all 5 tracks: mean Score **64.3**, above GroundedSLAM (62.3); ahead on Short, Medium and Long, level on Low light, behind on Moving; causal and real time on 4 CPU cores (training sequences; the leaderboard's are test) | GroundedSLAM, Aria's SLAM |
+| **Egocentric VI-SLAM** (Project Aria, both SLAM cameras + IMU) | LaMAria leaderboard (test set, all 5 tracks): mean Score **57.8**, sixth; five methods are ahead (66.7–75.9). On the ten training sequences 64.3, and 62.0 causal and in real time on 4 CPU cores | Aria's SLAM, SLAM Dunk |
 | **Metric objects** (mono camera + IMU + a 2D detector) | KITTI raw, against the 3D boxes: car heights **11 %** off with mono + IMU (110 cars), **6 %** with stereo + IMU; pedestrians **7 cm** | KITTI tracklets |
 | **Photos → 3D Gaussian Splatting + mesh** | **Faster than brush on 5/5** benchmark scenes, PSNR within 0.05 dB on 4 | brush 0.3 |
 | **Localization against a prebuilt map** | OpenLORIS robot rig: **98.96%** of 1,250 held-out frames localized, median 2.9 mm; simulated house: 38 ms / frame | — |
@@ -47,9 +47,9 @@ results plug into existing tools.
 
 **Where it still loses**, measured the same way: COLMAP CUDA is more
 accurate on 3 of the 8 EuRoC sequences and registers more of the blurred
-frames; ORB-SLAM3 wins 2 of 11 EuRoC sequences (MH_04, MH_05); on LaMAria,
-Aria's own closed-source SLAM stays well ahead (75.9) and GroundedSLAM
-leads the Moving-platform track; OpenLORIS
+frames; ORB-SLAM3 wins 2 of 11 EuRoC sequences (MH_04, MH_05); on LaMAria's
+test set five methods are ahead, from Aria's own closed-source SLAM (75.9)
+to RedComet (66.7), against 57.8; OpenLORIS
 10k rig SfM is not yet at
 COLMAP's RMSE. Every number above links to a benchmark doc with the
 commands to reproduce it.
@@ -312,29 +312,38 @@ and the last 240 s solved again every 30 s, with the gyro bias free to move
 in the first minutes while the device warms up (by day). The chain is causal
 and keeps up with the recording on 4 CPU cores (about 4 CPU seconds per second
 of recording); one batch pass after the recording, its gyro bias free to drift
-slowly, adds the revisits over the whole sequence. visloc-rs's training scores
+slowly, adds the revisits over the whole sequence. The training scores
 below use the cameras and the IMU only; on the test set's Moving platform
 track, the recordings' 1 Hz GPS also bridges the rides the VIO missed
-([docs/lamaria_gps.md](docs/lamaria_gps.md)). Score per track (official
-evaluator, higher is better):
+([docs/lamaria_gps.md](docs/lamaria_gps.md)).
+
+On the leaderboard's test set visloc-rs is sixth by the mean of the five
+tracks. Score per track (official evaluator, higher is better):
 
 | Method | Sequences | Short | Medium | Long | Low light | Moving | Mean |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Aria's SLAM (closed source) | test | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
-| GroundedSLAM | test | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 | 62.3 |
+| SLAM Dunk | test | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
+| FlexVIO | test | 88.5 | 81.8 | 79.3 | 82.4 | 34.0 | 73.2 |
+| GroundedSLAM | test | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
+| RedComet | test | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
+| **visloc-rs**, the VIO and the chain offline (submission 10) | test | 69.7 | 56.8 | 54.1 | 61.1 | 47.3 | 57.8 |
+| FPV-SLAM (binocular) | test | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
+| OpenVINS + Maplab | test | 27.7 | 23.4 | 12.8 | 19.8 | 13.9 | 19.5 |
 | **visloc-rs**, online + one pass after the recording¹ | training | 83.8 | 69.8 | 67.4 | 67.6 | 33.1 | 64.3 |
 | **visloc-rs**, online (causal, real time) | training | 79.7 | 67.2 | 63.3 | 67.6 | 32.1 | 62.0 |
-| OpenVINS + Maplab | test | 27.7 | 23.4 | 12.8 | 19.8 | 13.9 | 19.5 |
 
-<sub>Leaderboard rows as shown on 2026-10-17 (test set). The visloc-rs rows
-are the ten training sequences, two per track, scored locally with the
-official evaluator: not a submission, so the comparison is indicative.
+<sub>Test rows as the leaderboard showed them on 2026-11-13. The two training
+rows are the ten training sequences, two per track, scored locally with the
+official evaluator: the chain's settings were chosen on them, so they are not
+comparable with the test rows. On the test set's four walking tracks 94–99.5 %
+of the poses are within 5 m, but too few control points within 1 m: a slow
+drift in heading and scale over the long one-way walks
+([test results](docs/lamaria_test_results.md)).
 ¹ Low light keeps the online result, and runs without the warm-up, which
-lowers it there. Above GroundedSLAM on the mean: ahead on Short, Medium and
-Long, level on Low light, behind on Moving (sequence_5_12's tram ride, which
-the solve halves: 7.4). Per sequence:
+lowers it there. Per sequence:
 [the real-time chain](docs/lamaria_batch_ba.md#the-first-minutes-online);
-the leaderboard and the steps that led here: [LaMAria plan](docs/lamaria_plan.md).</sub>
+the steps that led here: [LaMAria plan](docs/lamaria_plan.md).</sub>
 
 ### Objects in metres (mono + IMU)
 
