@@ -2722,6 +2722,7 @@ baseline's features and online result (track settings as in the chain):
 | `--est-gyro-m` | 85.95 | 46.46 (10 %) | |
 | Time-varying: `--est-extrinsic 0 --ext-seg-seconds 5 --ext-seg-sigma 0.057 --focal-seg-sigma 0.000145` | 80.79 | **50.57** (25 %) | 63.98 (63 %) |
 | Both | **86.38** | 50.30 (25 %) | 64.18 (63 %) |
+| As SLAM Dunk: `--est-gyro-m --ext-seg-seconds 5 --ext-seg-sigma-cams 0.057,0.001 --focal-seg-sigma-cams 0.000145,0.000145` (cam1 nearly fixed, both focal lengths free) | | | 73.61 (70 %) |
 
 M is real and estimable without ground truth: on R_11 the solve finds the
 axis scales −0.19 / −0.21 / −0.12 %, the values the pseudo-GT fit above
@@ -2732,7 +2733,13 @@ help the one sequence whose heading bends (sequence_2_12: Sim(3) median
 error against the pseudo-GT 2.38 → 1.84 m) and cost 16 points on
 sequence_3_17, where the CP recall at 1 m falls from 100 % to 63 %: with a
 camera rotation free every 5 s, the heading drift is no longer pinned by the
-images. Neither is enabled in the chain. sequence_2_12's remaining error is
+images. Neither is enabled in the chain. The variant closest to SLAM Dunk's model (cam1 the reference,
+both focal lengths drifting) brings sequence_3_17 nearer the pseudo-GT
+(SE(3) median 1.44 → 0.86 m) but loses 6.5 points: its last eight
+CPs, after about 1,100 s, are 1.1–1.6 m off against 0.25–0.9 m. The
+evaluator places the cameras with the factory IMU-camera rotations, so the
+output could carry the BA's own camera rotations into the body pose; doing
+so (0.24° on average) changes the CP Score by less than 0.02. sequence_2_12's remaining error is
 mostly scale: the baseline is 0.84 % too large against the pseudo-GT over
 its 672 m extent, with a heading bend of 2–4° in the last third.
 
