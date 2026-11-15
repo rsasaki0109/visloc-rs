@@ -62,15 +62,20 @@ def parse_index(head):
     return first_user, records
 
 
-def keep(records, streams):
-    """(offset, size) of the records to fetch, sorted, and the count kept per stream."""
-    out, kept, seen, last = set(), {}, set(), {}
+def keep(records, streams, sampled=(), every=1):
+    """(offset, size) of the records to fetch, sorted, and the count kept per stream; of the `sampled` streams,
+    every `every`-th data record."""
+    out, kept, seen, last, count = set(), {}, set(), {}, {}
     for off, size, rtype, sid in records:
         first = rtype == DATA and sid not in seen
+        nth = False
         if rtype == DATA:
             seen.add(sid)
             last[sid] = (off, size)
-        if rtype in (STATE, CONFIGURATION) or sid in streams or first:
+            if sid in sampled:
+                count[sid] = count.get(sid, 0) + 1
+                nth = count[sid] % every == 0
+        if rtype in (STATE, CONFIGURATION) or sid in streams or first or nth:
             out.add((off, size))
             kept[sid] = kept.get(sid, 0) + 1
     for sid, r in last.items():
@@ -131,6 +136,10 @@ def main():
     p.add_argument("src", help="the recording's URL, or a local VRS file")
     p.add_argument("out", help="the sparse copy to write (the head goes to OUT.head, kept to resume)")
     p.add_argument("--streams", default=GPS_STREAMS, help="streams whose data records are all fetched")
+    p.add_argument("--sample-streams", default="",
+                   help="streams of which only every --every-th data record is fetched (e.g. the SLAM cameras "
+                        "1201-1,1201-2, for their temperature: lamaria_temperature.py)")
+    p.add_argument("--every", type=int, default=200)
     p.add_argument("--merge-gap", type=int, default=4096, help="bytes between two ranges fetched as one")
     p.add_argument("--per-request", type=int, default=150, help="ranges per HTTP request")
     a = p.parse_args()
@@ -149,7 +158,8 @@ def main():
         head = f.read()
     _, records = parse_index(head)
     streams = {tuple(map(int, s.split("-"))) for s in a.streams.split(",")}
-    want, kept = keep(records, streams)
+    sampled = {tuple(map(int, s.split("-"))) for s in a.sample_streams.split(",") if s}
+    want, kept = keep(records, streams, sampled, a.every)
     print(f"{len(records)} records; kept per stream: "
           + ", ".join(f"{t}-{i}: {n}" for (t, i), n in sorted(kept.items())))
     merged = merge(want, a.merge_gap)

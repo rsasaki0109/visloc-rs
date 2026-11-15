@@ -1387,6 +1387,23 @@ def _band_matvec(ab, x):
     return y
 
 
+def temperature_corrected(xy, offsets, kf_ns, cams, path, coef):
+    """The keypoints as the calibrated focal lengths would see them, when a camera's focal length is
+    (1 + coef (T - T_median)) times the calibration at its temperature T (lamaria_temperature.py's CSV; the
+    sparse samples interpolated). Images alternate cam0, cam1 per keyframe."""
+    tab = np.loadtxt(path, delimiter=",", skiprows=1)
+    xy = xy.copy()
+    for c in range(2):
+        temp = np.interp(kf_ns.astype(np.float64), tab[:, 0], tab[:, 1 + c])
+        scale = 1.0 / (1.0 + coef * (temp - np.median(tab[:, 1 + c])))
+        pp = cams[c]["K"][:2, 2]
+        for k in range(len(kf_ns)):
+            o0, o1 = offsets[2 * k + c], offsets[2 * k + c + 1]
+            xy[o0:o1] = pp + (xy[o0:o1] - pp) * scale[k]
+    print(f"  keypoints corrected for the temperature ({coef:g} per degree)", flush=True)
+    return xy
+
+
 def cmd_solve(a):
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
@@ -1398,6 +1415,8 @@ def cmd_solve(a):
     cams, noise = load_calib(a.calib)
     vio = load_tum(a.vio)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
+    if a.focal_temp and a.focal_temp_coef:
+        xy = temperature_corrected(xy, offsets, kf_ns, cams, a.focal_temp, a.focal_temp_coef)
     m = np.load(os.path.join(a.work, "matches.npz"))
     k0, k1 = (int(x) for x in a.kf_range.split(":")) if a.kf_range else (0, len(kf_ns))
     k1 = min(k1, len(kf_ns))
@@ -2283,6 +2302,10 @@ def main():
         s.add_argument("--gyro-m-pass", type=int, default=10,
                        help="iterations between preintegrating the IMU again with the current M")
         s.add_argument("--gyro-m", default="", help="9 comma-separated values: M to start from (row-major)")
+        s.add_argument("--focal-temp", default="",
+                       help="the SLAM cameras' temperature (lamaria_temperature.py) for --focal-temp-coef")
+        s.add_argument("--focal-temp-coef", type=float, default=0.0,
+                       help="relative focal length change per degree Celsius, about the recording's median")
         s.add_argument("--est-accel-m", action="store_true",
                        help="estimate the accelerometer's response error M_a likewise (scales, misalignment)")
         s.add_argument("--accel-m-sigma", type=float, default=0.003, help="prior on each entry of M_a")
