@@ -1185,7 +1185,7 @@ class Reprojection:
 
 
 def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_rw_scale=1.0, gyro_rw_scale=1.0,
-               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None)):
+               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None):
     """GTSAM values and factors for poses, velocities, biases, the IMU and the gauge priors.
 
     The first keyframe's position is pinned (1e-4 m); its rotation gets prior_rot_sigma (rad). Gravity
@@ -1194,12 +1194,16 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
     differences and biases from zero, or from init (kf_ns, vel, bias of an earlier solve) where it has the
     keyframe; keyframes after its last one start from its last bias. warmup (scale, seconds, start_ns) loosens the
     gyro bias random walk at the start of the recording, by 1 + (scale - 1) exp(-t / seconds) at t seconds after
-    start_ns (default: the first keyframe), while the device warms up.
+    start_ns (default: the first keyframe), while the device warms up. imu_path is a csv path or the loaded
+    array; gyro_m (3 x 3) is the gyroscope's response error M: the rate is (I + M) times the measured one.
     """
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
     vio_ns, vio_p, _ = vio
-    imu = np.loadtxt(imu_path, delimiter=",", comments="#")
+    imu = np.loadtxt(imu_path, delimiter=",", comments="#") if isinstance(imu_path, (str, os.PathLike)) \
+        else np.array(imu_path, dtype=np.float64)
+    if gyro_m is not None:
+        imu[:, 1:4] = imu[:, 1:4] @ (np.eye(3) + np.asarray(gyro_m).reshape(3, 3)).T
     imu_ns = imu[:, 0].astype(np.int64)
 
     def make_params(gyro_rw):
@@ -1416,6 +1420,8 @@ def cmd_solve(a):
           f"{time.time() - t0:.0f} s", flush=True)
     phys_est = [int(ch) for ch in a.est_extrinsic]
     est_cams, n_seg = phys_est, max(a.ext_segments, 1)
+    if a.ext_seg_seconds > 0:  # segments of about this length instead of a fixed count
+        n_seg = max(int(np.ceil((kf_ns[-1] - kf_ns[0]) * 1e-9 / a.ext_seg_seconds)), 1)
     obs_kf, obs_cam = np.concatenate(obs_kf), np.concatenate(obs_cam)
     seg_of_kf = np.minimum(np.arange(len(kf_ns)) * n_seg // len(kf_ns), n_seg - 1)
     if n_seg > 1:
@@ -1427,15 +1433,53 @@ def cmd_solve(a):
     rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
                       obs_sigma, a.huber, a.band, est_focal=a.est_focal)
     omega = [float(v) for v in a.omega_coriolis.split(",")] if a.omega_coriolis else None
-    graph, values, index, imu_factors = _imu_graph(kf_ns, kf_p, kf_r, vio, a.imu, noise, a.imu_noise_scale,
-                                                   a.accel_rw_scale, a.gyro_rw_scale, a.prior_rot_sigma, omega,
-                                                   getattr(a, "init_states", None),
-                                                   (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0]))
+    imu_data = np.loadtxt(a.imu, delimiter=",", comments="#")
+    init_st = getattr(a, "init_states", None)
+    # the gyroscope's response error M (rate = (I + M) measured - bias), row-major: given, carried over from the
+    # solve before, or zero; --est-gyro-m estimates it (docs/lamaria_batch_ba.md#the-gyroscopes-response)
+    gm = np.zeros(9)
+    if init_st is not None and init_st.get("gyro_m") is not None:
+        gm = np.array(init_st["gyro_m"], dtype=np.float64).ravel()
+    if a.gyro_m:
+        gm = np.array([float(v) for v in a.gyro_m.split(",")])
+    ng = 9 if a.est_gyro_m else 0
+
+    def build_imu(m_vec):
+        return _imu_graph(kf_ns, kf_p, kf_r, vio, imu_data, noise, a.imu_noise_scale, a.accel_rw_scale,
+                          a.gyro_rw_scale, a.prior_rot_sigma, omega, init_st,
+                          (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0]),
+                          gyro_m=m_vec.reshape(3, 3) if np.any(m_vec) else None)
+
+    graph, values, index, imu_factors = build_imu(gm)
+    gm_pass = gm.copy()  # the M the IMU factors were preintegrated with
+
+    def gyro_jac(vals, m_vec, h=1e-4):
+        """d(whitened error)/dM of every IMU factor at vals, by preintegrating again with each entry moved by h."""
+        e0 = np.array([f.whitenedError(vals) for f in imu_factors])
+        jm_ = np.zeros((len(imu_factors), e0.shape[1], 9))
+        for j in range(9):
+            mp_ = m_vec.copy()
+            mp_[j] += h
+            fac = build_imu(mp_)[3]
+            jm_[:, :, j] = (np.array([f.whitenedError(vals) for f in fac]) - e0) / h
+        return jm_
+
+    jm = gyro_jac(values, gm) if ng else None
+
+    def gyro_cost(vals, m_vec):  # the IMU factors' change by M's move since the preintegration (first order), and M's prior
+        if not ng:
+            return 0.0
+        d = m_vec - gm_pass
+        ew = np.array([f.whitenedError(vals) for f in imu_factors])
+        return 0.5 * (np.sum((ew + jm @ d) ** 2) - np.sum(ew ** 2)) + 0.5 * np.sum((m_vec / a.gyro_m_sigma) ** 2)
+
     n = len(kf_ns)
     nb, ne, npar = n * DOF, rp.n_par * rp.n_ext, rp.n_par
     modes = expand_modes(a.modes)
     nm = len(modes)
-    nz = ne + nm  # border: the camera rotations, then the deformation modes (undamped)
+    if ng and nm:
+        raise SystemExit("--est-gyro-m does not combine with --modes")
+    nz = ne + nm + ng  # border: the camera rotations, the deformation modes (undamped), then the gyroscope's M
     order = np.argsort(rp.lm, kind="stable")
     lm_first = np.zeros(rp.n_lm, np.int64)
     lm_first[rp.lm[order][::-1]] = rp.kf[order][::-1]  # first keyframe of every landmark
@@ -1473,12 +1517,21 @@ def cmd_solve(a):
                 np.array([vals.atPose3(X(k)).translation() for k in range(n)]))
 
     r_wi, t_wi = poses(values)
-    cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic)
+    cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) + gyro_cost(values, gm)
     print(f"initial cost {cost:.6g}", flush=True)
+    passes = 0
     lam = a.lambda0
     mu = 0.0  # damping of the modes relative to their own curvature: none until a step with them fails
     for it in range(a.iterations):
         ti = time.time()
+        if ng and it > 0 and it % a.gyro_m_pass == 0 and np.abs(gm - gm_pass).max() > 1e-6:
+            # preintegrate again with the current M (the first-order model is exact there)
+            graph, _, index, imu_factors = build_imu(gm)
+            gm_pass = gm.copy()
+            jm = gyro_jac(values, gm)
+            passes += 1
+            cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) + gyro_cost(values, gm)
+            print(f"  IMU preintegrated again with M, cost {cost:.6g}", flush=True)
         if a.outlier_px > 0:
             # drop observations that moved far off, then landmarks left with a single observation;
             # from --outlier-start2 on with the tighter --outlier-px2
@@ -1488,17 +1541,29 @@ def cmd_solve(a):
                 rp.active &= ~bad
                 lone = rp.active & (np.bincount(rp.lm[rp.active], minlength=rp.n_lm)[rp.lm] < 2)
                 rp.active &= ~lone
-                cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic)
+                cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) \
+                    + gyro_cost(values, gm)
                 print(f"  outliers: {bad.sum()} observations over {thr} px (+{lone.sum()} left alone), "
                       f"{rp.active.sum()} active, cost {cost:.6g}", flush=True)
         h_xx, h_xl, g_x, h_ll_o, h_ll, g_l = rp.normal_equations(r_wi, t_wi, r_ic, t_ic, pts)
         # IMU and prior factors, linearized by GTSAM: ||A dx - b||^2
         ab_imu, rhs_imu = np.zeros((u + 1, nb)), np.zeros(nb)
         lin = graph.linearize(values)
+        imu_first = lin.size() - len(imu_factors)  # the IMU factors come last in the graph
+        if ng:
+            g_border, g_corner = np.zeros((nb, ng)), np.eye(ng) / a.gyro_m_sigma ** 2
+            g_rhs = -gm / a.gyro_m_sigma ** 2
+            dgm = gm - gm_pass
         for fi in range(lin.size()):
             jf = lin.at(fi)
             A, b = jf.jacobian()
             cols = np.concatenate([np.arange(index[key][0], index[key][0] + index[key][1]) for key in jf.keys()])
+            if ng and fi >= imu_first:  # ||A dx + J (M - M_pass + dM) - b||^2
+                jmk = jm[fi - imu_first]
+                b = b - jmk @ dgm
+                np.add.at(g_border, cols, A.T @ jmk)
+                g_corner += jmk.T @ jmk
+                g_rhs += jmk.T @ b
             ci, cj = np.meshgrid(cols, cols, indexing="ij")
             low = ci >= cj
             np.add.at(ab_imu, ((ci - cj)[low], cj[low]), (A.T @ A)[low])
@@ -1561,6 +1626,11 @@ def cmd_solve(a):
             ab[0] += lam * ab[0] + 1e-9
             if ne:
                 corner[np.arange(ne), np.arange(ne)] += lam * np.diag(corner)[:ne] + 1e-9
+            if ng:
+                gi = np.arange(ne + nm, nz)
+                border[:, gi] = g_border
+                corner[np.ix_(gi, gi)] = g_corner + np.diag(lam * np.diag(g_corner) + 1e-9)
+                rhs[nb + gi] = g_rhs
             if nm and not modes_on:
                 corner[ne:, ne:] = np.eye(nm)  # inert until --modes-start
             if modes_on:  # the modes' column after eliminating the landmarks; no damping
@@ -1609,7 +1679,8 @@ def cmd_solve(a):
 
             sol = precond(rhs) if len(rp.off_keys) == 0 else _pcg(rp, m_o, h_xl, ab, u, nb, nz, border, corner,
                                                                     precond, rhs, a.pcg_tol, a.pcg_iters)
-            dx, de, dk = sol[:nb], sol[nb:nb + ne], sol[nb + ne:]
+            dx, de, dk = sol[:nb], sol[nb:nb + ne], sol[nb + ne:nb + ne + nm]
+            new_gm = gm + sol[nb + ne + nm:] if ng else gm
             dxo = np.zeros((len(rp.kf), 6 + npar))
             dxo[:, 0:6] = dx.reshape(n, DOF)[rp.kf, 0:6]
             if ne:
@@ -1644,12 +1715,13 @@ def cmd_solve(a):
                     new_values.insert(V(k), st[2][k])
                     new_values.insert(B(k), gtsam.imuBias.ConstantBias(st[3][k, 0:3], st[3][k, 3:6]))
                 nr, nt, new_pts = st[0], st[1], st[4]
-            new_cost = rp.cost(nr, nt, new_ric, t_ic, new_pts)[0] + graph.error(new_values) + seg_cost(new_ric)
+            new_cost = rp.cost(nr, nt, new_ric, t_ic, new_pts)[0] + graph.error(new_values) + seg_cost(new_ric) \
+                + gyro_cost(new_values, new_gm)
             if new_cost >= cost:
                 rp.set_focal(foc)  # rejected: the focal lengths stay
             if new_cost < cost:
                 rel = (cost - new_cost) / cost
-                values, r_ic, pts, r_wi, t_wi, cost = new_values, new_ric, new_pts, nr, nt, new_cost
+                values, r_ic, pts, r_wi, t_wi, cost, gm = new_values, new_ric, new_pts, nr, nt, new_cost, new_gm
                 lam = max(lam / 3, 1e-10)
                 mu = mu / 10 if mu > 1e-4 else 0.0
                 accepted = True
@@ -1665,8 +1737,12 @@ def cmd_solve(a):
             msg += f" | cam{c} rotation {ch[0]}" + (f" .. {ch[1]}" if n_seg > 1 else "")
             if a.est_focal:
                 msg += f" focal {100 * np.expm1(rp.foc[c * n_seg]):+.3f} .. {100 * np.expm1(rp.foc[c * n_seg + n_seg - 1]):+.3f} %"
+        if ng:
+            msg += f" | gyro M diag {np.round(100 * gm[[0, 4, 8]], 3)} %"
         print(msg, flush=True)
         if not accepted or rel < a.rel_tol:
+            if ng and accepted and np.abs(gm - gm_pass).max() > 1e-5 and passes < 5:
+                continue  # converged with the first-order M: preintegrate again at the next iteration
             break
     reproj, err = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)
     err_px = (err * rp.sigma)[rp.active]
@@ -1693,6 +1769,7 @@ def cmd_solve(a):
                                     "max": float(np.linalg.norm(t_wi - kf_p, axis=1).max())},
         "biases": {str(k): {"accel": values.atConstantBias(B(k)).accelerometer().tolist(),
                             "gyro": values.atConstantBias(B(k)).gyroscope().tolist()} for k in (0, n // 2, n - 1)},
+        "gyro_m": gm.reshape(3, 3).tolist(),
         "seconds": time.time() - t0,
     }
     print(json.dumps(summary, indent=1), flush=True)
@@ -1707,7 +1784,8 @@ def cmd_solve(a):
         np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic,
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
-    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg}
+    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
+            "gyro_m": gm.copy()}
 
 
 def cmd_online(a):
@@ -2103,6 +2181,8 @@ def main():
         s.add_argument("--ext-segments", type=int, default=8,
                        help="estimate each such rotation in this many equal time segments of the keyframes "
                             "(1: one rotation per camera)")
+        s.add_argument("--ext-seg-seconds", type=float, default=0.0,
+                       help="time segments of about this many seconds instead of --ext-segments (0: off)")
         s.add_argument("--ext-seg-sigma", type=float, default=0.05,
                        help="prior on the rotation change between consecutive segments (deg)")
         s.add_argument("--max-offset", type=int, default=256, help="use matches up to this keyframe offset")
@@ -2156,6 +2236,13 @@ def main():
         s.add_argument("--modes-start", type=int, default=3, help="first iteration that uses the modes")
         s.add_argument("--mode-cap-yaw", type=float, default=0.01, help="largest yaw-mode step per iteration (rad)")
         s.add_argument("--mode-cap-scale", type=float, default=0.01, help="largest scale-mode step per iteration")
+        s.add_argument("--est-gyro-m", action="store_true",
+                       help="estimate the gyroscope's response error M, one 3 x 3 matrix for the recording: the rate "
+                            "is (I + M) times the measured one, less the bias")
+        s.add_argument("--gyro-m-sigma", type=float, default=0.002, help="prior on each entry of M")
+        s.add_argument("--gyro-m-pass", type=int, default=10,
+                       help="iterations between preintegrating the IMU again with the current M")
+        s.add_argument("--gyro-m", default="", help="9 comma-separated values: M to start from (row-major)")
         s.add_argument("--save-states", action="store_true",
                        help="also write <out>_states.npz (keyframes, landmarks, observations) for loop-correct")
 

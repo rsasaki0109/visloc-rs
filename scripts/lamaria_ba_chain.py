@@ -72,7 +72,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio"):
+          num_features=None, pass_features=None, pass_match="vio", pass_args=()):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -96,7 +96,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
             out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
-        pas = [*solve, "--iterations", "60", "--gyro-rw-scale", "10", *WARMUP]
+        pas = [*solve, "--iterations", "60", "--gyro-rw-scale", "10", *WARMUP, *pass_args]
         out += [
             ("pass solve", ["solve", "--work", pw, "--vio", work / "online.tum", "--out", work / "ba1.tum",
                             "--save-states", *pas], work / "ba1.done", True),
@@ -127,7 +127,7 @@ def result(work, track, low_light=None, rematch=False):
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio"):
+              pass_match="vio", pass_args=()):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -136,7 +136,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         if not (pw / "rematch" / "features.npz").is_symlink():
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
-                                           num_features, pass_features, pass_match):
+                                           num_features, pass_features, pass_match, pass_args):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -178,11 +178,14 @@ def main():
     p.add_argument("--pass-match", choices=PASS_MATCH, default="vio",
                    help="--pass-features: keep the matches within the VIO's epipolar band, the online result's, or "
                         "those an essential matrix explains")
+    p.add_argument("--pass-args", default="", help="extra options of the pass's solves (one string, e.g. "
+                   "\"--est-gyro-m\")")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
-              num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match)
+              num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
+              pass_args=a.pass_args.split())
 
 
 if __name__ == "__main__":
