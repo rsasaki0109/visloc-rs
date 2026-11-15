@@ -797,7 +797,8 @@ def segment_prior(r_ic, pairs, slot, n_ext, w):
     R <- R Exp(phi) of the estimated rotations, stacked by slot: Log(R_a^T R_b) ~ e0 - phi_a + phi_b.
     """
     h, b, cost = np.zeros((3 * n_ext, 3 * n_ext)), np.zeros(3 * n_ext), 0.0
-    for ca, cb in pairs:
+    ws = np.broadcast_to(np.asarray(w, dtype=np.float64), (len(pairs),))  # one weight, or one per pair
+    for (ca, cb), w in zip(pairs, ws):
         e0 = so3_log(r_ic[ca].T @ r_ic[cb])
         cost += 0.5 * w * float(e0 @ e0)
         ia, ib = slot[ca] * 3 + np.arange(3), slot[cb] * 3 + np.arange(3)
@@ -829,7 +830,8 @@ def focal_prior(foc, pairs, slot, n_par, n_ext, w_pair, w_abs, w_mean=0.0, group
         h[i, i] += w_abs
         b[i] -= w_abs * foc[c]
         cost += 0.5 * w_abs * foc[c] ** 2
-    for ca, cb in pairs:
+    wps = np.broadcast_to(np.asarray(w_pair, dtype=np.float64), (len(pairs),))  # one weight, or one per pair
+    for (ca, cb), w_pair in zip(pairs, wps):
         i, j = slot[ca] * n_par + n_par - 1, slot[cb] * n_par + n_par - 1
         r = foc[cb] - foc[ca]
         h[i, i] += w_pair
@@ -1500,9 +1502,16 @@ def cmd_solve(a):
     # consecutive time segments of a camera rotate alike, within --ext-seg-sigma
     seg_pairs = [(c * n_seg + s, c * n_seg + s + 1) for c in phys_est for s in range(n_seg - 1)]
     seg_w = 1.0 / np.radians(a.ext_seg_sigma) ** 2
+    if a.ext_seg_sigma_cams:  # per physical camera: e.g. one rotation that drifts, the other nearly constant
+        sig = dict(zip(phys_est, (float(v) for v in a.ext_seg_sigma_cams.split(","))))
+        seg_w = np.array([1.0 / np.radians(sig[ca // n_seg]) ** 2 for ca, _ in seg_pairs])
     # the rotation's three parameters within each camera's slot of the border
     rot_idx = (np.arange(rp.n_ext)[:, None] * npar + np.arange(3)[None, :]).ravel()
-    foc_w = (1.0 / a.focal_seg_sigma ** 2, 1.0 / a.focal_sigma ** 2,
+    foc_pair_w = 1.0 / a.focal_seg_sigma ** 2
+    if a.focal_seg_sigma_cams:
+        sig = dict(zip(phys_est, (float(v) for v in a.focal_seg_sigma_cams.split(","))))
+        foc_pair_w = np.array([1.0 / sig[ca // n_seg] ** 2 for ca, _ in seg_pairs])
+    foc_w = (foc_pair_w, 1.0 / a.focal_sigma ** 2,
              1.0 / a.focal_mean_sigma ** 2 if a.focal_mean_sigma > 0 else 0.0,
              [[c * n_seg + s for s in range(n_seg)] for c in phys_est])
 
@@ -2185,6 +2194,10 @@ def main():
                        help="time segments of about this many seconds instead of --ext-segments (0: off)")
         s.add_argument("--ext-seg-sigma", type=float, default=0.05,
                        help="prior on the rotation change between consecutive segments (deg)")
+        s.add_argument("--ext-seg-sigma-cams", default="",
+                       help="--ext-seg-sigma per estimated camera, comma-separated in --est-extrinsic's order")
+        s.add_argument("--focal-seg-sigma-cams", default="",
+                       help="--focal-seg-sigma per estimated camera, comma-separated in --est-extrinsic's order")
         s.add_argument("--max-offset", type=int, default=256, help="use matches up to this keyframe offset")
         s.add_argument("--band", type=int, default=64, help="landmark observations within this many keyframes")
         s.add_argument("--max-reproj", type=float, default=4.0, help="triangulation inlier threshold (px)")
