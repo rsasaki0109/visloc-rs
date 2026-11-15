@@ -138,13 +138,19 @@ def _sift_image(path, clahe, denoise=0.0, denoise_window=21):
 
 def _sift_worker(task):
     import cv2
-    path, nfeat, clahe, denoise, denoise_window = task
+    path, nfeat, clahe, denoise, denoise_window, rootsift = task
     cv2.setNumThreads(1)
     sift = cv2.SIFT_create(nfeatures=nfeat, contrastThreshold=0.01)
     kp, des = sift.detectAndCompute(_sift_image(path, clahe, denoise, denoise_window), None)
     xy = np.array([k.pt for k in kp], dtype=np.float32).reshape(-1, 2)
     size = np.array([k.size for k in kp], dtype=np.float32)
-    des = np.zeros((0, 128), np.uint8) if des is None else np.clip(des, 0, 255).astype(np.uint8)
+    if des is None:
+        des = np.zeros((0, 128), np.uint8)
+    elif rootsift:  # RootSIFT (Arandjelović and Zisserman, 2012): L1-normalized, square-rooted, unit L2 norm
+        des = np.sqrt(des / np.maximum(des.sum(1, keepdims=True), 1e-9))
+        des = np.clip(np.round(des * 512), 0, 255).astype(np.uint8)
+    else:
+        des = np.clip(des, 0, 255).astype(np.uint8)
     return xy, des, size
 
 
@@ -198,7 +204,8 @@ def cmd_features(a):
     extra = {}
     if a.extractor == "sift":
         with mp.Pool(a.jobs) as pool:
-            res = pool.map(_sift_worker, [(p, a.num_features, a.clahe, a.denoise, a.denoise_window) for p in paths],
+            res = pool.map(_sift_worker, [(p, a.num_features, a.clahe, a.denoise, a.denoise_window, a.rootsift)
+                                             for p in paths],
                            chunksize=8)
     else:  # no keypoint size: the solve's --sigma-size leaves these observations at --pixel-sigma
         res = [(xy, des, np.full(len(xy), np.nan, np.float32), wh) for xy, des, wh in _learned_features(a, paths)]
@@ -935,7 +942,7 @@ def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est, active, 
         res0 = (kcam[c, 0] * p_c[0] / zs + kcam[c, 2] - z[o, 0]) / sg
         res1 = (kcam[c, 1] * p_c[1] / zs + kcam[c, 3] - z[o, 1]) / sg
         e = np.sqrt(res0 * res0 + res1 * res1)
-        w = 1.0 if e <= huber else huber / max(e, 1e-12)
+        w = (1.0 if e <= huber else huber / max(e, 1e-12)) if huber > 0 else 1.0 / (1.0 + (e / huber) ** 2)
         jpi[0, 0], jpi[0, 1], jpi[0, 2] = kcam[c, 0] / zs / sg, 0.0, -kcam[c, 0] * p_c[0] / zs ** 2 / sg
         jpi[1, 0], jpi[1, 1], jpi[1, 2] = 0.0, kcam[c, 1] / zs / sg, -kcam[c, 1] * p_c[1] / zs ** 2 / sg
         for r in range(2):
@@ -991,7 +998,10 @@ def _reproj_cost(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, active, sigm
         r1 = (kcam[c, 1] * y / zs + kcam[c, 3] - z[o, 1]) / sigma[o]
         e[o] = np.sqrt(r0 * r0 + r1 * r1)
         if valid and active[o]:
-            total += 0.5 * e[o] * e[o] if e[o] <= huber else huber * (e[o] - 0.5 * huber)
+            if huber < 0:  # Cauchy at scale -huber
+                total += 0.5 * huber * huber * np.log1p((e[o] / huber) ** 2)
+            else:
+                total += 0.5 * e[o] * e[o] if e[o] <= huber else huber * (e[o] - 0.5 * huber)
     return total
 
 
@@ -1131,8 +1141,12 @@ class Reprojection:
         e = np.linalg.norm(res, axis=1)
         k = self.huber
         valid = valid & self.active
-        w = np.where(valid, np.where(e <= k, 1.0, k / np.maximum(e, 1e-12)), 0.0)
-        cost = np.where(valid, np.where(e <= k, 0.5 * e * e, k * (e - 0.5 * k)), 0.0)
+        if k < 0:  # Cauchy at scale -k
+            w = np.where(valid, 1.0 / (1.0 + (e / k) ** 2), 0.0)
+            cost = np.where(valid, 0.5 * k * k * np.log1p((e / k) ** 2), 0.0)
+        else:
+            w = np.where(valid, np.where(e <= k, 1.0, k / np.maximum(e, 1e-12)), 0.0)
+            cost = np.where(valid, np.where(e <= k, 0.5 * e * e, k * (e - 0.5 * k)), 0.0)
         return e, w, cost
 
     def cost(self, r_wi, t_wi, r_ic, t_ic, pts):
@@ -2126,6 +2140,8 @@ def main():
                    help="non-local means denoising strength h before detection (low light, e.g. 7; 0: off)")
     f.add_argument("--denoise-window", type=int, default=21,
                    help="its search window (px); 11 takes about 40 %% less time than 21")
+    f.add_argument("--rootsift", action="store_true",
+                   help="SIFT: RootSIFT descriptors, compared by their Euclidean distance like SIFT's")
     f.add_argument("--extractor", choices=("sift", *LEARNED), default="sift",
                    help="SIFT (OpenCV), or learned keypoints on the GPU (LightGlue's extractors; --num-features "
                         "keypoints at most); match and loops then use LightGlue")
@@ -2218,7 +2234,8 @@ def main():
         s.add_argument("--pcg-tol", type=float, default=1e-4,
                        help="relative residual at which conjugate gradients stop (with revisit matches)")
         s.add_argument("--pcg-iters", type=int, default=200, help="most conjugate-gradient iterations per step")
-        s.add_argument("--huber", type=float, default=2.0, help="Huber threshold in sigmas")
+        s.add_argument("--huber", type=float, default=2.0,
+                       help="Huber threshold in sigmas; negative: a Cauchy loss at that scale instead")
         s.add_argument("--iterations", type=int, default=60)
         s.add_argument("--rel-tol", type=float, default=1e-7, help="stop once an iteration lowers the cost less")
         s.add_argument("--lambda0", type=float, default=1e-4)

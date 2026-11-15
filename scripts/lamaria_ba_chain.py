@@ -44,8 +44,9 @@ LEARNED_KEYPOINTS = 1024
 def feature_options(features, num_features=None):
     """The features step's options: SIFT, or a learned extractor keeping its `num_features` best keypoints (1,024
     by default) whatever their score, so that LightGlue matches the same number in every image, in batches."""
-    if features == "sift":
-        return [] if num_features is None else ["--num-features", str(num_features)]
+    if features in ("sift", "rootsift"):
+        return ([] if features == "sift" else ["--rootsift"]) + \
+            ([] if num_features is None else ["--num-features", str(num_features)])
     return ["--extractor", features, "--num-features", str(num_features or LEARNED_KEYPOINTS),
             "--detection-threshold", "0"]
 
@@ -169,8 +170,9 @@ def main():
     p.add_argument("--threads", type=int, default=2, help="threads for the online windows and the pass")
     p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
     p.add_argument("--rematch", action="store_true", help="by day, match again guided by the pass and solve again")
-    p.add_argument("--features", choices=("sift", "aliked", "disk", "superpoint"), default="sift",
-                   help="the keypoints: SIFT, or learned ones on the GPU, matched by LightGlue")
+    p.add_argument("--features", choices=("sift", "rootsift", "aliked", "disk", "superpoint"), default="sift",
+                   help="the keypoints: SIFT (or with RootSIFT descriptors), or learned ones on the GPU, "
+                        "matched by LightGlue")
     p.add_argument("--num-features", type=int, default=None,
                    help="keypoints per image (default: the features step's for SIFT, 1,024 for a learned extractor)")
     p.add_argument("--pass-features", choices=("aliked", "disk", "superpoint"), default=None,
