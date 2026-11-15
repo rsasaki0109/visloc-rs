@@ -1201,7 +1201,7 @@ class Reprojection:
 
 
 def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_rw_scale=1.0, gyro_rw_scale=1.0,
-               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None):
+               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None, accel_m=None):
     """GTSAM values and factors for poses, velocities, biases, the IMU and the gauge priors.
 
     The first keyframe's position is pinned (1e-4 m); its rotation gets prior_rot_sigma (rad). Gravity
@@ -1220,6 +1220,8 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
         else np.array(imu_path, dtype=np.float64)
     if gyro_m is not None:
         imu[:, 1:4] = imu[:, 1:4] @ (np.eye(3) + np.asarray(gyro_m).reshape(3, 3)).T
+    if accel_m is not None:
+        imu[:, 4:7] = imu[:, 4:7] @ (np.eye(3) + np.asarray(accel_m).reshape(3, 3)).T
     imu_ns = imu[:, 0].astype(np.int64)
 
     def make_params(gyro_rw):
@@ -1453,18 +1455,24 @@ def cmd_solve(a):
     init_st = getattr(a, "init_states", None)
     # the gyroscope's response error M (rate = (I + M) measured - bias), row-major: given, carried over from the
     # solve before, or zero; --est-gyro-m estimates it (docs/lamaria_batch_ba.md#the-gyroscopes-response)
-    gm = np.zeros(9)
-    if init_st is not None and init_st.get("gyro_m") is not None:
-        gm = np.array(init_st["gyro_m"], dtype=np.float64).ravel()
-    if a.gyro_m:
-        gm = np.array([float(v) for v in a.gyro_m.split(",")])
-    ng = 9 if a.est_gyro_m else 0
+    # and the accelerometer's (specific force = (I + M_a) measured - bias), --est-accel-m: one vector of 18,
+    # of which the estimated entries `act` join the border
+    gm = np.zeros(18)
+    for name, sl in (("gyro_m", slice(0, 9)), ("accel_m", slice(9, 18))):
+        if init_st is not None and init_st.get(name) is not None:
+            gm[sl] = np.array(init_st[name], dtype=np.float64).ravel()
+        if getattr(a, name):
+            gm[sl] = [float(v) for v in getattr(a, name).split(",")]
+    act = np.r_[np.arange(9) if a.est_gyro_m else [], np.arange(9, 18) if a.est_accel_m else []].astype(np.int64)
+    msig = np.r_[np.full(9, a.gyro_m_sigma), np.full(9, a.accel_m_sigma)][act]
+    ng = len(act)
 
     def build_imu(m_vec):
         return _imu_graph(kf_ns, kf_p, kf_r, vio, imu_data, noise, a.imu_noise_scale, a.accel_rw_scale,
                           a.gyro_rw_scale, a.prior_rot_sigma, omega, init_st,
                           (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0]),
-                          gyro_m=m_vec.reshape(3, 3) if np.any(m_vec) else None)
+                          gyro_m=m_vec[:9].reshape(3, 3) if np.any(m_vec[:9]) else None,
+                          accel_m=m_vec[9:].reshape(3, 3) if np.any(m_vec[9:]) else None)
 
     graph, values, index, imu_factors = build_imu(gm)
     gm_pass = gm.copy()  # the M the IMU factors were preintegrated with
@@ -1472,12 +1480,12 @@ def cmd_solve(a):
     def gyro_jac(vals, m_vec, h=1e-4):
         """d(whitened error)/dM of every IMU factor at vals, by preintegrating again with each entry moved by h."""
         e0 = np.array([f.whitenedError(vals) for f in imu_factors])
-        jm_ = np.zeros((len(imu_factors), e0.shape[1], 9))
-        for j in range(9):
+        jm_ = np.zeros((len(imu_factors), e0.shape[1], ng))
+        for jj, j in enumerate(act):
             mp_ = m_vec.copy()
             mp_[j] += h
             fac = build_imu(mp_)[3]
-            jm_[:, :, j] = (np.array([f.whitenedError(vals) for f in fac]) - e0) / h
+            jm_[:, :, jj] = (np.array([f.whitenedError(vals) for f in fac]) - e0) / h
         return jm_
 
     jm = gyro_jac(values, gm) if ng else None
@@ -1485,16 +1493,16 @@ def cmd_solve(a):
     def gyro_cost(vals, m_vec):  # the IMU factors' change by M's move since the preintegration (first order), and M's prior
         if not ng:
             return 0.0
-        d = m_vec - gm_pass
+        d = (m_vec - gm_pass)[act]
         ew = np.array([f.whitenedError(vals) for f in imu_factors])
-        return 0.5 * (np.sum((ew + jm @ d) ** 2) - np.sum(ew ** 2)) + 0.5 * np.sum((m_vec / a.gyro_m_sigma) ** 2)
+        return 0.5 * (np.sum((ew + jm @ d) ** 2) - np.sum(ew ** 2)) + 0.5 * np.sum((m_vec[act] / msig) ** 2)
 
     n = len(kf_ns)
     nb, ne, npar = n * DOF, rp.n_par * rp.n_ext, rp.n_par
     modes = expand_modes(a.modes)
     nm = len(modes)
     if ng and nm:
-        raise SystemExit("--est-gyro-m does not combine with --modes")
+        raise SystemExit("--est-gyro-m and --est-accel-m do not combine with --modes")
     nz = ne + nm + ng  # border: the camera rotations, the deformation modes (undamped), then the gyroscope's M
     order = np.argsort(rp.lm, kind="stable")
     lm_first = np.zeros(rp.n_lm, np.int64)
@@ -1574,9 +1582,9 @@ def cmd_solve(a):
         lin = graph.linearize(values)
         imu_first = lin.size() - len(imu_factors)  # the IMU factors come last in the graph
         if ng:
-            g_border, g_corner = np.zeros((nb, ng)), np.eye(ng) / a.gyro_m_sigma ** 2
-            g_rhs = -gm / a.gyro_m_sigma ** 2
-            dgm = gm - gm_pass
+            g_border, g_corner = np.zeros((nb, ng)), np.diag(1.0 / msig ** 2)
+            g_rhs = -gm[act] / msig ** 2
+            dgm = (gm - gm_pass)[act]
         for fi in range(lin.size()):
             jf = lin.at(fi)
             A, b = jf.jacobian()
@@ -1703,7 +1711,8 @@ def cmd_solve(a):
             sol = precond(rhs) if len(rp.off_keys) == 0 else _pcg(rp, m_o, h_xl, ab, u, nb, nz, border, corner,
                                                                     precond, rhs, a.pcg_tol, a.pcg_iters)
             dx, de, dk = sol[:nb], sol[nb:nb + ne], sol[nb + ne:nb + ne + nm]
-            new_gm = gm + sol[nb + ne + nm:] if ng else gm
+            new_gm = gm.copy()
+            new_gm[act] += sol[nb + ne + nm:]
             dxo = np.zeros((len(rp.kf), 6 + npar))
             dxo[:, 0:6] = dx.reshape(n, DOF)[rp.kf, 0:6]
             if ne:
@@ -1761,7 +1770,7 @@ def cmd_solve(a):
             if a.est_focal:
                 msg += f" focal {100 * np.expm1(rp.foc[c * n_seg]):+.3f} .. {100 * np.expm1(rp.foc[c * n_seg + n_seg - 1]):+.3f} %"
         if ng:
-            msg += f" | gyro M diag {np.round(100 * gm[[0, 4, 8]], 3)} %"
+            msg += f" | gyro M diag {np.round(100 * gm[[0, 4, 8]], 3)} % accel {np.round(100 * gm[[9, 13, 17]], 3)} %"
         print(msg, flush=True)
         if not accepted or rel < a.rel_tol:
             if ng and accepted and np.abs(gm - gm_pass).max() > 1e-5 and passes < 5:
@@ -1792,7 +1801,8 @@ def cmd_solve(a):
                                     "max": float(np.linalg.norm(t_wi - kf_p, axis=1).max())},
         "biases": {str(k): {"accel": values.atConstantBias(B(k)).accelerometer().tolist(),
                             "gyro": values.atConstantBias(B(k)).gyroscope().tolist()} for k in (0, n // 2, n - 1)},
-        "gyro_m": gm.reshape(3, 3).tolist(),
+        "gyro_m": gm[:9].reshape(3, 3).tolist(),
+        "accel_m": gm[9:].reshape(3, 3).tolist(),
         "seconds": time.time() - t0,
     }
     print(json.dumps(summary, indent=1), flush=True)
@@ -1808,7 +1818,7 @@ def cmd_solve(a):
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
     return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
-            "gyro_m": gm.copy()}
+            "gyro_m": gm[:9].copy(), "accel_m": gm[9:].copy()}
 
 
 def cmd_online(a):
@@ -2273,6 +2283,10 @@ def main():
         s.add_argument("--gyro-m-pass", type=int, default=10,
                        help="iterations between preintegrating the IMU again with the current M")
         s.add_argument("--gyro-m", default="", help="9 comma-separated values: M to start from (row-major)")
+        s.add_argument("--est-accel-m", action="store_true",
+                       help="estimate the accelerometer's response error M_a likewise (scales, misalignment)")
+        s.add_argument("--accel-m-sigma", type=float, default=0.003, help="prior on each entry of M_a")
+        s.add_argument("--accel-m", default="", help="9 comma-separated values: M_a to start from (row-major)")
         s.add_argument("--save-states", action="store_true",
                        help="also write <out>_states.npz (keyframes, landmarks, observations) for loop-correct")
 
