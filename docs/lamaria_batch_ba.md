@@ -2695,6 +2695,47 @@ reversed run's speed over a few seconds would have tripped here and kept the
 late start; none is added, since no training run has such a case to set it
 on.
 
+### SLAM Dunk's gyroscope matrix and time-varying calibration
+
+SLAM Dunk (Van Meter and Paul, second on the LaMAria leaderboard) estimates
+a full 3×3 gyroscope response matrix per recording (ω ← (I + M) ω, prior
+0.2 %) and lets each camera's focal length and its rotation against the IMU
+change every 5 s. The ideas are taken from their paper's description; the
+code here is written independently. `solve` has both:
+
+- `--est-gyro-m`: M joins the dense border (nine parameters, prior
+  `--gyro-m-sigma`). The IMU factors' Jacobian with respect to M comes from
+  finite differences of a re-preintegration. Within a pass M enters to first
+  order, and the factors are re-preintegrated every `--gyro-m-pass`
+  iterations and at convergence.
+- `--ext-seg-seconds 5`: rotation and focal segments of 5 s instead of a
+  fixed count. `--ext-seg-sigma-cams` / `--focal-seg-sigma-cams` set the
+  random walk per physical camera.
+
+The chain passes them to its batch pass with `--pass-args="..."`. The
+variants below rerun the pass, revisits, rematch and final solve from the
+baseline's features and online result (track settings as in the chain):
+
+| Run | R_11_5cp | sequence_2_12 | sequence_3_17 |
+|---|---:|---:|---:|
+| Baseline (the chain) | 85.91 | 47.84 (CP recall at 1 m 20 %) | **80.07** (100 %) |
+| `--est-gyro-m` | 85.95 | 46.46 (10 %) | |
+| Time-varying: `--est-extrinsic 0 --ext-seg-seconds 5 --ext-seg-sigma 0.057 --focal-seg-sigma 0.000145` | 80.79 | **50.57** (25 %) | 63.98 (63 %) |
+| Both | **86.38** | 50.30 (25 %) | 64.18 (63 %) |
+
+M is real and estimable without ground truth: on R_11 the solve finds the
+axis scales −0.19 / −0.21 / −0.12 %, the values the pseudo-GT fit above
+gives for this device. But the CP Score barely moves with it, and on
+sequence_2_12 it finds a different, mostly antisymmetric M (a rotation the
+camera rotations absorb as well) and loses 1.4. The 5 s calibration segments
+help the one sequence whose heading bends (sequence_2_12: Sim(3) median
+error against the pseudo-GT 2.38 → 1.84 m) and cost 16 points on
+sequence_3_17, where the CP recall at 1 m falls from 100 % to 63 %: with a
+camera rotation free every 5 s, the heading drift is no longer pinned by the
+images. Neither is enabled in the chain. sequence_2_12's remaining error is
+mostly scale: the baseline is 0.84 % too large against the pseudo-GT over
+its 672 m extent, with a heading bend of 2–4° in the last third.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
