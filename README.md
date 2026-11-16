@@ -332,7 +332,9 @@ official evaluator: not a submission, so the comparison is indicative.
 ¹ Low light keeps the online result, and runs without the warm-up, which
 lowers it there. (The chain has since run the pass in low light too, with 30
 iterations: 63.87 → 68.77 on the two low-light sequences over three seeds,
-[Low light: the pass after all](docs/lamaria_batch_ba.md#low-light-the-pass-after-all).) Above GroundedSLAM on the mean: ahead on Short, Medium and
+[Low light: the pass after all](docs/lamaria_batch_ba.md#low-light-the-pass-after-all);
+with the gyroscope's response matrix in that pass, 71.19,
+[Low light: the gyroscope's response matrix](docs/lamaria_batch_ba.md#low-light-the-gyroscopes-response-matrix).) Above GroundedSLAM on the mean: ahead on Short, Medium and
 Long, level on Low light, behind on Moving (sequence_5_12's tram ride, which
 the solve halves: 7.4). Per sequence:
 [the real-time chain](docs/lamaria_batch_ba.md#the-first-minutes-online);

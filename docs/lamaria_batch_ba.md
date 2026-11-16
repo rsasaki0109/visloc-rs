@@ -2866,6 +2866,70 @@ loses 1.8), and the mean of the two by 4.90. The pass with 30 iterations,
 the revisits and the rematch are now the chain's default in low light;
 `--low-light-online` stops at the online result as before.
 
+### Low light: the gyroscope's response matrix
+
+Against the pseudo-GT, the low-light pass's error on sequence_4_10 is in the
+local scale, not the heading. Its
+keypoints rarely come back: sequence_4_10 keeps 115 observations per
+keyframe, and 63 % of its tracks are seen in two keyframes only. Each
+variant below reran the pass, revisits, rematch and final solve from the
+baseline's online result, one run each; a sequence moves by ±1.5–2 between
+runs there:
+
+| Change in the low-light pass | sequence_4_10 | sequence_4_11 | Mean |
+|---|---:|---:|---:|
+| The chain (30 iterations) | 66.01 | 70.76 | 68.39 |
+| Accelerometer bias random walk × 0.3 (`--accel-rw-scale 0.3`) | 67.21 | 69.48 | 68.34 |
+| Accelerometer bias random walk × 3 | 66.01 | 72.33 | 69.17 |
+| IMU noise densities × 0.7 (`--imu-noise-scale 0.7`) | 70.85 | 68.86 | 69.86 |
+| IMU noise densities × 1.4 | 65.37 | 71.86 | 68.61 |
+| **Gyroscope response matrix (`--est-gyro-m`)** | 68.20 | **76.05** | 72.13 |
+| The matrix and SLAM Dunk's 5 s calibration segments (as in [SLAM Dunk's gyroscope matrix](#slam-dunks-gyroscope-matrix-and-time-varying-calibration)) | 68.09 | 74.22 | 71.16 |
+| Descriptor ratio 0.9 in both matchings (`match --ratio 0.9`; the pass's and the rematch's) | 71.13 | 71.02 | 71.07 |
+| Descriptor distance limit 350 (`--max-desc 350`) | 66.97 | 67.55 | 67.26 |
+| Epipolar band up to 40 px (`--tau-max 40`) | 66.48 | 70.50 | 68.49 |
+| **The matrix and ratio 0.9** | **71.97** | 73.22 | **72.59** |
+
+More matches (ratio 0.9, distance limit 350) give the solve fewer
+observations, not more: the tracks they merge fail the triangulation more
+often. Both candidates then ran under the seeds of [the pass after
+all](#low-light-the-pass-after-all), each chain from the start, so the
+online result is the same run's. With ratio 0.9 the online windows read the
+looser matches too, and on sequence_4_11 they lose 10 points (61.47 / 57.41
+against 71.10 / 68.24 at seeds 1 and 2). Its pass then ends below the
+chain's (sequence_4_10 63.43 / 63.28 / 66.11, sequence_4_11 63.69 / 56.54).
+The matrix alone leaves the online result as it was (the same CP Scores to
+the digit) and gains in five of the six pairs:
+
+| Sequence | The chain, seeds 1 / 2 / 3 | Mean | With the matrix, seeds 1 / 2 / 3 | Mean |
+|---|---|---:|---|---:|
+| sequence_4_10 | 64.05 / 64.72 / 66.94 | 65.24 | 67.48 / 64.25 / 67.99 | **66.57** |
+| sequence_4_11 | 73.10 / 74.00 / 69.80 | 72.30 | 74.57 / 77.85 / 75.02 | **75.81** |
+| Mean | | 68.77 | | **71.19** |
+
+The pairs change by +3.43 / −0.47 / +1.05 and +1.47 / +3.85 / +5.22, +2.42
+on average. By day the matrix moved R_11_5cp by +0.04 and sequence_2_12 by
+−1.4 (within its noise), so the chain estimates it in the low-light pass
+only (both pass solves and the solve after the rematch, not the online
+windows).
+
+The keypoints' repeatability was the other suspect. `lamaria_batch_ba.py
+flow` follows each keyframe's keypoints through the 20 Hz frames to the next
+keyframe by Lucas-Kanade flow (21 px window, 4 levels, forward-backward
+error under `--fb-max` 0.5 px). A tracked point links to a keypoint there
+when one is within `--assoc` 1.5 px and the two are each other's nearest;
+otherwise it becomes a new keypoint, at least `--min-dist` 3 px from the
+others, whose descriptor matches nothing. `solve --flow flow.npz` adds the
+links to the descriptor matches, and `lamaria_ba_chain.py --flow` runs the
+step after the matching. On sequence_4_10, 46 % of the keypoints survive
+the flow to the next keyframe, but only 17 % land within 1.5 px of a
+keypoint detected there. The flow adds 1.30 M links and 0.90 M keypoints
+(the solve's observations 328 k → 541 k) in 465 s. The CP Score goes from
+66.01 to 67.67, within the sequence's noise, and the error over keyframes
+1000–1400 against the pseudo-GT from 0.251 to 0.242 m, with the same 2.7 %
+scale error in its sub-windows. More observations of the same kind do not
+fix the scale; the flow stays off.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
@@ -2977,11 +3041,18 @@ python scripts/lamaria_batch_ba.py solve --work work/$S --vio out/$S.lc.tum --ca
 - **Track statistics.** `scripts/lamaria_track_stats.py --states
   ba1_states.npz --calib CALIB --work WORK` prints how often a solve's landmarks
   are observed where they are visible, and the track lengths.
+- **Optical flow.** `flow --mav0 MAV0 --work WORK` links consecutive
+  keyframes by Lucas-Kanade flow through the frames between them and adds the
+  tracked points as keypoints; `solve --flow WORK/flow.npz` reads the links.
+  Off in the chain (see [Low light: the gyroscope's response
+  matrix](#low-light-the-gyroscopes-response-matrix)).
 - **Recommended.** The [table above](#with-the-focal-lengths-the-keypoint-sizes-and-denoising)
   uses `--est-focal --sigma-size 2.7 --sigma-size-pow 0.35` in both solves,
   `features --clahe --denoise 7` in low light, and no `--est-focal` on the
   moving platform. In low light, both solves also take `--iterations 30
-  --rel-tol 1e-5` (see [Iterations](#iterations)).
+  --rel-tol 1e-5` (see [Iterations](#iterations)), and the chain's pass
+  `--est-gyro-m` (see [Low light: the gyroscope's response
+  matrix](#low-light-the-gyroscopes-response-matrix)).
 - **Cost.** On this 4-core container, a 15-minute sequence takes about
   15 min for the features (2 processes; non-local means adds about as much)
   and 2–7 min for the matching (with numba). The solve uses

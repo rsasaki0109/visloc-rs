@@ -10,9 +10,10 @@ then one batch pass after the recording (docs/lamaria_batch_ba.md#the-first-minu
 with the factory camera rig and `gyro_bias_std` 1e-7 (the BA estimates the camera rotations itself); --track is
 the leaderboard track (1 Short, 2 Medium, 3 Long, 4 Low light, 5 Moving platform), which picks the options:
 
-- low light: CLAHE and non-local means before SIFT, no warm-up online, 30 iterations per solve in the pass
-  (sequence_4_10 and 4_11 over three IMU seeds: 63.87 at the online result, 68.77 after the pass; --low-light-online
-  stops at the online result, docs/lamaria_batch_ba.md#low-light-the-pass-after-all);
+- low light: CLAHE and non-local means before SIFT, no warm-up online, 30 iterations per solve in the pass and
+  the gyroscope's response matrix estimated there (sequence_4_10 and 4_11 over three IMU seeds: 63.87 at the
+  online result, 68.77 after the pass, 71.19 with the matrix; --low-light-online stops at the online result,
+  docs/lamaria_batch_ba.md#low-light-the-gyroscopes-response-matrix);
 - moving platform: no focal-length estimation;
 - by day: the gyro bias random walk ten times looser over the first minutes (online and pass) and ten times
   looser throughout in the pass.
@@ -85,7 +86,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     and searched for revisits guided by the VIO like the online windows' (the rematch then goes there too);
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
     those an essential matrix explains ("essential"). In low light the pass runs on the low-light keypoints, with
-    30 iterations per solve; `low_light_pass=False` stops there at the online windows instead. `match_args` are
+    30 iterations per solve and the gyroscope's response matrix; `low_light_pass=False` stops there at the online windows instead. `match_args` are
     extra options of the match steps (the first matching and the rematch); `flow` links consecutive keyframes
     by Lucas-Kanade flow through the frames between them (the flow step, after match) for every solve."""
     work = Path(work)
@@ -109,7 +110,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
             out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
-        iters = ["--iterations", "30", "--rel-tol", "1e-5"] if low else ["--iterations", "60"]
+        iters = ["--iterations", "30", "--rel-tol", "1e-5", "--est-gyro-m"] if low else ["--iterations", "60"]
         pas = [*solve, *iters, "--gyro-rw-scale", "10", *WARMUP, *pass_args]
         out += [
             ("pass solve", ["solve", "--work", pw, "--vio", work / "online.tum", "--out", work / "ba1.tum",
@@ -185,7 +186,7 @@ def main():
     p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
     p.add_argument("--low-light-online", action="store_true",
                    help="in low light, stop at the online windows (by default the pass and --rematch follow, "
-                        "with 30 iterations per solve)")
+                        "with 30 iterations per solve and the gyroscope's response matrix)")
     p.add_argument("--rematch", action="store_true", help="match again guided by the pass and solve again")
     p.add_argument("--features", choices=("sift", "rootsift", "aliked", "disk", "superpoint"), default="sift",
                    help="the keypoints: SIFT (or with RootSIFT descriptors), or learned ones on the GPU, "

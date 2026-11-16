@@ -36,7 +36,7 @@ class StepsTest(unittest.TestCase):
         self.assertNotIn("--clahe", p["features"])
         self.assertEqual(chain.result("w", 2), Path("w/ba2.tum"))
 
-    def test_low_light_passes_with_30_iterations(self):
+    def test_low_light_passes_with_30_iterations_and_the_gyroscope_matrix(self):
         p = plan(4)
         self.assertEqual(list(p), list(plan(2)))
         self.assertIn("--clahe", p["features"])
@@ -46,7 +46,10 @@ class StepsTest(unittest.TestCase):
             self.assertEqual(value(p[name], "--iterations"), "30")
             self.assertEqual(value(p[name], "--rel-tol"), "1e-5")
             self.assertEqual(value(p[name], "--gyro-rw-scale"), "10")
+            self.assertIn("--est-gyro-m", p[name])
+        self.assertNotIn("--est-gyro-m", p["online"])
         self.assertEqual(value(plan(2)["pass solve"], "--iterations"), "60")
+        self.assertNotIn("--est-gyro-m", plan(2)["pass solve"])
         self.assertNotIn("--rel-tol", plan(2)["pass solve"])
         self.assertEqual(chain.result("w", 4), Path("w/ba2.tum"))
 
