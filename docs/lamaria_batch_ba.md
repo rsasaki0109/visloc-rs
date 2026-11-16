@@ -2799,6 +2799,38 @@ The pseudo-GT errors do not move (sequence_2_11 0.28 m, sequence_1_19
 0.43 m median, either way). The focal length segments already follow
 whatever the temperature does to the focal length; the correction stays off.
 
+The focal length the solve estimates is the rectified pinhole image's, but
+the lens that changes is the fisheye behind it (both 241.6 px here). A
+change ε of the fisheye's focal length moves a pinhole keypoint radially by
+f (tan θ' − tan θ), where r(θ') = r(θ) / (1 + ε) in the factory
+RAD_TAN_THIN_PRISM_FISHEYE model (r(θ) = θ + Σ k_i θ^(2i+3), k from the
+recording's Aria calibration). At 57° off axis that is 2.1 times what a
+pinhole scale of the same ε gives (3.08 px against 1.47 px at ε = 0.4 %).
+`solve --focal-fisheye EPS0,EPS1 --fisheye-calib ARIA.json` moves the
+keypoints by that before the solve; a negative ε needs the `=` form
+(`--focal-fisheye=-0.0013,-0.0009`). The pinhole focal length segments stay
+estimated on top. ε is each camera's mean focal change in the first pass
+solve (`ba1_summary.json`), a rule without ground truth; each run reran the
+pass, revisits, rematch and final solve with the correction from the
+baseline's features and online result:
+
+| Sequence | ε cam0 / cam1 | Baseline | With the fisheye correction | Change | SE(3) median against the pseudo-GT |
+|---|---|---:|---:|---:|---|
+| sequence_3_17 | +0.34 / +0.25 % (by hand) | 80.07 | 81.73 | +1.66 | 1.44 → 1.83 m |
+| sequence_3_17 | +0.43 / +0.38 % | 80.07 | 82.05 | +1.98 | 1.44 → 2.02 m |
+| sequence_2_11 | +0.36 / +0.26 % | 89.07 | 87.04 | −2.03 | 0.28 → 0.52 m |
+| sequence_2_11 | +0.18 / +0.13 % (half) | 89.07 | 86.08 | −2.99 | 0.28 → 0.56 m |
+| sequence_1_19 | −0.13 / −0.09 % | 82.25 | 83.01 | +0.76 | 0.43 → 0.35 m |
+| Mean of the rule's three | | 83.80 | 84.03 | +0.24 | |
+
+With the correction the pinhole focal segments that remain come out near
+zero (sequence_3_17 −0.07 to +0.10 %, sequence_1_19 −0.03 to 0.00 %), so the
+fisheye model fits the change better. But the CP Score does not follow:
+sequence_2_11 loses 2 to 3 points, nine times its seed spread, and loses
+more with half the correction than with all of it. A change that small to
+the keypoints moves sequence_2_11 by more than its IMU seeds do. The
+correction stays off.
+
 ### Low light: the pass after all
 
 The chain stopped at the online windows in low light because the pass lost
