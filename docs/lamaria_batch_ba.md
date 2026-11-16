@@ -2754,6 +2754,7 @@ seeds move it by ±0.12, so one run decides there; sequence_2_12 moves by
 | Accelerometer response matrix (`--est-accel-m`, prior 0.3 %) | 78.22 | 96 % | 1.11 m |
 | RootSIFT keypoints (`--features rootsift`, descriptor distance limit 300 as SIFT's) | 43.92 | 11 % | 1.67 m (max 8.5 m) |
 | RootSIFT keypoints, distance limit 225 (the default for RootSIFT) | 72.73 | 85 % | 0.93 m |
+| Focal lengths following the camera temperature (`--focal-temp`, −0.015 % per °C) | **80.45** | 100 % | 1.41 m |
 
 The accelerometer's matrix comes out at −0.31 / −0.15 / −0.09 % on its
 diagonal. Like the 5 s calibration segments, it brings the trajectory nearer
@@ -2764,6 +2765,25 @@ RootSIFT's nearest-neighbour distances run at about 0.75 times SIFT's, so
 SIFT's limit of 300 lets through 23 % more matches (12.1 M against 9.9 M),
 mostly wrong ones. With the limit at 225 (8.1 M matches) the trajectory again
 comes nearer the pseudo-GT and the CPs further away. SIFT stays.
+
+SLAM Dunk also models the calibration's drift with the camera's temperature.
+Each SLAM camera's image record in the VRS carries its sensor temperature
+(whole °C; the IMU's field is NaN), so a sparse copy of every 200th record
+gives a temperature curve per recording, its own data only:
+
+```bash
+python scripts/lamaria_vrs_fetch.py URL work/seq.vrs --sample-streams 1201-1,1201-2 --every 200
+python scripts/lamaria_temperature.py work/seq.vrs work/seq_temperature.csv --every 200
+```
+
+`solve --focal-temp CSV --focal-temp-coef κ` scales each keypoint about the
+principal point by 1 / (1 + κ (T − median T)), with T interpolated at the
+keyframe. sequence_3_17 warms from 28 to 40 °C in its first 100 s and then
+stays at 40–41 °C. On its first 300 keyframes (one calibration segment) the
+solve's final cost is lowest near κ = −1.5e-4 per °C (17,146 at 0, 17,129
+at −3e-4, 17,251 at +3e-4, 17,240 at −6e-4), a shallow minimum. With
+κ = −1.5e-4 in the pass the CP Score rises by 0.38, three times the
+sequence's seed spread.
 
 ## Usage
 
