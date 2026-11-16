@@ -96,6 +96,10 @@ const OPTIONAL_KEYS: &[&str] = &[
     // Monocular visual-only odometry (default false); see
     // `docs/mono_visual_only_vio.md`.
     "config.vio_visual_only",
+    // Seconds of accelerometer averaged to level the initial pose; the
+    // EuRoC reader starts that much later (absent: off, upstream's single
+    // sample); see `BasaltConfig::init_accel_average_s`.
+    "config.vio_init_accel_average_s",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -200,6 +204,24 @@ impl BasaltConfig {
             imu_noise_per_step: self.optional_bool("config.vio_imu_noise_per_step")?,
             visual_only: self.optional_bool("config.vio_visual_only")?,
         })
+    }
+    /// `config.vio_init_accel_average_s` (opt-in, not upstream): upstream
+    /// levels the first pose with the one accelerometer sample at the first
+    /// frame, so a single vibration spike tilts the whole run (6.9 deg on
+    /// EuRoC V2_01).  `Some(s)` makes the EuRoC reader start at the first
+    /// frame `s` seconds in and level with the mean sample over that span.
+    pub fn init_accel_average_s(&self) -> Result<Option<f64>, ConfigError> {
+        let key = "config.vio_init_accel_average_s";
+        if !self.values.contains_key(key) {
+            return Ok(None);
+        }
+        let span: f64 = self.value(key)?;
+        if !span.is_finite() || span <= 0.0 || span > 60.0 {
+            return Err(ConfigError::Value(format!(
+                "{key}: {span} is not a span in (0, 60] seconds"
+            )));
+        }
+        Ok(Some(span))
     }
     /// `config.vio_earth_rotation_latitude_deg`: `w_e sin(latitude)`, or 0
     /// when the key is absent.

@@ -3,8 +3,9 @@
 **Status: experimental, opt-in.** It runs end to end and is verified on
 synthetic data, including rendered images through the real KLT frontend.
 On EuRoC it tracks 8 of the 11 sequences and diverges in the first 5 s on
-the other three (see "Results on EuRoC"). The stereo-inertial path is
-unchanged.
+the other three (see "Results on EuRoC"). With the opt-in
+`config.vio_init_accel_average_s: 0.5` it tracks all 11 (see "A static
+start on EuRoC"). The stereo-inertial path is unchanged.
 
 ## Summary
 
@@ -175,16 +176,91 @@ only.
 - **Where mono fails: the start.** The first frame where the mono
   trajectory moves faster than 3 m/s comes 2.5–4.9 s after the first image
   on MH_03, MH_05, V2_01, V2_02 and V2_03. MH_05 and V2_02 come back, with
-  the two largest ATEs among the tracked runs; the other three do not. On V2_01 (2.5 s) and V2_03 (4.9 s) the ground truth is still
-  at rest (under 0.03 m/s), so the failure happens before any motion. On
-  MH_03 it comes at motion onset (2.8 s). Lost tracks are not the cause: the
-  frames around those times keep 108–174 cam0 observations. This is open item 2 below, and on EuRoC it is the main gap.
+  the two largest ATEs among the tracked runs; the other three do not. On
+  V2_01 (2.5 s) and V2_03 (4.9 s) the ground truth is still at rest (under
+  0.03 m/s), so the failure happens before any motion. On MH_03 it comes at
+  motion onset (2.8 s). Lost tracks are not the cause: the frames around
+  those times keep 108–174 cam0 observations. This is open item 2 below,
+  and on EuRoC it is the main gap.
 - **Scale.** Both modes come out about 1 % short on most sequences
   (stereo −0.4 to −1.5 % on 10 of 11). Because stereo shares it, it is not a
   mono effect. It may come from the calibration or from the ground truth.
 - **Time.** Mono took 59–138 s of wall time per sequence and stereo
   87–178 s, on WSL without `--pipeline`. Every mono run took less time than
   its recording lasts.
+
+### A static start on EuRoC
+
+**The cause is the first tilt, not the missing parallax.** Upstream
+`initialize()` levels the first pose with the one accelerometer sample at
+the first frame. On a hovering or vibrating platform that one sample can be
+far from gravity. Against the mean over the first second, it is off by:
+
+| Sequence | First sample vs 1 s mean |
+| --- | ---: |
+| V2_01_easy | 6.9° |
+| MH_01_easy | 5.6° |
+| V2_02_medium | 2.5° |
+| MH_02_easy | 1.7° |
+| V2_03_difficult | 1.7° |
+| MH_04_difficult | 1.0° |
+| MH_03_medium | 0.6° |
+| the other four | ≤ 0.15° |
+
+A tilt of 6.9° turns about 1.2 m/s² of gravity into horizontal
+acceleration. That matches V2_01's run reaching 3 m/s after 2.5 s at rest.
+MH_01 starts moving at once (0.8 m/s in its first 2 s), so its 1 s mean is
+not gravity either.
+
+**The option.** `config.vio_init_accel_average_s: s` (opt-in, not upstream)
+makes the EuRoC reader start at the first frame `s` seconds in. That
+frame's initialization sample is the mean of the IMU samples over the span.
+Every averaged sample comes before the first frame used, so the start
+stays causal. There are no poses for the first `s` seconds. The estimator
+is unchanged, and without the key the reader is too: the stereo V2_01
+trajectory stays byte-identical.
+
+**EuRoC with `s = 0.5`**, `--mono`, same build and settings as the table
+above. ATE is over the poses the run has, that is, from 0.5 s on:
+
+| Sequence | Mono ATE, upstream init | Mono ATE, 0.5 s mean | Scale | Stereo ATE |
+| --- | ---: | ---: | ---: | ---: |
+| MH_01_easy | 0.055 m | 0.072 m | −0.8 % | 0.066 m |
+| MH_02_easy | 0.077 m | 0.092 m | +0.8 % | 0.058 m |
+| MH_03_medium | diverged | 0.087 m | +0.3 % | 0.062 m |
+| MH_04_difficult | 0.160 m | 0.169 m | +0.6 % | 0.114 m |
+| MH_05_difficult | 0.190 m | 0.191 m | +1.6 % | 0.145 m |
+| V1_01_easy | 0.057 m | 0.047 m | −0.7 % | 0.043 m |
+| V1_02_medium | 0.074 m | 0.057 m | −1.3 % | 0.045 m |
+| V1_03_difficult | 0.115 m | 0.086 m | −2.0 % | 0.053 m |
+| V2_01_easy | diverged | 0.052 m | −0.3 % | 0.039 m |
+| V2_02_medium | 0.420 m | 0.122 m | +0.6 % | 0.049 m |
+| V2_03_difficult | diverged | 0.828 m | +19.0 % | 0.230 m |
+
+- **No sequence diverges.** The median |scale error| is 0.8 %.
+- **The 8 sequences that tracked before** average 0.144 m → 0.105 m. All
+  four Vicon-room ones among them improve.
+- **The machine-hall sequences that start moving are 0.9–1.7 cm worse.**
+  These are MH_01, MH_02 and MH_04. There the mean is no better than the
+  single sample. The option suits recordings that start at rest.
+- **V2_03 now passes its start** (first frame faster than 3 m/s: 4.9 s →
+  72.9 s). It still fails late, at 73 s, near where stereo also settles
+  late (74 s). That failure is not a start effect.
+- With 1.0 s, MH_03 is 0.085 m. Only MH_03 was run with 1.0 s.
+
+**A parallax gate was tried and not kept.** It required, on top of the
+5 cm baseline, a ray angle of 0.25–1.0° before triangulating. With the
+upstream init, MH_03 and V2_03 stopped diverging, but V2_01 still diverged,
+since its tilt error is there before any landmark. MH_01 worsened to
+0.067–0.094 m. Combined with the 0.5 s mean at 0.5°, results were mixed:
+
+| Sequence | 0.5 s mean | + 0.5° gate |
+| --- | ---: | ---: |
+| V2_01_easy | 0.052 m | 0.035 m |
+| MH_03_medium | 0.087 m | 0.072 m |
+| MH_05_difficult | 0.191 m | 0.233 m |
+| V2_02_medium | 0.122 m | 0.152 m |
+| V2_03_difficult | 0.828 m | 0.927 m |
 
 ## Verification
 
@@ -230,6 +306,7 @@ Further checks:
 - `tests/calibration_contract.rs::retain_cameras_produces_cam0_only_monocular_rig`
 - `tests/klt_stream_contract.rs::direct_stream_runs_monocular_without_cam1_or_stereo_stages`
 - `euroc::tests::monocular_reader_ignores_cam1_and_keeps_every_cam0_frame`
+- `euroc::tests::averaged_initialization_starts_later_and_levels_with_the_mean_sample`
 - the demo's `mono_flag_defaults_off_and_is_parsed`
 
 The test bounds are loose compared with the observed values (RMS < 5 cm,
@@ -245,12 +322,14 @@ platforms do not make them flaky.
    parallax. Translation then follows the IMU alone, and the drift is
    driven by accelerometer bias until motion begins. The static-start test
    pins this behavior: about 0.13 m after 2 s at rest with a 0.06 m/s² bias,
-   then recovery. On EuRoC it does not recover: MH_03, V2_01 and V2_03
-   diverge in the first 5 s, two of them while still at rest.
-   Upstream Basalt has no zero-velocity update. Adding one, or a
-   parallax-gated init in the style of VINS-Mono, would be a non-upstream
-   extension to the parity-locked window solver. It is deliberately not part
-   of this change.
+   then recovery. On EuRoC, MH_03, V2_01 and V2_03 diverge in the first
+   5 s with the upstream init. The main cause there is the one-sample
+   initial tilt. The opt-in `config.vio_init_accel_average_s` removes it
+   for recordings that start at rest (see "A static start on EuRoC").
+   Upstream Basalt has no zero-velocity update. Adding one would be a
+   non-upstream extension to the parity-locked window solver, and it has
+   not been tried. A motion-start initializer (VIBA1/VIBA2) is not wired
+   in either.
 3. **Constant-velocity segments.** These keep metric scale only through the
    IMU's bias and gravity terms, the textbook mono-VIO observability limit.
    The synthetic tests always contain acceleration.

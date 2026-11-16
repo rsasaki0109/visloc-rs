@@ -61,6 +61,9 @@ pub struct EurocSensorDataset {
     calibration: BasaltCalibration,
     config: BasaltConfig,
     monocular: bool,
+    /// Mean IMU sample from `config.vio_init_accel_average_s`, used as frame
+    /// zero's `initialization_imu`; `None` keeps upstream's single sample.
+    init_accel_mean: Option<ImuSample>,
 }
 
 impl EurocSensorDataset {
@@ -206,7 +209,36 @@ impl EurocSensorDataset {
             calibration
         };
 
+        // Opt-in (`config.vio_init_accel_average_s`): start at the first frame
+        // that many seconds after the first one, and level the initial pose
+        // with the mean accelerometer sample over that span instead of one
+        // sample.  Every averaged sample precedes the first frame used.
+        let init_accel_mean = match config.init_accel_average_s()? {
+            Some(span_s) => {
+                let first_ns = cam0_images[0].timestamp_ns;
+                let start_ns = first_ns + (span_s * 1e9).round() as TimestampNs;
+                cam0_images.retain(|image| image.timestamp_ns >= start_ns);
+                let Some(start) = cam0_images.first().map(|image| image.timestamp_ns) else {
+                    return Err(EurocReaderError::EmptyManifest(cam0_dir.join("data.csv")));
+                };
+                let span: Vec<_> = imu_samples
+                    .iter()
+                    .filter(|s| s.timestamp_ns >= first_ns && s.timestamp_ns <= start)
+                    .collect();
+                (!span.is_empty()).then(|| {
+                    let n = span.len() as f64;
+                    let mut mean = *span[span.len() - 1];
+                    mean.timestamp_ns = start;
+                    mean.accel_m_s2 = span.iter().map(|s| s.accel_m_s2).sum::<Vector3<f64>>() / n;
+                    mean.gyro_rad_s = span.iter().map(|s| s.gyro_rad_s).sum::<Vector3<f64>>() / n;
+                    mean
+                })
+            }
+            None => None,
+        };
+
         Ok(Self {
+            init_accel_mean,
             root,
             cam0_images,
             cam0_manifest_count,
@@ -323,10 +355,12 @@ impl EurocSensorDataset {
             imu,
             initialization_imu: (index == 0)
                 .then(|| {
-                    self.imu_samples
-                        .iter()
-                        .find(|sample| sample.timestamp_ns >= cam0.timestamp_ns)
-                        .copied()
+                    self.init_accel_mean.or_else(|| {
+                        self.imu_samples
+                            .iter()
+                            .find(|sample| sample.timestamp_ns >= cam0.timestamp_ns)
+                            .copied()
+                    })
                 })
                 .flatten(),
         })
@@ -740,6 +774,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![125, 150, 200]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn config_with(config: &Path, key: &str, value: serde_json::Value) {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config).unwrap()).unwrap();
+        json["value0"][key] = value;
+        write_file(config, &json.to_string());
+    }
+
+    #[test]
+    fn averaged_initialization_starts_later_and_levels_with_the_mean_sample() {
+        let (root, calibration, config) = make_dataset();
+        write_file(
+            &root.join("mav0/imu0/data.csv"),
+            "#timestamp,gx,gy,gz,ax,ay,az\n50,0,0,0,0,9,0\n100,0,0,0,0,0,9.8\n150,0,0,0.3,0,1,9.8\n200,0,0,0,0,2,9.8\n",
+        );
+        // Without the key: upstream's single sample at the first frame.
+        let upstream = EurocSensorDataset::open_monocular(&root, &calibration, &config).unwrap();
+        assert_eq!(upstream.frame_count(), 2);
+        let sample = upstream.frame(0).unwrap().initialization_imu.unwrap();
+        assert_eq!(sample.timestamp_ns, 100);
+        assert_eq!(sample.accel_m_s2, Vector3::new(0.0, 0.0, 9.8));
+
+        // 100 ns span: the run starts at frame 200 and levels with the mean
+        // of the samples in [100, 200]; the sample at 50 precedes the span.
+        config_with(&config, "config.vio_init_accel_average_s", 100e-9.into());
+        let dataset = EurocSensorDataset::open_monocular(&root, &calibration, &config).unwrap();
+        assert_eq!(dataset.frame_count(), 1);
+        let first = dataset.frame(0).unwrap();
+        assert_eq!(first.timestamp_ns, 200);
+        let mean = first.initialization_imu.unwrap();
+        assert_eq!(mean.timestamp_ns, 200);
+        assert!((mean.accel_m_s2 - Vector3::new(0.0, 1.0, 9.8)).norm() < 1e-12);
+        assert!((mean.gyro_rad_s - Vector3::new(0.0, 0.0, 0.1)).norm() < 1e-12);
+        // Every averaged sample precedes the first frame used.
+        assert!(first
+            .imu
+            .iter()
+            .all(|s| s.timestamp_ns <= first.timestamp_ns));
+
+        // A span past the last frame leaves nothing to run.
+        config_with(&config, "config.vio_init_accel_average_s", 1.0.into());
+        assert!(EurocSensorDataset::open_monocular(&root, &calibration, &config).is_err());
+        for bad in [0.0, -1.0, 61.0] {
+            config_with(&config, "config.vio_init_accel_average_s", bad.into());
+            assert!(matches!(
+                EurocSensorDataset::open_monocular(&root, &calibration, &config),
+                Err(EurocReaderError::Config(ConfigError::Value(_)))
+            ));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

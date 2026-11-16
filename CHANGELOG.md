@@ -6,6 +6,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`config.vio_init_accel_average_s`: an averaged initial tilt for the
+  EuRoC reader (opt-in).**
+  - **Why.** Upstream levels the first pose with the one accelerometer
+    sample at the first frame. On EuRoC V2_01 that sample is 6.9° off the
+    1 s mean, so about 1.2 m/s² of gravity becomes horizontal
+    acceleration, and the monocular VIO is at 3 m/s after 2.5 s at rest.
+  - **How.** With `s` set, the reader starts at the first frame `s` seconds
+    in and passes the mean sample over that span as the initialization
+    sample. Every averaged sample precedes the first frame used. There are
+    no poses for the first `s` seconds.
+  - **EuRoC, `--mono`, 0.5 s.** All 11 sequences track; without it MH_03,
+    V2_01 and V2_03 diverge. V2_01 diverged → 0.052 m, V2_02 0.42 → 0.12 m,
+    and the 8 sequences that tracked before average 0.144 → 0.105 m. MH_01,
+    MH_02 and MH_04, which start moving, are 0.9–1.7 cm worse
+    (docs/mono_inertial_vio.md, "A static start on EuRoC").
+  - Without the key the reader and the stereo trajectory are unchanged
+    (byte-identical on V2_01).
+
 - **`gsplat_photos --focal-prior-sigma S`: a known focal length (opt-in).**
   - **How.** The mapper holds `--focal` (or EXIF's) and refines only the
     principal point. The final refinement keeps `fx` and `fy` within `S`
