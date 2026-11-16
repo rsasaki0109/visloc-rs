@@ -73,7 +73,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio", pass_args=()):
+          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=False):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -82,7 +82,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     `pass_features` gives the pass by day keypoints of its own: a learned extractor's, in work/<extractor>, matched
     and searched for revisits guided by the VIO like the online windows' (the rematch then goes there too);
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
-    those an essential matrix explains ("essential")."""
+    those an essential matrix explains ("essential"); `low_light_pass` runs the pass in low light too, on the
+    low-light keypoints."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
@@ -91,7 +92,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)])
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
                            *([] if low else WARMUP)], work / "online.done", True))
-    if not low:  # the batch pass after the recording, its random walk ten times looser
+    if not low or low_light_pass:  # the batch pass after the recording, its random walk ten times looser
         pw = pass_work(work, pass_features)
         if pass_features:
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
@@ -120,15 +121,15 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     return out
 
 
-def result(work, track, low_light=None, rematch=False):
+def result(work, track, low_light=None, rematch=False, low_light_pass=False):
     """The trajectory the chain ends with."""
-    low = track == LOW_LIGHT if low_light is None else low_light
+    low = (track == LOW_LIGHT if low_light is None else low_light) and not low_light_pass
     return Path(work) / ("online.tum" if low else "ba3.tum" if rematch else "ba2.tum")
 
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio", pass_args=()):
+              pass_match="vio", pass_args=(), low_light_pass=False):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -137,7 +138,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         if not (pw / "rematch" / "features.npz").is_symlink():
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
-                                           num_features, pass_features, pass_match, pass_args):
+                                           num_features, pass_features, pass_match, pass_args, low_light_pass):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -153,7 +154,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         log(f"{name}: {time.time() - t0:.0f} s")
     for matches in {work / "matches.npz", pw / "matches.npz", pw / "rematch" / "matches.npz"}:
         matches.unlink(missing_ok=True)  # 0.2 GB, not needed once the chain has run
-    shutil.copyfile(result(work, track, low_light, rematch), out)
+    shutil.copyfile(result(work, track, low_light, rematch, low_light_pass), out)
     return Path(out)
 
 
@@ -169,6 +170,8 @@ def main():
     p.add_argument("--jobs", type=int, default=4, help="processes for features, match and loops")
     p.add_argument("--threads", type=int, default=2, help="threads for the online windows and the pass")
     p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
+    p.add_argument("--low-light-pass", action="store_true",
+                   help="in low light, run the pass (and --rematch) after the online windows too")
     p.add_argument("--rematch", action="store_true", help="by day, match again guided by the pass and solve again")
     p.add_argument("--features", choices=("sift", "rootsift", "aliked", "disk", "superpoint"), default="sift",
                    help="the keypoints: SIFT (or with RootSIFT descriptors), or learned ones on the GPU, "
@@ -187,7 +190,7 @@ def main():
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
-              pass_args=a.pass_args.split())
+              pass_args=a.pass_args.split(), low_light_pass=a.low_light_pass)
 
 
 if __name__ == "__main__":
