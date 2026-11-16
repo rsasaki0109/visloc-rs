@@ -2752,11 +2752,18 @@ seeds move it by ±0.12, so one run decides there; sequence_2_12 moves by
 | Baseline (the chain) | **80.07** | 100 % | 1.44 m |
 | Cauchy loss for the reprojections (`--huber -2`) | 76.04 | 96 % | 1.48 m |
 | Accelerometer response matrix (`--est-accel-m`, prior 0.3 %) | 78.22 | 96 % | 1.11 m |
+| RootSIFT keypoints (`--features rootsift`, descriptor distance limit 300 as SIFT's) | 43.92 | 11 % | 1.67 m (max 8.5 m) |
+| RootSIFT keypoints, distance limit 225 (the default for RootSIFT) | 72.73 | 85 % | 0.93 m |
 
 The accelerometer's matrix comes out at −0.31 / −0.15 / −0.09 % on its
 diagonal. Like the 5 s calibration segments, it brings the trajectory nearer
 the pseudo-GT and the CPs further away. The time offsets are already
 calibrated ([IMU-camera time offset](#imu-camera-time-offset)).
+
+RootSIFT's nearest-neighbour distances run at about 0.75 times SIFT's, so
+SIFT's limit of 300 lets through 23 % more matches (12.1 M against 9.9 M),
+mostly wrong ones. With the limit at 225 (8.1 M matches) the trajectory again
+comes nearer the pseudo-GT and the CPs further away. SIFT stays.
 
 ## Usage
 
