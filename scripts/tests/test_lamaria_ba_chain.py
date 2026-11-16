@@ -36,13 +36,25 @@ class StepsTest(unittest.TestCase):
         self.assertNotIn("--clahe", p["features"])
         self.assertEqual(chain.result("w", 2), Path("w/ba2.tum"))
 
-    def test_low_light_stops_at_the_online_windows(self):
+    def test_low_light_passes_with_30_iterations(self):
         p = plan(4)
-        self.assertEqual(list(p), ["features", "match", "loops", "online"])
+        self.assertEqual(list(p), list(plan(2)))
         self.assertIn("--clahe", p["features"])
         self.assertEqual(value(p["features"], "--denoise"), "7")
         self.assertNotIn("--gyro-rw-warmup", p["online"])
-        self.assertEqual(chain.result("w", 4), Path("w/online.tum"))
+        for name in ("pass solve", "pass solve with the revisits"):
+            self.assertEqual(value(p[name], "--iterations"), "30")
+            self.assertEqual(value(p[name], "--rel-tol"), "1e-5")
+            self.assertEqual(value(p[name], "--gyro-rw-scale"), "10")
+        self.assertEqual(value(plan(2)["pass solve"], "--iterations"), "60")
+        self.assertNotIn("--rel-tol", plan(2)["pass solve"])
+        self.assertEqual(chain.result("w", 4), Path("w/ba2.tum"))
+
+    def test_low_light_can_stop_at_the_online_windows(self):
+        low = [name for name, *_ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                rematch=True, low_light_pass=False)]
+        self.assertEqual(low, ["features", "match", "loops", "online"])
+        self.assertEqual(chain.result("w", 4, rematch=True, low_light_pass=False), Path("w/online.tum"))
 
     def test_a_daylit_low_light_sequence_runs_the_day_options(self):
         p = {name: [str(c) for c in cmd]
@@ -93,9 +105,10 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(value(p["loop-correct"], "--states"), str(Path("w/ba1_states.npz")))
         self.assertEqual(value(p["rematch"], "--work"), str(Path("w/aliked/rematch")))
         self.assertEqual(value(p["solve with the new matches"], "--out"), str(Path("w/ba3.tum")))
-        low = [name for name, *_ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
-                                                pass_features="aliked")]
-        self.assertEqual(low, ["features", "match", "loops", "online"])
+        low = {name: [str(c) for c in cmd] for name, cmd, _, _ in
+               chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4, pass_features="aliked")}
+        self.assertNotIn("pass features", low)  # low light: the pass on the low-light SIFT keypoints
+        self.assertEqual(value(low["pass solve"], "--work"), "w")
 
     def test_the_pass_matches_within_the_online_band_or_by_an_essential_matrix(self):
         def plan_with(guide):
@@ -116,7 +129,7 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(value(vio, "--vio"), "vio.tum")
         self.assertNotIn("--verify", vio)
 
-    def test_the_rematch_follows_the_pass_by_day_only(self):
+    def test_the_rematch_follows_the_pass(self):
         p = {name: [str(c) for c in cmd]
              for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True)}
         self.assertEqual(list(p)[-3:], ["rematch", "rematch loops", "solve with the new matches"])
@@ -131,8 +144,8 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(value(solve, "--gyro-rw-scale"), "10")
         self.assertEqual(chain.result("w", 2, rematch=True), Path("w/ba3.tum"))
         low = [name for name, *_ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4, rematch=True)]
-        self.assertEqual(low, ["features", "match", "loops", "online"])
-        self.assertEqual(chain.result("w", 4, rematch=True), Path("w/online.tum"))
+        self.assertEqual(low[-3:], ["rematch", "rematch loops", "solve with the new matches"])
+        self.assertEqual(chain.result("w", 4, rematch=True), Path("w/ba3.tum"))
 
 
 FAKE_BA = textwrap.dedent('''

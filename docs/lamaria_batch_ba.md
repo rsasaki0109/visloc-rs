@@ -2799,6 +2799,41 @@ The pseudo-GT errors do not move (sequence_2_11 0.28 m, sequence_1_19
 0.43 m median, either way). The focal length segments already follow
 whatever the temperature does to the focal length; the correction stays off.
 
+### Low light: the pass after all
+
+The chain stopped at the online windows in low light because the pass lost
+there ([The first minutes, online](#the-first-minutes-online): 66.77 against
+67.63). That was before the rematch, and with the pass's 60 iterations.
+`lamaria_ba_chain.py` now runs the pass in low light too, on the low-light
+keypoints (CLAHE, non-local means), and the rematch after it. Each variant
+reran the pass from the baseline's online result on this machine:
+
+| Pass in low light | sequence_4_10 | sequence_4_11 | Mean |
+|---|---:|---:|---:|
+| None (the online result) | 59.80 | **71.07** | 65.43 |
+| 60 iterations | 69.04 | 63.94 | 66.49 |
+| 30 iterations (`--iterations 30 --rel-tol 1e-5`) | 66.01 | 70.76 | **68.39** |
+| 60 iterations, no warm-up | 63.31 | 52.05 | 57.68 |
+| 30 iterations, no warm-up | **69.35** | 67.18 | 68.27 |
+
+The rematch moves each by less than 0.5 (the pass with the revisits:
+62.90 / 68.89 / 52.14 / 67.27 for the two no-warm-up rows). The pass with
+30 iterations then ran under the seeds ([How far the chain moves for
+nothing](#how-far-the-chain-moves-for-nothing): the IMU with a tenth of its
+noise density added, the run's SIFT keyframes linked), the online result and
+the pass from the same run:
+
+| Sequence | Online, seeds 1 / 2 / 3 | Mean | Pass with 30 iterations, seeds 1 / 2 / 3 | Mean |
+|---|---|---:|---|---:|
+| sequence_4_10 | 58.03 / 56.62 / 57.67 | 57.44 | 64.05 / 64.72 / 66.94 | **65.24** |
+| sequence_4_11 | 71.10 / 68.24 / 71.57 | 70.30 | 73.10 / 74.00 / 69.80 | **72.30** |
+| Mean | | 63.87 | | **68.77** |
+
+Five of the six seed pairs gain (+2.0 to +9.3; sequence_4_11's seed 3
+loses 1.8), and the mean of the two by 4.90. The pass with 30 iterations,
+the revisits and the rematch are now the chain's default in low light;
+`--low-light-online` stops at the online result as before.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO

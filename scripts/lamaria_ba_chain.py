@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The real-time LaMAria chain behind a VIO trajectory: lamaria_batch_ba.py's features, match, loops and online,
-then, by day, one batch pass after the recording (docs/lamaria_batch_ba.md#the-first-minutes-online).
+then one batch pass after the recording (docs/lamaria_batch_ba.md#the-first-minutes-online).
 
     python scripts/lamaria_ba_chain.py --mav0 seq/mav0 --vio vio/trajectory.tum --imu seq/mav0/imu0/data.csv \\
         --calib seq_calib_ba.json --track 2 --work work/seq --out seq.tum
@@ -10,12 +10,14 @@ then, by day, one batch pass after the recording (docs/lamaria_batch_ba.md#the-f
 with the factory camera rig and `gyro_bias_std` 1e-7 (the BA estimates the camera rotations itself); --track is
 the leaderboard track (1 Short, 2 Medium, 3 Long, 4 Low light, 5 Moving platform), which picks the options:
 
-- low light: CLAHE and non-local means before SIFT, no warm-up, the online result without the pass;
+- low light: CLAHE and non-local means before SIFT, no warm-up online, 30 iterations per solve in the pass
+  (sequence_4_10 and 4_11 over three IMU seeds: 63.87 at the online result, 68.77 after the pass; --low-light-online
+  stops at the online result, docs/lamaria_batch_ba.md#low-light-the-pass-after-all);
 - moving platform: no focal-length estimation;
 - by day: the gyro bias random walk ten times looser over the first minutes (online and pass) and ten times
   looser throughout in the pass.
 
---rematch (by day; the submission driver's default) matches the keyframes and finds the revisits once more after
+--rematch (the submission driver's default) matches the keyframes and finds the revisits once more after
 the pass, guided by the pass's trajectory instead of the VIO, and solves again from there with those matches:
 training R_12_10cp, whose VIO heading drifts 0.78 deg/min, goes from 61.09 to 64.30 (the same solve with the
 VIO's matches: 60.48), the eight day training sequences from 64.50 to 64.76 on average
@@ -73,7 +75,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=False):
+          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -82,8 +84,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     `pass_features` gives the pass by day keypoints of its own: a learned extractor's, in work/<extractor>, matched
     and searched for revisits guided by the VIO like the online windows' (the rematch then goes there too);
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
-    those an essential matrix explains ("essential"); `low_light_pass` runs the pass in low light too, on the
-    low-light keypoints."""
+    those an essential matrix explains ("essential"). In low light the pass runs on the low-light keypoints, with
+    30 iterations per solve; `low_light_pass=False` stops there at the online windows instead."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
@@ -93,12 +95,14 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
                            *([] if low else WARMUP)], work / "online.done", True))
     if not low or low_light_pass:  # the batch pass after the recording, its random walk ten times looser
+        pass_features = None if low else pass_features
         pw = pass_work(work, pass_features)
         if pass_features:
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
             out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
-        pas = [*solve, "--iterations", "60", "--gyro-rw-scale", "10", *WARMUP, *pass_args]
+        iters = ["--iterations", "30", "--rel-tol", "1e-5"] if low else ["--iterations", "60"]
+        pas = [*solve, *iters, "--gyro-rw-scale", "10", *WARMUP, *pass_args]
         out += [
             ("pass solve", ["solve", "--work", pw, "--vio", work / "online.tum", "--out", work / "ba1.tum",
                             "--save-states", *pas], work / "ba1.done", True),
@@ -121,7 +125,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     return out
 
 
-def result(work, track, low_light=None, rematch=False, low_light_pass=False):
+def result(work, track, low_light=None, rematch=False, low_light_pass=True):
     """The trajectory the chain ends with."""
     low = (track == LOW_LIGHT if low_light is None else low_light) and not low_light_pass
     return Path(work) / ("online.tum" if low else "ba3.tum" if rematch else "ba2.tum")
@@ -129,7 +133,7 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=False):
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio", pass_args=(), low_light_pass=False):
+              pass_match="vio", pass_args=(), low_light_pass=True):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -170,9 +174,10 @@ def main():
     p.add_argument("--jobs", type=int, default=4, help="processes for features, match and loops")
     p.add_argument("--threads", type=int, default=2, help="threads for the online windows and the pass")
     p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
-    p.add_argument("--low-light-pass", action="store_true",
-                   help="in low light, run the pass (and --rematch) after the online windows too")
-    p.add_argument("--rematch", action="store_true", help="by day, match again guided by the pass and solve again")
+    p.add_argument("--low-light-online", action="store_true",
+                   help="in low light, stop at the online windows (by default the pass and --rematch follow, "
+                        "with 30 iterations per solve)")
+    p.add_argument("--rematch", action="store_true", help="match again guided by the pass and solve again")
     p.add_argument("--features", choices=("sift", "rootsift", "aliked", "disk", "superpoint"), default="sift",
                    help="the keypoints: SIFT (or with RootSIFT descriptors), or learned ones on the GPU, "
                         "matched by LightGlue")
@@ -190,7 +195,7 @@ def main():
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
-              pass_args=a.pass_args.split(), low_light_pass=a.low_light_pass)
+              pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online)
 
 
 if __name__ == "__main__":
