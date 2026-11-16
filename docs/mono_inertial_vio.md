@@ -2,8 +2,9 @@
 
 **Status: experimental, opt-in.** It runs end to end and is verified on
 synthetic data, including rendered images through the real KLT frontend.
-**No EuRoC ATE has been measured yet** because the machine that did this work
-cannot reach the dataset. The stereo-inertial path is unchanged.
+On EuRoC it tracks 8 of the 11 sequences and diverges in the first 5 s on
+the other three (see "Results on EuRoC"). The stereo-inertial path is
+unchanged.
 
 ## Summary
 
@@ -131,6 +132,60 @@ large). Windows are Sim(3) alignments of 10 s spans, every 2 s.
 - On a GitHub runner each sequence takes 283–376 s to fetch and about 90 s
   for both runs.
 
+### Results on EuRoC
+
+All 11 EuRoC sequences, run locally on 2026-11-17 from main at `7233d3e2`
+(`release-rt` profile). The calibration is
+`benchmarks/basalt/release_inputs/euroc_ds_calib.json` and the config is
+`configs/basalt/euroc_config.json`, with `--no-trace --no-marg-data` and no
+`--pipeline`. Each run is VIO alone (no mapper, no loop closure) and scored
+with `scripts/euroc_scale_report.py`. The data are the ETH Research
+Collection's family zips, MD5-checked. Each sequence ran once. A second run
+of V2_01 and MH_03 gave byte-identical trajectories.
+
+ATE is RMS after SE(3) alignment over the whole sequence. "Diverged" means
+the mono run's error grows without bound (SE(3) ATE 32 m to 10 km). The
+ORB-SLAM3 columns are the published Table II values (Campos et al., TRO 2021,
+arXiv:2007.11898 v2: median of 10 runs, SE(3) alignment for inertial modes).
+Those values come from the full system with loop closure and multi-map. A
+single VIO run here is not the same condition, so read them as a reference
+only.
+
+| Sequence | Mono ATE | Mono scale | Stereo ATE | Stereo scale | ORB-SLAM3 mono-inertial | ORB-SLAM3 stereo-inertial |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MH_01_easy | 0.055 m | −0.7 % | 0.066 m | −1.4 % | 0.062 m | 0.036 m |
+| MH_02_easy | 0.077 m | +0.3 % | 0.058 m | −0.8 % | 0.037 m | 0.033 m |
+| MH_03_medium | diverged | — | 0.062 m | −0.9 % | 0.046 m | 0.035 m |
+| MH_04_difficult | 0.160 m | +0.6 % | 0.114 m | −1.1 % | 0.075 m | 0.051 m |
+| MH_05_difficult | 0.190 m | +1.4 % | 0.145 m | −0.4 % | 0.057 m | 0.082 m |
+| V1_01_easy | 0.057 m | −1.3 % | 0.043 m | −1.5 % | 0.049 m | 0.038 m |
+| V1_02_medium | 0.074 m | −1.4 % | 0.045 m | −1.5 % | 0.015 m | 0.014 m |
+| V1_03_difficult | 0.115 m | −1.5 % | 0.053 m | −1.0 % | 0.037 m | 0.024 m |
+| V2_01_easy | diverged | — | 0.039 m | −1.2 % | 0.042 m | 0.032 m |
+| V2_02_medium | 0.420 m | +4.1 % | 0.049 m | −0.6 % | 0.021 m | 0.014 m |
+| V2_03_difficult | diverged | — | 0.230 m | +1.2 % | 0.027 m | 0.024 m |
+
+- **Stereo-inertial** tracks all 11. Its median |scale error| is 1.1 % and
+  the largest 1.5 %. Every 10 s window is within ±5 % from the start, except
+  V2_03, which settles at 74 s.
+- **Monocular-inertial** tracks 8 of 11. On those 8 the scale error is
+  −1.5 % to +4.1 %. Mono ATE is 1.4–37 cm above stereo, except on MH_01,
+  where it is 1.1 cm below. V2_02 is tracked but poor (0.42 m): its 10 s
+  windows are within ±5 % only from 54 s on.
+- **Where mono fails: the start.** The first frame where the mono
+  trajectory moves faster than 3 m/s comes 2.5–4.9 s after the first image
+  on MH_03, MH_05, V2_01, V2_02 and V2_03. MH_05 and V2_02 come back, with
+  the two largest ATEs among the tracked runs; the other three do not. On V2_01 (2.5 s) and V2_03 (4.9 s) the ground truth is still
+  at rest (under 0.03 m/s), so the failure happens before any motion. On
+  MH_03 it comes at motion onset (2.8 s). Lost tracks are not the cause: the
+  frames around those times keep 108–174 cam0 observations. This is open item 2 below, and on EuRoC it is the main gap.
+- **Scale.** Both modes come out about 1 % short on most sequences
+  (stereo −0.4 to −1.5 % on 10 of 11). Because stereo shares it, it is not a
+  mono effect. It may come from the calibration or from the ground truth.
+- **Time.** Mono took 59–138 s of wall time per sequence and stereo
+  87–178 s, on WSL without `--pipeline`. Every mono run took less time than
+  its recording lasts.
+
 ## Verification
 
 Synthetic tests in `pipelines/basalt/tests/mono_inertial_synthetic.rs`:
@@ -183,17 +238,15 @@ platforms do not make them flaky.
 
 ## Known limitations / open items
 
-1. **No EuRoC numbers yet.** The ATE of `--mono` on the 11 EuRoC sequences
-   (SE(3)-aligned, compared with the stereo-inertial baseline and with
-   ORB-SLAM3 mono-inertial) still needs to be measured. Also measure the
-   real-time factor, and record `first_visual_frame`-style statistics, i.e.
-   when temporal triangulation starts.
+1. **EuRoC: measured** (see "Results on EuRoC"). Still missing:
+   `first_visual_frame`-style statistics, i.e. when temporal triangulation
+   starts, and the real-time factor with `--pipeline`.
 2. **Static start.** While the body is at rest, a single camera has no
    parallax. Translation then follows the IMU alone, and the drift is
    driven by accelerometer bias until motion begins. The static-start test
    pins this behavior: about 0.13 m after 2 s at rest with a 0.06 m/s² bias,
-   then recovery. EuRoC MH sequences start on the ground, so expect a
-   visible error at the start of those runs.
+   then recovery. On EuRoC it does not recover: MH_03, V2_01 and V2_03
+   diverge in the first 5 s, two of them while still at rest.
    Upstream Basalt has no zero-velocity update. Adding one, or a
    parallax-gated init in the style of VINS-Mono, would be a non-upstream
    extension to the parity-locked window solver. It is deliberately not part
