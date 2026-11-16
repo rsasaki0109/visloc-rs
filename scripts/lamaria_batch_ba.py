@@ -1415,6 +1415,38 @@ def temperature_corrected(xy, offsets, kf_ns, cams, path, coef):
     return xy
 
 
+def fisheye_corrected(xy, offsets, cams, aria_calib, eps):
+    """The keypoints of the rectified pinhole images as they would be if each fisheye's focal length were
+    (1 + eps) times the factory's: the factory radial model r(theta) = theta + k0 theta^3 + ... + k5 theta^13
+    (Aria's json), a keypoint's ray angle theta moved to where r(theta') = r(theta) / (1 + eps). A pinhole
+    focal length scale would move it by tan(theta) instead, half as far as this at the image's edge.
+    Images alternate cam0, cam1 per keyframe."""
+    calib = json.load(open(aria_calib))
+    xy = xy.copy()
+    cam = np.zeros(len(xy), np.int64)
+    for i in range(len(offsets) - 1):
+        cam[offsets[i]:offsets[i + 1]] = i % 2
+    for c in range(2):
+        if eps[c] == 0.0:
+            continue
+        k = np.asarray(calib[f"cam{c}"]["params"][4:10], np.float64)
+        pw = 2 * np.arange(len(k)) + 3
+        r = lambda t: t + (k[None] * t[:, None] ** pw[None]).sum(1)
+        dr = lambda t: 1.0 + (k[None] * pw[None] * t[:, None] ** (pw[None] - 1)).sum(1)
+        sel = cam == c
+        f, pp = cams[c]["K"][0, 0], cams[c]["K"][:2, 2]
+        d = xy[sel] - pp
+        rho = np.maximum(np.linalg.norm(d, axis=1) / f, 1e-12)
+        th = np.arctan(rho)
+        target = r(th) / (1.0 + eps[c])
+        t = th.copy()
+        for _ in range(4):
+            t -= (r(t) - target) / dr(t)
+        xy[sel] = pp + d * (np.tan(t) / rho)[:, None]
+    print(f"  keypoints corrected for the fisheye focal lengths x(1 + {eps})", flush=True)
+    return xy
+
+
 def cmd_solve(a):
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
@@ -1428,6 +1460,8 @@ def cmd_solve(a):
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     if a.focal_temp and a.focal_temp_coef:
         xy = temperature_corrected(xy, offsets, kf_ns, cams, a.focal_temp, a.focal_temp_coef)
+    if a.focal_fisheye:
+        xy = fisheye_corrected(xy, offsets, cams, a.fisheye_calib, [float(v) for v in a.focal_fisheye.split(",")])
     m = np.load(os.path.join(a.work, "matches.npz"))
     k0, k1 = (int(x) for x in a.kf_range.split(":")) if a.kf_range else (0, len(kf_ns))
     k1 = min(k1, len(kf_ns))
@@ -2315,6 +2349,10 @@ def main():
         s.add_argument("--gyro-m", default="", help="9 comma-separated values: M to start from (row-major)")
         s.add_argument("--focal-temp", default="",
                        help="the SLAM cameras' temperature (lamaria_temperature.py) for --focal-temp-coef")
+        s.add_argument("--focal-fisheye", default="",
+                       help="EPS0,EPS1: correct the keypoints for fisheye focal lengths (1 + EPS) times the factory's "
+                            "(needs --fisheye-calib)")
+        s.add_argument("--fisheye-calib", default="", help="the Aria factory calibration json for --focal-fisheye")
         s.add_argument("--focal-temp-coef", type=float, default=0.0,
                        help="relative focal length change per degree Celsius, about the recording's median")
         s.add_argument("--est-accel-m", action="store_true",
