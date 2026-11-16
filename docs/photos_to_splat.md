@@ -131,6 +131,43 @@ p90 / max, cm):
 - **It stays opt-in.** A focal length a few percent off is what the
   default refinement corrects, and EXIF is not always right.
 
+### The splats from these poses
+
+Do SfM poses limit the splat? On the seven scenes above, each splat was
+trained three ways, on the same images and from the same initial points:
+
+- the ground-truth poses and intrinsics, with the SfM points carried into
+  the ground-truth frame by the Sim(3) the pose errors use;
+- the default SfM;
+- the SfM with `--focal-prior-sigma 1e-5`.
+
+The trainer was `gsplat_train_cuda` (30k steps, `--holdout 8`), and every
+setting ran twice. Held-out PSNR (dB, run 1 / run 2):
+
+| Scene | Held out | Ground truth | Default | `--focal-prior-sigma 1e-5` |
+|---|---|---|---|---|
+| office | 4 | 21.23 / 21.84 | 21.50 / 22.05 | 22.12 / 22.14 |
+| pipes | 2 | 20.46 / 20.44 | 20.29 / 21.09 | 19.85 / 20.31 |
+| terrace | 3 | 24.69 / 25.13 | 25.63 / 25.10 | 25.18 / 25.05 |
+| kicker | 4 | 23.69 / 23.03 | 23.58 / 22.95 | 23.54 / 23.45 |
+| playground | 5 | 19.60 / 19.66 | 19.58 / 19.33 | 19.37 / 19.29 |
+| terrains | 6 | 25.76 / 25.82 | 25.73 / 26.28 | 25.33 / 25.70 |
+| courtyard | 5 | 23.80 / 23.61 | 23.29 / 23.75 | 23.58 / 24.05 |
+| mean | | 22.77 | 22.87 | 22.78 |
+
+- **Here the poses do not limit the splat.** The three means lie within
+  0.1 dB. Each run lands up to 0.8 dB from its repeat, and the settings
+  differ by less than that on every scene.
+- **office's misplaced cameras.** The six cameras the default leaves
+  1.4 m off (DSC_0236–0241, also turned by 19°) are all training views;
+  the four held-out views are within 1 cm. The held-out PSNR shows those
+  six only where their splats spoil the held-out views, and it did not
+  fall.
+- **Only for errors of this size.** These SfM poses are within a
+  centimetre or two of the ground truth. SmallCity's 14–25 cm, a warp
+  along the loop, is not measured here: its release model has no
+  intrinsics locally.
+
 ## Masks
 
 `--masks DIR` keeps an operator, a monopod or any other object that moves
