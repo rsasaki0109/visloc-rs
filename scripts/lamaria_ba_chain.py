@@ -75,7 +75,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True, match_args=()):
+          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -86,7 +86,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
     those an essential matrix explains ("essential"). In low light the pass runs on the low-light keypoints, with
     30 iterations per solve; `low_light_pass=False` stops there at the online windows instead. `match_args` are
-    extra options of the match steps (the first matching and the rematch)."""
+    extra options of the match steps (the first matching and the rematch); `flow` links consecutive keyframes
+    by Lucas-Kanade flow through the frames between them (the flow step, after match) for every solve."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
@@ -94,6 +95,11 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     feats = ["--clahe", "--denoise", "7"] if low else []
     out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)],
                     match_args=match_args)
+    if flow and (features not in ("sift", "rootsift") or pass_features):
+        raise ValueError("the flow adds SIFT keypoints: not with learned features")
+    if flow:  # after match, which it reads, and before anything that reads its keypoints
+        out.insert(2, ("flow", ["flow", "--mav0", mav0, "--work", work, "--jobs", jobs], work / "flow.npz", False))
+        solve += ["--flow", work / "flow.npz"]
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
                            *([] if low else WARMUP)], work / "online.done", True))
     if not low or low_light_pass:  # the batch pass after the recording, its random walk ten times looser
@@ -135,7 +141,7 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=True):
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio", pass_args=(), low_light_pass=True, match_args=()):
+              pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -145,7 +151,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
                                            num_features, pass_features, pass_match, pass_args, low_light_pass,
-                                           match_args):
+                                           match_args, flow):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -195,13 +201,15 @@ def main():
                    "\"--est-gyro-m\")")
     p.add_argument("--match-args", default="", help="extra options of the match steps (one string, e.g. "
                    "\"--ratio 0.9\")")
+    p.add_argument("--flow", action="store_true", help="link consecutive keyframes by Lucas-Kanade flow through "
+                   "the frames between them, for every solve")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
               pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online,
-              match_args=a.match_args.split())
+              match_args=a.match_args.split(), flow=a.flow)
 
 
 if __name__ == "__main__":

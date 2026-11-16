@@ -221,6 +221,145 @@ def cmd_features(a):
           flush=True)
 
 
+# ----------------------------------------------------------------------------- flow
+FLOW_DESC = 255  # descriptor of a keypoint the flow added: far from every SIFT descriptor, so it never matches
+
+
+def _flow_chunk(job):
+    """Lucas-Kanade flow of one camera's keypoints through the frames between consecutive keyframes ks[0]..ks[-1].
+
+    Each keyframe's keypoints (its own and those the flow brought in) are tracked frame by frame to the next
+    keyframe and back; a point that returns within fb_max px and lands within assoc px of one of the next
+    keyframe's keypoints links to it, one further than min_dist px from all of them becomes a keypoint of the next
+    keyframe itself. A link that contradicts a descriptor match between the two keyframes is left out.
+    Returns the links (keyframe, index in it, index in the next) and the added points per next keyframe."""
+    import cv2
+    from scipy.spatial import cKDTree
+    cam, ks, kf_ns, frames, orig, sizes, dmatch, fb_max, assoc, min_dist = job
+    lk = dict(winSize=(21, 21), maxLevel=3, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+    frame_ns = np.array(sorted(frames), np.int64)
+    links, added = [], {}
+    cur, cur_size = orig[0].astype(np.float32), sizes[0]
+    for n, k in enumerate(ks[:-1]):
+        nxt, nxt_size = orig[n + 1], sizes[n + 1]
+        ts = frame_ns[(frame_ns >= kf_ns[n]) & (frame_ns <= kf_ns[n + 1])]
+        if len(cur) == 0 or len(ts) < 2 or ts[0] != kf_ns[n] or ts[-1] != kf_ns[n + 1]:
+            cur, cur_size = nxt.astype(np.float32), nxt_size
+            continue
+        ims = [cv2.imread(frames[t], cv2.IMREAD_GRAYSCALE) for t in ts]
+        h, w = ims[0].shape
+        p, ok = cur.reshape(-1, 1, 2), np.ones(len(cur), bool)
+        for i in range(1, len(ims)):
+            p, st, _ = cv2.calcOpticalFlowPyrLK(ims[i - 1], ims[i], p, None, **lk)
+            ok &= st[:, 0] == 1
+        q = p.copy()
+        for i in range(len(ims) - 1, 0, -1):
+            q, st, _ = cv2.calcOpticalFlowPyrLK(ims[i], ims[i - 1], q, None, **lk)
+            ok &= st[:, 0] == 1
+        end = p[:, 0]
+        ok &= np.linalg.norm(q[:, 0] - cur, axis=1) < fb_max
+        ok &= (end[:, 0] >= 2) & (end[:, 0] < w - 2) & (end[:, 1] >= 2) & (end[:, 1] < h - 2)
+        src = np.flatnonzero(ok)
+        fwd, bwd = dmatch[n]
+        new_pts, new_size = [], []
+        if len(nxt) and len(src):
+            d, j = cKDTree(nxt).query(end[src])
+            # the nearest keypoint, each taken by the closest endpoint only
+            near = d < assoc
+            order = np.argsort(d)
+            taken = set()
+            for i in order[near[order]]:
+                jj = int(j[i])
+                s = int(src[i])
+                if jj in taken or fwd.get(s, jj) != jj or bwd.get(jj, s) != s:
+                    continue
+                taken.add(jj)
+                links.append((k, s, jj))
+            far = src[~near & (d > min_dist)] if len(nxt) else src
+        else:
+            far = src
+        if len(far):  # new keypoints, one per min_dist cell
+            _, first = np.unique(np.floor(end[far] / min_dist).astype(np.int64), axis=0, return_index=True)
+            keep = far[np.sort(first)]
+            base = len(nxt)
+            for m, i in enumerate(keep):
+                links.append((k, int(i), base + m))
+            new_pts, new_size = end[keep], cur_size[keep]
+        added[k + 1] = (np.asarray(new_pts, np.float32).reshape(-1, 2), np.asarray(new_size, np.float32))
+        cur = np.concatenate([nxt.astype(np.float32), added[k + 1][0]])
+        cur_size = np.concatenate([nxt_size, added[k + 1][1]])
+    return cam, links, added
+
+
+def cmd_flow(a):
+    """Longer tracks in low light: links consecutive keyframes by Lucas-Kanade flow through the frames between
+    them, adds the points it carries over as keypoints (descriptor FLOW_DESC, never matched by descriptor) to
+    features.npz and writes the links as flow.npz (matches.npz's format), which solve and online add with
+    --flow. Run after match: a link that contradicts a descriptor match is left out."""
+    path = os.path.join(a.work, "features.npz")
+    f = dict(np.load(path))
+    if "n_orig" in f:
+        sys.exit("features.npz already holds the flow's keypoints")
+    kf_ns, offsets = f["kf_ns"], f["offsets"]
+    n_kf = len(kf_ns)
+    frames = []
+    for c in range(2):
+        d = os.path.join(a.mav0, f"cam{c}", "data")
+        frames.append({int(n[:-4]): os.path.join(d, n) for n in os.listdir(d) if n.endswith(".png")})
+    dm = [[({}, {}) for _ in range(n_kf)] for _ in range(2)]
+    mp_ = os.path.join(a.work, "matches.npz")
+    if os.path.exists(mp_):
+        m = np.load(mp_)
+        P, M = m["pairs"], m["matches"]
+        sel = np.flatnonzero((P[:, 2] == P[:, 0] + 1) & (P[:, 1] == P[:, 3]))
+        for r in sel:
+            fwd, bwd = dm[P[r, 1]][P[r, 0]]
+            fwd[int(M[r, 0])], bwd[int(M[r, 1])] = int(M[r, 1]), int(M[r, 0])
+    xy, size = f["xy"], f["size"]
+    img = lambda k, c: slice(offsets[2 * k + c], offsets[2 * k + c + 1])
+    edges = np.linspace(0, n_kf - 1, max(2, min(n_kf - 1, a.jobs * 4) + 1)).round().astype(int)
+    jobs = []
+    for c in range(2):
+        for s, e in zip(edges[:-1], edges[1:]):
+            ks = list(range(s, e + 1))
+            jobs.append((c, ks, kf_ns[s:e + 1], {t: frames[c][t] for t in frames[c]
+                                                 if kf_ns[s] <= t <= kf_ns[e]},
+                         [xy[img(k, c)] for k in ks], [size[img(k, c)] for k in ks], dm[c][s:e + 1],
+                         a.fb_max, a.assoc, a.min_dist))
+    t0 = time.time()
+    with mp.Pool(a.jobs) as pool:
+        res = pool.map(_flow_chunk, jobs, chunksize=1)
+    add = {}
+    pairs, matches = [], []
+    for c, links, added in res:
+        for k, (p, s) in added.items():
+            add[2 * k + c] = (p, s)
+        for k, i, j in links:
+            pairs.append((k, c, k + 1, c))
+            matches.append((i, j))
+    n_img = 2 * n_kf
+    n_orig = np.diff(offsets)
+    counts = n_orig + np.array([len(add[i][0]) if i in add else 0 for i in range(n_img)])
+    new_off = np.concatenate([[0], np.cumsum(counts)])
+    nx = np.zeros((new_off[-1], 2), np.float32)
+    nd = np.full((new_off[-1], f["desc"].shape[1]), FLOW_DESC, f["desc"].dtype)
+    ns = np.zeros(new_off[-1], np.float32)
+    for i in range(n_img):
+        o, n0 = new_off[i], n_orig[i]
+        nx[o:o + n0], nd[o:o + n0], ns[o:o + n0] = xy[offsets[i]:offsets[i + 1]], \
+            f["desc"][offsets[i]:offsets[i + 1]], size[offsets[i]:offsets[i + 1]]
+        if i in add:
+            nx[o + n0:new_off[i + 1]], ns[o + n0:new_off[i + 1]] = add[i]
+    f.update(offsets=new_off, xy=nx, desc=nd, size=ns, n_orig=n_orig)
+    np.savez(path + ".tmp.npz", **f)
+    os.replace(path + ".tmp.npz", path)
+    pairs = np.array(pairs, np.int32).reshape(-1, 4)
+    matches = np.array(matches, np.int32).reshape(-1, 2)
+    np.savez(os.path.join(a.work, "flow.npz"), pairs=pairs, matches=matches)
+    print(f"flow: {len(matches)} links ({len(matches) - (counts - n_orig).sum()} to keypoints), "
+          f"{(counts - n_orig).sum()} keypoints added, {time.time() - t0:.0f} s", flush=True)
+
+
 # ----------------------------------------------------------------------------- matching
 
 _G = {}  # read-only matching state shared with the forked workers
@@ -1472,6 +1611,11 @@ def cmd_solve(a):
         lsel = (lm["pairs"][:, 0] >= k0) & (lm["pairs"][:, 2] < k1)
         pairs, matches = np.concatenate([pairs, lm["pairs"][lsel]]), np.concatenate([matches, lm["matches"][lsel]])
         print(f"  + {lsel.sum()} revisit matches", flush=True)
+    if a.flow:  # the flow's links between consecutive keyframes (cmd_flow)
+        fl = np.load(a.flow)
+        fsel = (fl["pairs"][:, 0] >= k0) & (fl["pairs"][:, 2] < k1)
+        pairs, matches = np.concatenate([pairs, fl["pairs"][fsel]]), np.concatenate([matches, fl["matches"][fsel]])
+        print(f"  + {fsel.sum()} flow links", flush=True)
     tracks, image_of, conflicts = build_tracks(offsets, pairs, matches, 1 << 30)
     pts, kept = triangulate(tracks, image_of, xy, kf_p, kf_r, cams, a.max_reproj, a.min_angle)
     kf_ns, kf_p, kf_r = kf_ns[k0:k1], kf_p[k0:k1], kf_r[k0:k1]
@@ -2334,6 +2478,7 @@ def main():
                             "decaying to 1 over --gyro-rw-warmup-s (the device warming up)")
         s.add_argument("--gyro-rw-warmup-s", type=float, default=300.0)
         s.add_argument("--loops", action="store_true", help="add the revisit matches of the loops stage")
+        s.add_argument("--flow", default="", help="flow.npz of the flow step: its links join the matches")
         s.add_argument("--modes", default="", help="undamped deformation modes of the whole solution: yaw, scale "
                        "(comma-separated); they let LM move along slow drifts the damped steps cannot follow. "
                        "yawN splits the heading drift into N time pieces")
@@ -2368,6 +2513,15 @@ def main():
     o.add_argument("--window", type=int, default=480, help="keyframes per window (the most recent ones)")
     o.add_argument("--step", type=int, default=60, help="keyframes between two windows")
     o.set_defaults(iterations=10, ext_segments=2)  # per window
+    fl = sub.add_parser("flow", help="link consecutive keyframes by Lucas-Kanade flow through the frames between "
+                        "them (after match)")
+    fl.add_argument("--mav0", required=True, help="ASL mav0 directory (cam0/data, cam1/data), every frame")
+    fl.add_argument("--work", required=True)
+    fl.add_argument("--jobs", type=int, default=2)
+    fl.add_argument("--fb-max", type=float, default=0.5, help="largest forward-backward error (px)")
+    fl.add_argument("--assoc", type=float, default=1.5, help="link to a keypoint within this distance (px)")
+    fl.add_argument("--min-dist", type=float, default=3.0,
+                    help="add a point as a keypoint when no keypoint is within this distance (px)")
     c = sub.add_parser("loop-correct", help="close the revisits of a solve with a pose graph (after solve "
                        "--save-states and loops)")
     c.add_argument("--work", required=True)
@@ -2385,7 +2539,7 @@ def main():
     c.add_argument("--loop-pos-sigma", type=float, default=0.1, help="m")
     a = p.parse_args()
     {"features": cmd_features, "match": cmd_match, "loops": cmd_loops, "solve": cmd_solve, "online": cmd_online,
-     "loop-correct": cmd_loop_correct}[a.cmd](a)
+     "loop-correct": cmd_loop_correct, "flow": cmd_flow}[a.cmd](a)
 
 
 if __name__ == "__main__":

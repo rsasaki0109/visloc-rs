@@ -65,6 +65,18 @@ class StepsTest(unittest.TestCase):
         self.assertNotIn("--ratio", p["loops"])
         self.assertNotIn("--ratio", plan(4)["match"])
 
+    def test_the_flow_follows_the_match_and_reaches_every_solve(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                rematch=True, flow=True)}
+        self.assertEqual(list(p)[:4], ["features", "match", "flow", "loops"])
+        self.assertEqual(p["flow"][:5], ["flow", "--mav0", "mav0", "--work", "w"])
+        for name in ("online", "pass solve", "pass solve with the revisits", "solve with the new matches"):
+            self.assertEqual(value(p[name], "--flow"), "w/flow.npz")
+        self.assertNotIn("--flow", plan(4)["online"])
+        with self.assertRaises(ValueError):
+            chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, features="aliked", flow=True)
+
     def test_a_daylit_low_light_sequence_runs_the_day_options(self):
         p = {name: [str(c) for c in cmd]
              for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
