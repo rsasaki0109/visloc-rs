@@ -56,14 +56,14 @@ def feature_options(features, num_features=None):
 PASS_MATCH = ("vio", "online", "essential")
 
 
-def keypoints(mav0, vio, calib, work, jobs, feats, name="", match=()):
+def keypoints(mav0, vio, calib, work, jobs, feats, name="", match=(), match_args=()):
     """The features, match and loops steps into `work`, guided by the VIO; `match` replaces the match step's
     guidance (--vio TUM, or --verify essential)."""
     return [
         (f"{name}features", ["features", "--mav0", mav0, "--vio", vio, "--work", work, "--jobs", jobs, *feats],
          work / "features.npz", False),
         (f"{name}match", ["match", "--work", work, *(match or ["--vio", vio]), "--calib", calib, "--jobs", jobs,
-                          "--tau-slope", "0.3", "--tau-max", "20"], work / "match.done", False),
+                          "--tau-slope", "0.3", "--tau-max", "20", *match_args], work / "match.done", False),
         (f"{name}loops", ["loops", "--work", work, "--vio", vio, "--calib", calib, "--jobs", jobs, "--step", "4"],
          work / "loops.npz", False),
     ]
@@ -75,7 +75,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True):
+          num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True, match_args=()):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -85,13 +85,15 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     and searched for revisits guided by the VIO like the online windows' (the rematch then goes there too);
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
     those an essential matrix explains ("essential"). In low light the pass runs on the low-light keypoints, with
-    30 iterations per solve; `low_light_pass=False` stops there at the online windows instead."""
+    30 iterations per solve; `low_light_pass=False` stops there at the online windows instead. `match_args` are
+    extra options of the match steps (the first matching and the rematch)."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
     solve += [] if track == MOVING else ["--est-focal"]
     feats = ["--clahe", "--denoise", "7"] if low else []
-    out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)])
+    out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)],
+                    match_args=match_args)
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
                            *([] if low else WARMUP)], work / "online.done", True))
     if not low or low_light_pass:  # the batch pass after the recording, its random walk ten times looser
@@ -116,7 +118,7 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
             again = pw / "rematch"
             out += [
                 ("rematch", ["match", "--work", again, "--vio", work / "ba2.tum", "--calib", calib, "--jobs", jobs,
-                             "--tau-slope", "0.3", "--tau-max", "20"], again / "match.done", False),
+                             "--tau-slope", "0.3", "--tau-max", "20", *match_args], again / "match.done", False),
                 ("rematch loops", ["loops", "--work", again, "--vio", work / "ba2.tum", "--calib", calib, "--jobs",
                                    jobs, "--step", "4"], again / "loops.npz", False),
                 ("solve with the new matches", ["solve", "--work", again, "--vio", work / "ba2.tum", "--out",
@@ -133,7 +135,7 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=True):
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio", pass_args=(), low_light_pass=True):
+              pass_match="vio", pass_args=(), low_light_pass=True, match_args=()):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -142,7 +144,8 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         if not (pw / "rematch" / "features.npz").is_symlink():
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
-                                           num_features, pass_features, pass_match, pass_args, low_light_pass):
+                                           num_features, pass_features, pass_match, pass_args, low_light_pass,
+                                           match_args):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -190,12 +193,15 @@ def main():
                         "those an essential matrix explains")
     p.add_argument("--pass-args", default="", help="extra options of the pass's solves (one string, e.g. "
                    "\"--est-gyro-m\")")
+    p.add_argument("--match-args", default="", help="extra options of the match steps (one string, e.g. "
+                   "\"--ratio 0.9\")")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
-              pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online)
+              pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online,
+              match_args=a.match_args.split())
 
 
 if __name__ == "__main__":

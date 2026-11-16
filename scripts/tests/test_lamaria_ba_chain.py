@@ -56,6 +56,15 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(low, ["features", "match", "loops", "online"])
         self.assertEqual(chain.result("w", 4, rematch=True, low_light_pass=False), Path("w/online.tum"))
 
+    def test_match_args_reach_both_matchings(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                rematch=True, match_args=["--ratio", "0.9"])}
+        self.assertEqual(value(p["match"], "--ratio"), "0.9")
+        self.assertEqual(value(p["rematch"], "--ratio"), "0.9")
+        self.assertNotIn("--ratio", p["loops"])
+        self.assertNotIn("--ratio", plan(4)["match"])
+
     def test_a_daylit_low_light_sequence_runs_the_day_options(self):
         p = {name: [str(c) for c in cmd]
              for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
