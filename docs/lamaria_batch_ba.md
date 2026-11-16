@@ -2783,7 +2783,21 @@ stays at 40–41 °C. On its first 300 keyframes (one calibration segment) the
 solve's final cost is lowest near κ = −1.5e-4 per °C (17,146 at 0, 17,129
 at −3e-4, 17,251 at +3e-4, 17,240 at −6e-4), a shallow minimum. With
 κ = −1.5e-4 in the pass the CP Score rises by 0.38, three times the
-sequence's seed spread.
+sequence's seed spread. It does not carry over to two more sequences with a
+temperature swing (each a full baseline run through the driver, then the
+pass rerun from it with and without the correction; the rerun without it
+reproduces the baseline to the digit):
+
+| Sequence | Camera temperature | Baseline | With the temperature | Change |
+|---|---|---:|---:|---:|
+| sequence_3_17 | 28 → 40 °C in 100 s, then flat | 80.07 | 80.45 | +0.38 |
+| sequence_2_11 | 23 → 41 °C | 89.07 | 88.73 | −0.34 |
+| sequence_1_19 | 6 → 23 °C (outdoors) | 82.25 | 81.89 | −0.36 |
+| Mean | | 83.80 | 83.69 | −0.11 |
+
+The pseudo-GT errors do not move (sequence_2_11 0.28 m, sequence_1_19
+0.43 m median, either way). The focal length segments already follow
+whatever the temperature does to the focal length; the correction stays off.
 
 ## Usage
 
