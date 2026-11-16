@@ -2743,6 +2743,21 @@ so (0.24° on average) changes the CP Score by less than 0.02. sequence_2_12's r
 mostly scale: the baseline is 0.84 % too large against the pseudo-GT over
 its 672 m extent, with a heading bend of 2–4° in the last third.
 
+The remaining pieces of their model, each on sequence_3_17 (the chain's
+seeds move it by ±0.12, so one run decides there; sequence_2_12 moves by
+±5.3, so its gains above are within its noise):
+
+| Change (pass, revisits, rematch, final solve) | CP Score | CP recall at 1 m | SE(3) median error against the pseudo-GT |
+|---|---:|---:|---:|
+| Baseline (the chain) | **80.07** | 100 % | 1.44 m |
+| Cauchy loss for the reprojections (`--huber -2`) | 76.04 | 96 % | 1.48 m |
+| Accelerometer response matrix (`--est-accel-m`, prior 0.3 %) | 78.22 | 96 % | 1.11 m |
+
+The accelerometer's matrix comes out at −0.31 / −0.15 / −0.09 % on its
+diagonal. Like the 5 s calibration segments, it brings the trajectory nearer
+the pseudo-GT and the CPs further away. The time offsets are already
+calibrated ([IMU-camera time offset](#imu-camera-time-offset)).
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
