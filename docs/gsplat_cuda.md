@@ -30,7 +30,7 @@ The packaging follows the DPVO CUDA kernels:
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam and bf16 moments | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
-| Mip-NeRF 360 bonsai, room, garden at `images_4`, 30k steps, 2.5M cap | Done; 32.97 / 33.00 / 27.62 dB over two runs, within 0.05 dB of brush's 33.02 / 32.95 / 27.62 ([Mip-NeRF 360](#mip-nerf-360)) |
+| Mip-NeRF 360 bonsai, room, garden at `images_4`, 30k steps, 2.5M cap | Done; 32.97 / 33.00 / 27.62 dB over two runs, within 0.05 dB of brush's 33.02 / 32.95 / 27.62 ([Mip-NeRF 360](#mip-nerf-360)); the seven public scenes at the 3DGS paper's resolutions 29.43 dB on average, the paper's 28.69 ([against the paper](#against-the-3dgs-paper)) |
 | Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
@@ -239,6 +239,39 @@ fix):
   and cannot be set beside these. The CUDA trainer averages 9.4-10.9 ms a
   step on bonsai and room (0.8-1.0M gaussians) and 24.5-26.5 ms on garden
   (2.5M at 1297x840), the refines included.
+
+### Against the 3DGS paper
+
+The seven scenes of the public `360_v2.zip` at the 3DGS paper's
+resolutions: `images_4` outdoors (bicycle, garden, stump), `images_2`
+indoors (room, counter, kitchen, bonsai). The protocol is otherwise the
+one above, two runs per scene. flowers and treehill are in a separate
+download and are not measured. The paper's numbers are its per-scene
+"Ours-30K" table (Kerbl et al. 2023, appendix).
+
+| Scene | Size | Train / eval views | CUDA PSNR / SSIM, run 1; run 2 | Mean PSNR / SSIM | 3DGS paper PSNR / SSIM | Gaussians | Training time |
+|---|---|---|---|---|---|---|---|
+| bicycle | 1237x822 | 169 / 25 | 25.41 / 0.789; 25.47 / 0.789 | 25.44 / 0.789 | 25.25 / 0.771 | 2.50M (the cap) | 772 s, 722 s |
+| garden | 1297x840 | 161 / 24 | 27.61 / 0.866; 27.64 / 0.867 | 27.62 / 0.867 | 27.41 / 0.868 | 2.50M (the cap) | 796 s, 734 s |
+| stump | 1245x825 | 109 / 16 | 27.11 / 0.800; 27.16 / 0.801 | 27.13 / 0.800 | 26.55 / 0.775 | 2.15-2.18M | 658 s, 649 s |
+| room | 1557x1038 | 272 / 39 | 32.46 / 0.928; 32.37 / 0.928 | 32.42 / 0.928 | 30.63 / 0.914 | 1.00-1.01M | 591 s, 585 s |
+| counter | 1558x1038 | 210 / 30 | 29.20 / 0.911; 29.18 / 0.911 | 29.19 / 0.911 | 28.70 / 0.905 | 0.76-0.77M | 561 s, 546 s |
+| kitchen | 1558x1039 | 244 / 35 | 31.71 / 0.928; 31.72 / 0.928 | 31.72 / 0.928 | 30.32 / 0.922 | 0.62M | 477 s, 478 s |
+| bonsai | 1559x1039 | 255 / 37 | 32.60 / 0.947; 32.42 / 0.946 | 32.51 / 0.946 | 31.98 / 0.938 | 1.08-1.09M | 589 s, 582 s |
+| mean | | | | **29.43** | 28.69 | | |
+
+- **Quality.** Above the paper on all seven scenes, by 0.74 dB on
+  average: 0.19-0.58 dB outdoors and 0.49-1.79 dB indoors. The SSIM is
+  higher too, except garden's (0.001 lower).
+- **What the comparison is.** The paper's trainer is the 2023 reference
+  code. The CUDA trainer follows brush's refine strategy and learning
+  rates, so these are brush's gains over it as much as this code's. The
+  paper's renders were scored as 8-bit images; these are scored on the
+  float renders.
+- **Population.** bicycle and garden stop at the 2.5M cap (the wgpu
+  benchmark's); the paper's runs have no cap.
+- **Time.** 8-13 minutes a scene on the 8 GB laptop GPU, the refines
+  included.
 
 ## Optimizations
 
