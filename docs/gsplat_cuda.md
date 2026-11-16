@@ -30,6 +30,7 @@ The packaging follows the DPVO CUDA kernels:
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam and bf16 moments | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
+| Mip-NeRF 360 bonsai, room, garden at `images_4`, 30k steps, 2.5M cap | Done; 32.97 / 33.00 / 27.62 dB over two runs, within 0.05 dB of brush's 33.02 / 32.95 / 27.62 ([Mip-NeRF 360](#mip-nerf-360)) |
 | Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
@@ -208,6 +209,36 @@ eval), 1024x768. The first run, on the unoptimized rasterizer:
 - **Where the time went.** At 1.35M gaussians a step took 28.9 GPU ms. The
   largest stages were raster_bwd (9.6 ms), the optimizer (8.7 ms) and
   raster (3.8 ms), which the next section works on.
+
+## Mip-NeRF 360
+
+Bonsai, room and garden with the wgpu benchmark's protocol
+([rust_3dgs_plan.md](rust_3dgs_plan.md), after the brush refine fidelity
+fix):
+
+- **Data.** `images_4` as `images/` and the release's `sparse/0`, its
+  cameras scaled to the `images_4` size (the loader wants the two equal):
+  780x520 (bonsai), 779x519 (room), 1297x840 (garden).
+- **Split.** Every 8th view by name is held out (`--holdout 8`).
+- **Training.** `gsplat_train_cuda --steps 30000 --max-gaussians 2500000`,
+  brush's preset, black background.
+- **Runs.** Two runs per scene, on the 8 GB laptop GPU under WSL2, the code
+  as of 2026-11-16 (fp32 moments, the default).
+
+| Scene | Train / eval views | CUDA PSNR / SSIM, run 1; run 2 | Gaussians | CUDA training time | wgpu PSNR / SSIM | brush PSNR / SSIM |
+|---|---|---|---|---|---|---|
+| bonsai | 255 / 37 | 32.92 / 0.960; 33.02 / 0.959 | 0.97M | 327 s, 331 s | 32.97 / 0.959 | 33.02 / 0.960 |
+| room | 272 / 39 | 33.05 / 0.950; 32.94 / 0.950 | 0.78M | 282 s, 284 s | 32.93 / 0.950 | 32.95 / 0.951 |
+| garden | 161 / 24 | 27.61 / 0.866; 27.64 / 0.867 | 2.50M (the cap) | 796 s, 734 s | 27.60 / 0.866 | 27.62 / 0.868 |
+
+- **Quality.** The two-run means are 32.97, 33.00 and 27.62 dB. That is
+  within 0.05 dB of brush on all three scenes (room 0.05 dB above) and
+  of the wgpu trainer (room 0.07 dB above). The two runs of a scene differ
+  by 0.03-0.10 dB, so the three trainers are level on these scenes.
+- **Time.** The wgpu and brush times (934-3134 s) are from a GTX 1660 Ti
+  and cannot be set beside these. The CUDA trainer averages 9.4-10.9 ms a
+  step on bonsai and room (0.8-1.0M gaussians) and 24.5-26.5 ms on garden
+  (2.5M at 1297x840), the refines included.
 
 ## Optimizations
 
