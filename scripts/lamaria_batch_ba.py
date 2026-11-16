@@ -210,6 +210,8 @@ def cmd_features(a):
     else:  # no keypoint size: the solve's --sigma-size leaves these observations at --pixel-sigma
         res = [(xy, des, np.full(len(xy), np.nan, np.float32), wh) for xy, des, wh in _learned_features(a, paths)]
         extra = {"image_wh": np.array([r[3] for r in res], np.int32)}
+    if a.rootsift:
+        extra["rootsift"] = np.array(True)
     counts = np.array([len(r[0]) for r in res], dtype=np.int64)
     offsets = np.concatenate([[0], np.cumsum(counts)])
     np.savez(os.path.join(a.work, "features.npz"), kf_ns=kf_ns, offsets=offsets,
@@ -367,9 +369,18 @@ def _matcher(choice, extractor):
     return choice
 
 
-def _max_desc(value, extractor):
-    """--max-desc: SIFT's L2 distance of 300 by default; no limit on the unit-length learned descriptors."""
-    return value if value is not None else 300.0 if extractor == "sift" else np.inf
+ROOTSIFT_MAX_DESC = 225.0  # RootSIFT's nearest-neighbour distances run at about 0.75 times SIFT's
+
+
+def _max_desc(value, extractor, work=None):
+    """--max-desc: SIFT's L2 distance of 300 by default (225 for RootSIFT); no limit on the unit-length learned
+    descriptors."""
+    if value is not None:
+        return value
+    if extractor != "sift":
+        return np.inf
+    rootsift = work is not None and bool(np.load(os.path.join(work, "features.npz")).get("rootsift", False))
+    return ROOTSIFT_MAX_DESC if rootsift else 300.0
 
 
 def _band_dist(ka, ca, kb, cb, xya, xyb):
@@ -517,7 +528,7 @@ def cmd_match(a):
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r,
-              ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor), extractor=extractor, image_wh=image_wh,
+              ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor, a.work), extractor=extractor, image_wh=image_wh,
               min_inliers=a.min_inliers, max_rot=a.max_rot)
     offs = [int(x) for x in a.offsets.split(",")]
     cos_max = np.cos(np.radians(a.max_axis_angle))
@@ -636,7 +647,7 @@ def cmd_loops(a):
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r, ratio=a.ratio,
-              max_desc=_max_desc(a.max_desc, extractor), min_inliers=a.min_inliers, max_rot=a.max_rot,
+              max_desc=_max_desc(a.max_desc, extractor, a.work), min_inliers=a.min_inliers, max_rot=a.max_rot,
               extractor=extractor, image_wh=image_wh)
     n = len(kf_ns)
     axes = np.array([[_cam_pose(k, c)[0][:, 2] for c in range(2)] for k in range(n)])
