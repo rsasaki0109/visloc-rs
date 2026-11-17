@@ -230,6 +230,8 @@ struct CliArgs {
     stereo_vertical_alignment: bool,
     /// Optional override for the motion-scale rescue collapse threshold.
     motion_scale_rescue_min_translation_ratio: Option<f64>,
+    motion_scale_rescue_max_pnp_inlier_ratio: Option<f64>,
+    no_motion_scale_rescue_release: bool,
     /// Optional override for the rotation-vector rescue history length.
     rotation_vector_rescue_min_history: Option<usize>,
     /// Optional override for the rotation-vector rescue trigger delta.
@@ -317,6 +319,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut stereo_pose_refinement = false;
     let mut stereo_vertical_alignment = false;
     let mut motion_scale_rescue_min_translation_ratio: Option<f64> = None;
+    let mut motion_scale_rescue_max_pnp_inlier_ratio: Option<f64> = None;
+    let mut no_motion_scale_rescue_release = false;
     let mut rotation_vector_rescue_min_history: Option<usize> = None;
     let mut rotation_vector_rescue_max_delta_deg: Option<f64> = None;
     let mut relative_pose_mode = StereoRelativePoseMode::PnpThenKabsch;
@@ -509,6 +513,21 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_scale_rescue_min_translation_ratio = Some(value);
                 args.remove(i);
             }
+            "--motion-scale-rescue-max-inlier-ratio" => {
+                let value = args.remove(i + 1).parse::<f64>()?;
+                if !value.is_finite() || value < 0.0 {
+                    return Err(format!(
+                        "--motion-scale-rescue-max-inlier-ratio must be finite and non-negative, got {value}"
+                    )
+                    .into());
+                }
+                motion_scale_rescue_max_pnp_inlier_ratio = Some(value);
+                args.remove(i);
+            }
+            "--no-motion-scale-rescue-release" => {
+                no_motion_scale_rescue_release = true;
+                args.remove(i);
+            }
             "--rotation-vector-rescue-min-history" => {
                 let value = args.remove(i + 1).parse::<usize>()?;
                 if value == 0 {
@@ -601,6 +620,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         stereo_pose_refinement,
         stereo_vertical_alignment,
         motion_scale_rescue_min_translation_ratio,
+        motion_scale_rescue_max_pnp_inlier_ratio,
+        no_motion_scale_rescue_release,
         rotation_vector_rescue_min_history,
         rotation_vector_rescue_max_delta_deg,
         relative_pose_mode,
@@ -765,6 +786,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ratio) = args.motion_scale_rescue_min_translation_ratio {
         frontend_config.motion_scale_rescue_min_translation_ratio = ratio;
+    }
+    if let Some(ratio) = args.motion_scale_rescue_max_pnp_inlier_ratio {
+        frontend_config.motion_scale_rescue_max_pnp_inlier_ratio = ratio;
+    }
+    if args.no_motion_scale_rescue_release {
+        frontend_config.motion_scale_rescue_release_full_window = false;
     }
     if let Some(history) = args.rotation_vector_rescue_min_history {
         frontend_config.rotation_vector_rescue_min_history = history;

@@ -310,3 +310,53 @@ fn gating_at_fix_accuracy_catches_jumps_hidden_by_information_sharing() {
         "gated {gated_ate} vs default {default_ate}"
     );
 }
+
+#[test]
+fn robust_vo_factors_absorb_a_corrupted_vo_step() {
+    // One VO step goes wrong (a large object crossing the view): every later
+    // pose is offset by the same rigid jump, so exactly one relative factor
+    // is corrupted. Plain least squares trusts it at its fixed noise and
+    // rejects the correct fixes around it; a robust kernel on the VO factors
+    // gives that step up instead.
+    let mut scenario = generate_gnss_vo_scenario(&SyntheticGnssVoConfig {
+        frame_count: 300,
+        lap_seconds: 60.0,
+        dropout: None,
+        outliers: Vec::new(),
+        ..SyntheticGnssVoConfig::default()
+    });
+    let jump = visloc_core::geometry::SE3::new(
+        nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 6.0_f64.to_radians()),
+        Vector3::new(4.0, -3.0, 0.5),
+    );
+    for pose in scenario.vo.iter_mut().skip(150) {
+        let camera_to_world = pose.value.world_to_camera.inverse();
+        pose.value = Pose {
+            world_to_camera: jump.compose(&camera_to_world).inverse(),
+        };
+    }
+    let rejected = |result: &GnssVoFusionResult| {
+        result
+            .frames
+            .iter()
+            .filter(|frame| matches!(frame.gnss, FrameGnssStatus::Outlier { .. }))
+            .count()
+    };
+    let truth = &scenario.ground_truth_enu;
+    let plain = fuse(&scenario, GnssVoFusionConfig::metric_gravity_aligned());
+    let mut config = GnssVoFusionConfig::metric_gravity_aligned();
+    config.optimizer.vo_robust = visloc_slam::RobustKernel::Cauchy { c: 3.0 };
+    let robust = fuse(&scenario, config);
+    let plain_ate = position_rmse(&plain.trajectory_enu, truth).unwrap();
+    let robust_ate = position_rmse(&robust.trajectory_enu, truth).unwrap();
+    eprintln!(
+        "ATE plain {plain_ate:.3} m ({} fixes rejected), robust VO {robust_ate:.3} m ({} rejected)",
+        rejected(&plain),
+        rejected(&robust)
+    );
+    assert!(
+        robust_ate < 0.7 * plain_ate,
+        "robust {robust_ate} vs plain {plain_ate}"
+    );
+    assert!(rejected(&robust) < rejected(&plain));
+}

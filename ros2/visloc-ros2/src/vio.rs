@@ -48,6 +48,10 @@ pub struct VioOptions {
     /// trajectory is the same as without it; it costs the keyframe images
     /// the estimator keeps and the packets it builds.
     pub retain_marg_data: bool,
+    /// Monocular-inertial VIO on one camera of the calibration (index
+    /// `Some(i)`; `None` is stereo). Frames carry no right image. As in
+    /// `basalt_euroc_vio_demo --mono` (docs/mono_inertial_vio.md).
+    pub mono_camera: Option<usize>,
 }
 
 impl Default for VioOptions {
@@ -57,6 +61,7 @@ impl Default for VioOptions {
             imu_seed_klt: false,
             max_iterations: None,
             retain_marg_data: false,
+            mono_camera: None,
         }
     }
 }
@@ -143,7 +148,15 @@ impl VioCore {
     ) -> Result<Self, String> {
         let calibration = BasaltCalibration::from_json_str(calibration_json)
             .map_err(|error| format!("calibration JSON: {error}"))?;
-        if calibration.cameras.len() < 2 || calibration.resolutions.len() < 2 {
+        let calibration = match options.mono_camera {
+            Some(index) => calibration
+                .select_camera(index)
+                .map_err(|error| format!("mono_camera {index}: {error}"))?,
+            None => calibration,
+        };
+        if options.mono_camera.is_none()
+            && (calibration.cameras.len() < 2 || calibration.resolutions.len() < 2)
+        {
             return Err(format!(
                 "stereo VIO needs two cameras in the calibration, found {}",
                 calibration.cameras.len()
@@ -386,7 +399,8 @@ fn check_resolution(
     calibration: &BasaltCalibration,
     packet: &SensorPacket<RawU16Image>,
 ) -> Result<(), VioError> {
-    for (index, image) in [&packet.left, &packet.right].into_iter().enumerate() {
+    let images = std::iter::once(&packet.left).chain(packet.right.as_ref());
+    for (index, image) in images.enumerate() {
         if let Some((width, height)) = calibration.resolutions.get(index) {
             let expected = (*width as usize, *height as usize);
             let actual = (image.width(), image.height());
@@ -409,7 +423,7 @@ fn euroc_frame(frame_id: u64, packet: SensorPacket<RawU16Image>) -> EurocSensorF
         frame_id,
         timestamp_ns: packet.stamp_ns,
         cam0: packet.left,
-        cam1: Some(packet.right),
+        cam1: packet.right,
         cam0_path: Default::default(),
         cam1_path: None,
         imu: packet.imu,

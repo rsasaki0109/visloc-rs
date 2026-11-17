@@ -1,6 +1,7 @@
-//! `visloc_vio_node`: stereo-inertial VIO (Basalt port) as a ROS 2 node.
+//! `visloc_vio_node`: stereo- or monocular-inertial VIO (Basalt port) as a ROS 2 node.
 //!
-//! Subscribes `left/image_raw`, `right/image_raw` (`sensor_msgs/Image`) and
+//! Subscribes `left/image_raw`, `right/image_raw` (`sensor_msgs/Image`; with
+//! `mono:=true` only `left/image_raw`) and
 //! `imu` (`sensor_msgs/Imu`); publishes `odom` (`nav_msgs/Odometry`), `pose`
 //! (`geometry_msgs/PoseStamped`), `path` (`nav_msgs/Path`) and optionally
 //! `/tf`. Run with `--help` for parameters.
@@ -41,7 +42,7 @@ use visloc_ros2::vio_mapper::{
 };
 
 const USAGE: &str = "\
-visloc_vio_node -- Basalt stereo-inertial VIO over ROS 2 (pure-Rust DDS)
+visloc_vio_node -- Basalt stereo- or monocular-inertial VIO over ROS 2 (pure-Rust DDS)
 
 USAGE:
   visloc_vio_node --calibration <calib.json> --config <config.json> [options]
@@ -59,6 +60,9 @@ PARAMETERS (--name value  or  -p name:=value):
   publish_path           publish nav_msgs/Path                                   [true]
   path_max_length        poses kept in the published path (drop-oldest)          [2000]
   stereo_sync_tolerance_ms  max |t_left - t_right| for a stereo pair             [2.0]
+  mono                   monocular-inertial VIO: subscribe left/image_raw only   [false]
+  mono_camera            with mono, the calibration's camera that left/image_raw
+                         carries (0 or 1)                                        [0]
   frame_queue            paired frames waiting for the frontend (drop-oldest)    [1]
   frontend_threads       worker threads of the KLT frontend (0: shared with the
                          estimator's pool)                                       [2]
@@ -229,11 +233,16 @@ fn run() -> Result<(), String> {
     let image_depth = args.parsed_or("image_qos_depth", 5usize)?;
     let imu_depth = args.parsed_or("imu_qos_depth", 400usize)?;
     let mapper_params = MapperParams::from_args(&args)?;
+    let mono_camera = args
+        .flag("mono", false)?
+        .then(|| args.parsed_or("mono_camera", 0usize))
+        .transpose()?;
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
         max_iterations: Some(args.parsed_or("max_iterations", 3u32)?).filter(|&n| n > 0),
         retain_marg_data: mapper_params.is_some(),
+        mono_camera,
     };
     let domain_id = args.domain_id()?;
     let node_name = args
@@ -260,13 +269,17 @@ fn run() -> Result<(), String> {
     let expected = [core.expected_resolution(0), core.expected_resolution(1)];
     let shared = Arc::new(Shared {
         inputs: Mutex::new(Inputs {
-            vio: VioInputs::new(
-                (tolerance_ms * 1e6).round() as i64,
-                8,
-                frame_queue,
-                imu_buffer,
-                core.cam_time_offset_ns(),
-            ),
+            vio: if mono_camera.is_some() {
+                VioInputs::new_mono(frame_queue, imu_buffer, core.cam_time_offset_ns())
+            } else {
+                VioInputs::new(
+                    (tolerance_ms * 1e6).round() as i64,
+                    8,
+                    frame_queue,
+                    imu_buffer,
+                    core.cam_time_offset_ns(),
+                )
+            },
             generation: 0,
         }),
         ready: Condvar::new(),
@@ -298,7 +311,11 @@ fn run() -> Result<(), String> {
 
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let left_sub = ros.subscription::<Image>(&left_topic, sensor_qos(image_depth))?;
-    let right_sub = ros.subscription::<Image>(&right_topic, sensor_qos(image_depth))?;
+    // A monocular node subscribes to `left/image_raw` only.
+    let right_sub = mono_camera
+        .is_none()
+        .then(|| ros.subscription::<Image>(&right_topic, sensor_qos(image_depth)))
+        .transpose()?;
     let imu_sub = ros.subscription::<Imu>(&imu_topic, sensor_qos(imu_depth))?;
     let odom_pub = ros.publisher::<Odometry>(&odom_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseStamped>(&pose_topic, output_qos(10))?;
@@ -353,7 +370,9 @@ fn run() -> Result<(), String> {
         |listener| Arc::clone(listener.transforms()),
     );
 
-    for (side, subscription) in [(0usize, left_sub), (1usize, right_sub)] {
+    let subscriptions = std::iter::once((0usize, left_sub))
+        .chain(right_sub.map(|subscription| (1usize, subscription)));
+    for (side, subscription) in subscriptions {
         let shared = Arc::clone(&shared);
         let expected = expected[side];
         let mut errors = RateLimitedLog::new(Duration::from_secs(5));

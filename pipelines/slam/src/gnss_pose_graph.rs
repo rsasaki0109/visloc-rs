@@ -307,6 +307,12 @@ pub struct GnssPoseGraphConfig {
     /// After classification, re-solve with outliers removed and inliers at
     /// full weight (a hard-rejection refinement).
     pub refine_without_outliers: bool,
+    /// Robust kernel on the VO relative-pose factors (IRLS on their whitened
+    /// squared residual, in every LM stage). `RobustKernel::None`, the
+    /// default, leaves them plain least squares. Without it a corrupted VO
+    /// step (a large object crossing the view) is trusted at its fixed noise,
+    /// and the GNSS robust step rejects the correct fixes around it instead.
+    pub vo_robust: RobustKernel,
 }
 
 impl Default for GnssPoseGraphConfig {
@@ -326,6 +332,7 @@ impl Default for GnssPoseGraphConfig {
             relative_cost_tolerance: 1e-6,
             outlier_chi2_threshold: GNSS_CHI2_3DOF_999,
             refine_without_outliers: true,
+            vo_robust: RobustKernel::None,
         }
     }
 }
@@ -437,6 +444,8 @@ struct Whitening {
     relative: Vec<Matrix7>,
     gnss: Vec<Matrix3<f64>>,
     prior: Option<Matrix7>,
+    /// `GnssPoseGraphConfig::vo_robust`.
+    vo_kernel: RobustKernel,
 }
 
 impl GnssPoseGraph {
@@ -488,6 +497,28 @@ impl GnssPoseGraph {
                 (r.transpose() * factor.information * r)[(0, 0)]
             })
             .collect()
+    }
+
+    /// Whitened squared residual of every VO relative factor at the current
+    /// estimate (factor order), under the information `config` sets.
+    pub fn relative_squared_residuals(
+        &self,
+        config: &GnssPoseGraphConfig,
+    ) -> Result<Vec<f64>, GnssPoseGraphError> {
+        let whitening = self.whitening(config)?;
+        Ok(self
+            .relative_factors
+            .iter()
+            .zip(&whitening.relative)
+            .map(|(factor, w)| {
+                let (r, _, _) = relative_residual(
+                    &self.nodes[&factor.from],
+                    &self.nodes[&factor.to],
+                    &factor.relative,
+                );
+                (w * r).norm_squared()
+            })
+            .collect())
     }
 
     /// [`Self::gnss_squared_residuals`] times [`Self::gnss_gate_scales`]: the
@@ -772,6 +803,7 @@ impl GnssPoseGraph {
             relative,
             gnss,
             prior,
+            vo_kernel: config.vo_robust,
         })
     }
 
@@ -784,7 +816,7 @@ impl GnssPoseGraph {
                 &self.nodes[&factor.to],
                 &factor.relative,
             );
-            total += (w * r).norm_squared();
+            total += whitening.vo_kernel.cost((w * r).norm_squared());
         }
         for (index, (factor, w)) in self.gnss_factors.iter().zip(&whitening.gnss).enumerate() {
             let r = predicted_antenna(&self.alignment, &self.nodes[&factor.node], &self.lever_arm)
@@ -872,6 +904,7 @@ impl GnssPoseGraph {
                 &self.nodes[&factor.to],
                 &factor.relative,
             );
+            let rw = w * r;
             accumulate(
                 &mut columns,
                 &mut gradient,
@@ -879,8 +912,8 @@ impl GnssPoseGraph {
                     (layout.node_index.get(&factor.from).copied(), w * j_from),
                     (layout.node_index.get(&factor.to).copied(), w * j_to),
                 ],
-                &(w * r),
-                1.0,
+                &rw,
+                whitening.vo_kernel.weight(rw.norm_squared()),
             );
         }
 

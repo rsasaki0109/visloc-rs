@@ -72,6 +72,53 @@ fn vio_core_tracks_a_static_synthetic_stereo_rig() {
     assert!(up.z > 0.99, "body x should point up, got {up:?}");
 }
 
+#[test]
+fn mono_vio_core_tracks_the_left_camera_alone() {
+    let calibration = std::fs::read_to_string(euroc_calibration_path()).unwrap();
+    let config = std::fs::read_to_string(euroc_config_path()).unwrap();
+    let options = VioOptions {
+        mono_camera: Some(0),
+        ..VioOptions::default()
+    };
+    let mut core = VioCore::from_json(&calibration, &config, &options).unwrap();
+    assert_eq!(core.calibration().cameras.len(), 1);
+    assert_eq!(core.expected_resolution(1), None);
+    let stereo = SyntheticStereo::euroc_sized();
+    let mut inputs = VioInputs::new_mono(4, 4000, core.cam_time_offset_ns());
+    let mut imu_ns = START_NS - 100 * IMU_PERIOD_NS;
+    let mut estimates = Vec::new();
+    for frame in 0..30 {
+        let stamp = START_NS + frame * CAMERA_PERIOD_NS;
+        while imu_ns <= stamp {
+            inputs.push_imu(imu_sample_from_msg(&stationary_imu_msg(imu_ns)).unwrap());
+            imu_ns += IMU_PERIOD_NS;
+        }
+        let image = decode_luma(&stereo.image_msg(false, stamp))
+            .unwrap()
+            .to_basalt()
+            .unwrap();
+        inputs.push_left(stamp, image);
+        while let Some(packet) = inputs.pop_ready() {
+            assert!(packet.right.is_none());
+            estimates.push(core.process(packet).expect("mono VIO step"));
+        }
+    }
+    assert_eq!(estimates.len(), 30);
+    assert!(estimates.iter().any(|e| e.observation_count > 20));
+    for estimate in &estimates {
+        let t = estimate.imu_to_world.translation;
+        assert!(t.iter().all(|v| v.is_finite()));
+        assert!(t.norm() < 0.5, "static mono rig drifted to {t:?}");
+    }
+    // A stereo calibration is still required without `mono_camera`, and an
+    // out-of-range camera is rejected.
+    let bad = VioOptions {
+        mono_camera: Some(2),
+        ..VioOptions::default()
+    };
+    assert!(VioCore::from_json(&calibration, &config, &bad).is_err());
+}
+
 /// The synthetic rig's sensor packets for `frame_count` frames.
 fn synthetic_packets(
     frame_count: i64,

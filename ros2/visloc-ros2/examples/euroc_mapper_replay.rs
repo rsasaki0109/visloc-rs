@@ -17,6 +17,9 @@
 //!   --out-dir target/ros2_mapper_v101
 //! ```
 //!
+//! `--mono` replays cam0 + IMU (or the camera `config.vio_mono_camera`
+//! names) as `mono:=true` would receive it.
+//!
 //! Frames are paced at the recording's rate (as a live node receives them)
 //! unless `--as-fast-as-possible` is given; the node's mapper queue drops
 //! packets when it is full, so the pace matters. Poses are the IMU (body)
@@ -43,6 +46,7 @@ struct Args {
     realtime: bool,
     optimize_every_k: usize,
     queue: usize,
+    mono: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -54,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
     let mut realtime = true;
     let mut optimize_every_k = 100;
     let mut queue = 64;
+    let mut mono = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -68,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--mapper-queue" => queue = value()?.parse().map_err(|e| format!("{e}"))?,
             "--as-fast-as-possible" => realtime = false,
+            "--mono" => mono = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -80,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
         realtime,
         optimize_every_k,
         queue,
+        mono,
     })
 }
 
@@ -103,12 +110,24 @@ fn tum_line(out: &mut String, stamp_ns: i64, pose: &SE3) {
 fn run() -> Result<(), String> {
     let args = parse_args()?;
     fs::create_dir_all(&args.out_dir).map_err(|e| e.to_string())?;
-    let dataset = EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)
-        .map_err(|e| e.to_string())?;
+    let dataset = if args.mono {
+        EurocSensorDataset::open_monocular(&args.euroc_dir, &args.calibration, &args.config)
+    } else {
+        EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)
+    }
+    .map_err(|e| e.to_string())?;
     let calibration_json = fs::read_to_string(&args.calibration).map_err(|e| e.to_string())?;
     let config_json = fs::read_to_string(&args.config).map_err(|e| e.to_string())?;
+    // `mono:=true` with `mono_camera`: the reader already chose the camera
+    // (`config.vio_mono_camera`), so the node's calibration selects the same.
+    let mono_camera = args
+        .mono
+        .then(|| dataset.config().mono_camera())
+        .transpose()
+        .map_err(|e| format!("{e:?}"))?;
     let options = VioOptions {
         retain_marg_data: true,
+        mono_camera,
         ..VioOptions::default()
     };
     let core = VioCore::from_json(&calibration_json, &config_json, &options)?;
@@ -145,7 +164,7 @@ fn run() -> Result<(), String> {
             stamp_ns: frame.timestamp_ns + offset_ns,
             header_stamp_ns: frame.timestamp_ns,
             left: frame.cam0,
-            right: frame.cam1.ok_or("the replay needs stereo frames")?,
+            right: frame.cam1,
             imu: frame.imu,
             initialization_imu: frame.initialization_imu,
         };

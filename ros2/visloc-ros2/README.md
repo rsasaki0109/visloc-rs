@@ -79,6 +79,8 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `publish_tf`, `publish_path` | `true` | |
 | `path_max_length` | `2000` | |
 | `stereo_sync_tolerance_ms` | `2.0` | max left/right stamp difference |
+| `mono` | `false` | monocular-inertial VIO: subscribe `left/image_raw` only, each image is a frame ([below](#monocular-monotrue)) |
+| `mono_camera` | `0` | with `mono`, which camera of the calibration `left/image_raw` carries (`0` or `1`) |
 | `frame_queue` | `1` | paired frames waiting for the frontend (drop-oldest) |
 | `frontend_threads` | `2` | worker threads of the KLT frontend (`0`: share the estimator's pool) |
 | `imu_buffer` | `4000` | buffered IMU samples (drop-oldest) |
@@ -116,6 +118,32 @@ published, not the previous frame's. `cam_time_offset_ns` from the
 calibration is added to camera stamps. On an estimator error the node logs
 it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
 the dropped-frame counts and the frontend/estimator time per frame.
+
+### Monocular (`mono:=true`)
+
+The node runs monocular-inertial VIO, as `basalt_euroc_vio_demo --mono`
+does (docs/mono_inertial_vio.md):
+
+- The calibration is cut to the one camera `mono_camera` names
+  (`BasaltCalibration::select_camera`), so a stereo calibration file works
+  unchanged.
+- Only `left/image_raw` is subscribed; remap it to that camera's topic.
+- There is no stereo pairing: each image is a frame once IMU data reaches
+  its stamp.
+- With `mapper:=true` the online mapper runs on the one-camera rig. It
+  builds landmarks from temporal keyframe matches.
+
+```sh
+visloc_vio_node \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config my_config_with_vio_init_accel_average_s.json \
+  -p mono:=true -p mapper:=true \
+  --remap left/image_raw=/cam0/image_raw --remap imu=/imu0
+```
+
+Metric scale comes from the IMU, so the platform must accelerate. A
+recording that starts at rest benefits from the averaged initial tilt
+(`config.vio_init_accel_average_s`).
 
 ### Online mapper (`mapper:=true`)
 
@@ -191,8 +219,9 @@ Limitations:
 * On an estimator reset the VIO's world frame starts over, so the mapper
   starts over too: the old map is discarded, `T_map_odom` returns to the
   identity, and the trajectory file covers the frames since the last reset.
-* Stereo only, like the node. Measured on recorded EuRoC data without DDS
-  (`examples/euroc_mapper_replay.rs`, below), not yet through `ros2 bag play`.
+* Stereo and mono (`mono:=true`). Measured on recorded EuRoC data without
+  DDS (`examples/euroc_mapper_replay.rs`, below), not yet through
+  `ros2 bag play`.
 * Do not run it next to `visloc_map_localize_node` with the same `map_frame`:
   both publish `map -> odom` (and both name their output `map_pose`, with
   different types).
@@ -229,6 +258,19 @@ during the run.
 - **The live `map_pose`** is only slightly better than the VIO. It is
   corrected with whatever the last merged BA said, by default every 100
   keyframes, and the large corrections arrive in the final optimization.
+
+`--mono` replays cam0 + IMU as `mono:=true` receives it. On V1_01_easy, with
+the online benchmark's config plus `config.vio_init_accel_average_s: 0.5`:
+
+| Output | ATE |
+| --- | ---: |
+| `odom` (VIO) | 0.088 m |
+| live `map_pose` | 0.086 m |
+| shutdown trajectory | **0.040 m** |
+| demo `--mono` `trajectory_online.tum`, same settings | 0.040 m |
+
+No packet was dropped; there were 448 packets, 168 loop pairs and 4 BA
+merges.
 
 ## `visloc_localize_node`
 

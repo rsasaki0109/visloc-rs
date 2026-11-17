@@ -6,6 +6,26 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`visloc_vio_node` runs monocular-inertial VIO (opt-in, `mono:=true`).**
+  - The calibration is cut to one camera (`mono_camera`, default 0), and only
+    `left/image_raw` is subscribed. Every image is a frame once IMU data
+    covers it (`VioInputs::new_mono`).
+  - With `mapper:=true` the online mapper runs on the one-camera rig.
+  - `SensorPacket::right` and `StereoPair::right` are now `Option`.
+  - `euroc_mapper_replay --mono` measures it on V1_01 (0.5 s averaged tilt):
+    VIO 0.088 m, live `map_pose` 0.086 m, shutdown trajectory 0.040 m, the
+    same as the demo's `--mono` run. No packet was dropped.
+
+- **GNSS fusion: an opt-in robust kernel on the VO factors**
+  (`GnssPoseGraphConfig::vo_robust`, `kitti_raw_gnss_vo_fusion --vo-robust
+  cauchy:<c>|huber:<delta>`). A corrupted VO step is down-weighted instead
+  of the correct fixes around it being rejected.
+  - KITTI raw 0027 (a truck crossing) with native fixes: batch 0.61 →
+    0.18 m (Cauchy 3), fixes rejected 17 → 0, window 0.87 → 0.19 m.
+  - With degraded GNSS it changes nothing to two decimals.
+  - On 0020 the max error grows (1.21 → 1.79 m), so it stays off by default
+    (docs/gnss_fusion.md, "Robust VO factors").
+
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
   The online mapper (loop closure, global BA) now runs on a one-camera rig.
   - **What changed.** The mapper's stereo stage, both batch
@@ -110,6 +130,23 @@ All notable changes to `visloc-rs` will be documented here.
   software Vulkan device (docs/docker.md).
 
 ### Changed
+
+- **Stereo VO: the motion-scale rescue no longer locks in on a slowdown**
+  (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on by
+  default; `--no-motion-scale-rescue-release` restores the old behaviour).
+  - **The bug.** The rescue judged each step against its own rescued steps.
+    During a real, sustained slowdown, every slower step counted as
+    "collapsed" and was scaled back up to the old speed, for good.
+  - **The fix.** Once a whole history window (20 pairs) has been rescued in a
+    row, the streak is handed back to the raw step lengths and the current
+    step is kept.
+  - **KITTI raw, pure-Rust deep frontend:**
+    - 0020: VO 30.2 → 10.2 m, GNSS-fused 24.4 → 4.8 m;
+    - odometry 09: VO 122.3 → 18.5 m;
+    - 0027 and odometry 01's 260-frame highway slice, which the rescue was
+      tuned on, are byte-identical.
+  - `online_slam_stereo_vo_kitti_demo` also gains
+    `--motion-scale-rescue-max-inlier-ratio` (docs/gnss_fusion.md).
 
 - **A manual run of the release workflow takes its release notes from its
   branch's `CHANGELOG.md`** (normally `main`) instead of the tag's, so a
