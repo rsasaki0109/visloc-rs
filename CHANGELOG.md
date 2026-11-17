@@ -6,6 +6,29 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`visloc_vio_node` can run the online mapper (opt-in, `mapper:=true`).**
+  Loop closure and global BA as in `basalt_euroc_online_slam_demo`, with
+  its mapper settings, so a ROS 2 user gets loop-closed poses.
+  - The estimator runs the MargData-retaining path (same trajectory, checked
+    by a test) and sends mapper packets through a bounded queue to a mapper
+    thread. The VIO never waits: a full queue (`mapper_queue`, 64) drops
+    the packet and counts it in the status line.
+  - Live output, REP-105: `map -> odom` on `/tf`, from
+    `T_mapper(k) * T_vio(k)^-1` at the newest keyframe the global BA has
+    optimized, plus `map_pose` and `map_path`.
+  - On SIGINT/SIGTERM the node runs the mapper's final optimization and,
+    with `mapper_trajectory_out`, writes every frame's loop-closed pose
+    (TUM, corrections interpolated between keyframes like the demo's
+    `trajectory_online.tum`). A second signal exits at once.
+  - Without `mapper` the node's outputs and signal handling are unchanged.
+    The mapper's output is not deterministic run to run, and it is not yet
+    measured through the node on EuRoC (ros2/visloc-ros2/README.md,
+    "Online mapper").
+  - `BasaltVioFrontendStage::set_retain_marg_data` runs the two-thread
+    stages on the MargData path (default off, lean path unchanged). The
+    demo's keyframe-correction propagation moved, unchanged, to
+    `visloc_basalt::mapper_correction`.
+
 - **The ROS 2 nodes are tested against ROS 2 Lyrical** (Ubuntu 26.04), with
   both Fast DDS 3.6 and Cyclone DDS 11.0, on one host. The binaries are
   unchanged, and the message layouts match Lyrical's `.msg` files. All

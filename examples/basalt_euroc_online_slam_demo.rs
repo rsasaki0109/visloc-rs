@@ -74,6 +74,11 @@ use visloc_basalt::{
     RejectReason, TimingBreakdown,
 };
 use visloc_core::geometry::SE3;
+// Keyframe-correction propagation lives in the library so the ROS 2 VIO
+// node writes the same full-frame trajectory as this demo.
+use visloc_basalt::mapper_correction::{
+    propagate_interpolated, propagate_to_all_frames, tum_string,
+};
 
 // Opt-in global allocator swap (`--features mimalloc-global`): the VIO
 // estimator's LM trial loop allocates a scratch buffer per factor per
@@ -971,88 +976,6 @@ const fn peak_working_set_bytes() -> u64 {
     0
 }
 
-/// Rigid spanning-tree propagation of the mapper's keyframe corrections to
-/// every VIO frame. A direct Rust port of
-/// `scripts/propagate_basalt_mapper_corrections.py::propagate` (kept
-/// numerically equivalent, not merely similar -- see that script's
-/// module docstring for the exact convention):
-///
-/// ```text
-/// V_f  = raw VIO body-to-world pose at frame f (rotation R_f, translation t_f)
-/// M_k  = mapper-corrected body-to-world pose at the nearest preceding
-///        keyframe k (frame_id <= f)
-/// V_k  = raw VIO body-to-world pose at that same keyframe k
-///
-/// corrected(f) = Delta_k * V_f,  where Delta_k = M_k * V_k^{-1}
-/// ```
-///
-/// i.e. each frame keeps its VIO-derived relative motion to the nearest
-/// preceding keyframe; only the keyframe's mapper correction moves it. This
-/// is exact at keyframes themselves (f == k, `Delta_k * V_k == M_k`) and,
-/// like the Python original, uses the *first* keyframe's delta for any
-/// frame before it (there is no earlier keyframe to interpolate from).
-fn propagate_to_all_frames(
-    vio_trajectory: &BTreeMap<u64, (i64, SE3)>,
-    mapper_poses: &BTreeMap<u64, SE3>,
-) -> Result<Vec<(i64, SE3)>, Box<dyn std::error::Error>> {
-    let keyframe_ids: Vec<u64> = mapper_poses.keys().copied().collect();
-    if keyframe_ids.is_empty() {
-        return Err("mapper produced no keyframe poses".into());
-    }
-    let missing: Vec<u64> = keyframe_ids
-        .iter()
-        .copied()
-        .filter(|k| !vio_trajectory.contains_key(k))
-        .collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "{} mapper keyframe frame_ids are absent from the VIO trajectory (first few: {:?})",
-            missing.len(),
-            &missing[..missing.len().min(5)]
-        )
-        .into());
-    }
-
-    let delta_by_keyframe: BTreeMap<u64, SE3> = keyframe_ids
-        .iter()
-        .map(|&k| {
-            let (_, v_k) = &vio_trajectory[&k];
-            let m_k = &mapper_poses[&k];
-            (k, m_k.compose(&v_k.inverse()))
-        })
-        .collect();
-
-    let mut output = Vec::with_capacity(vio_trajectory.len());
-    let mut cursor = 0usize;
-    for (&frame_id, (timestamp_ns, v_f)) in vio_trajectory {
-        while cursor + 1 < keyframe_ids.len() && keyframe_ids[cursor + 1] <= frame_id {
-            cursor += 1;
-        }
-        let delta = &delta_by_keyframe[&keyframe_ids[cursor]];
-        output.push((*timestamp_ns, delta.compose(v_f)));
-    }
-    Ok(output)
-}
-
-fn tum_string(poses: &[(i64, SE3)]) -> String {
-    let mut buffer = String::from("# timestamp tx ty tz qx qy qz qw\n");
-    for (timestamp_ns, pose) in poses {
-        let q = pose.rotation.quaternion();
-        buffer.push_str(&format!(
-            "{:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e}\n",
-            *timestamp_ns as f64 * 1e-9,
-            pose.translation.x,
-            pose.translation.y,
-            pose.translation.z,
-            q.i,
-            q.j,
-            q.k,
-            q.w,
-        ));
-    }
-    buffer
-}
-
 /// The VIO's per-frame output for every frame of a mapper packet, as the
 /// packet's `measurement_poses`.
 ///
@@ -1089,53 +1012,6 @@ fn vio_output_poses(
             })
         })
         .collect()
-}
-
-/// Like [`propagate_to_all_frames`], but the correction applied to a frame
-/// between keyframes `k0 < f < k1` is interpolated on SE(3) by timestamp:
-///
-/// ```text
-/// Delta_f = Delta_k0 * Exp(alpha * Log(Delta_k0^{-1} * Delta_k1)),
-/// alpha   = (t_f - t_k0) / (t_k1 - t_k0)
-/// corrected(f) = Delta_f * V_f
-/// ```
-///
-/// The piecewise-constant scheme applies `Delta_k0` all the way up to `k1`,
-/// then jumps to `Delta_k1`. That discontinuity sits at every keyframe
-/// boundary and shows up as relative-pose error. Keyframes themselves are
-/// still exact, and frames before the first or after the last keyframe use
-/// that keyframe's correction.
-fn propagate_interpolated(
-    vio_trajectory: &BTreeMap<u64, (i64, SE3)>,
-    mapper_poses: &BTreeMap<u64, SE3>,
-) -> Result<Vec<(i64, SE3)>, Box<dyn std::error::Error>> {
-    // Reuse the validation of the piecewise-constant propagation.
-    propagate_to_all_frames(vio_trajectory, mapper_poses)?;
-    let keyframes: Vec<(u64, i64, SE3)> = mapper_poses
-        .iter()
-        .map(|(&k, m_k)| {
-            let (t_k, v_k) = &vio_trajectory[&k];
-            (k, *t_k, m_k.compose(&v_k.inverse()))
-        })
-        .collect();
-    let mut output = Vec::with_capacity(vio_trajectory.len());
-    let mut cursor = 0usize;
-    for (&frame_id, (timestamp_ns, v_f)) in vio_trajectory {
-        while cursor + 1 < keyframes.len() && keyframes[cursor + 1].0 <= frame_id {
-            cursor += 1;
-        }
-        let (k0, t0, delta0) = &keyframes[cursor];
-        let delta = match keyframes.get(cursor + 1) {
-            Some((_, t1, delta1)) if frame_id > *k0 && t1 > t0 => {
-                let alpha = (*timestamp_ns - t0) as f64 / (t1 - t0) as f64;
-                let step = delta0.inverse().compose(delta1).log() * alpha;
-                delta0.compose(&SE3::exp(&step))
-            }
-            _ => delta0.clone(),
-        };
-        output.push((*timestamp_ns, delta.compose(v_f)));
-    }
-    Ok(output)
 }
 
 impl Args {
