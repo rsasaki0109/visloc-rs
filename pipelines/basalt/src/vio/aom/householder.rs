@@ -228,34 +228,18 @@ pub(super) struct LandmarkHouseholderWorkspace {
     pub(super) tau: Vec<f32>,
     pub(super) essential: Vec<f32>,
     pub(super) gemv: Vec<f32>,
-    /// Column ranges `[start, end)` of the four-column blocks that hold a
-    /// value other than `+0.0`; see [`LandmarkHouseholderF32::perform_active_blocks`].
-    pub(super) active_blocks: Vec<(usize, usize)>,
 }
 
 impl LandmarkHouseholderWorkspace {
     #[inline]
     fn take_zeroed(buffer: &mut Vec<f32>, len: usize) -> Vec<f32> {
         let mut value = std::mem::take(buffer);
-        // The upstream storage starts zeroed on every factor, including
-        // padding and damping rows. `clear` drops the length to zero first,
-        // so `resize` writes `0.0` into every one of the `len` elements; a
-        // second `fill` pass over the same memory would only repeat that.
         value.clear();
         value.resize(len, 0.0_f32);
-        value
-    }
-
-    /// `len` elements of reusable capacity whose values are unspecified
-    /// (left over from the previous factor). The caller must write every
-    /// element before reading any;
-    /// `LandmarkHouseholderF32::factor_from_whitened_with_workspace` does, so
-    /// the storage is not zeroed and then overwritten.
-    #[inline]
-    fn take_for_overwrite(buffer: &mut Vec<f32>, len: usize) -> Vec<f32> {
-        let mut value = std::mem::take(buffer);
-        value.truncate(len);
-        value.resize(len, 0.0_f32);
+        // `resize` does not overwrite elements when the old capacity/length
+        // already covers `len`; the upstream storage starts zeroed on every
+        // factor, including padding and damping rows.
+        value.fill(0.0_f32);
         value
     }
 
@@ -485,7 +469,7 @@ impl LandmarkHouseholderF32 {
     /// packed source conversion and norm schedule are intentionally copied
     /// exactly; only the QR-owned vectors are taken from reusable capacity and
     /// returned by the projection wrapper after Q2/compact extraction.
-    pub(super) fn factor_from_whitened_with_workspace(
+    fn factor_from_whitened_with_workspace(
         factor: &WhitenedFactorRowStack,
         workspace: &mut LandmarkHouseholderWorkspace,
     ) -> Option<(Self, f32)> {
@@ -512,11 +496,7 @@ impl LandmarkHouseholderF32 {
             landmark_cols,
             landmark_offset: layout.landmark_offset,
             residual_offset: layout.residual_offset,
-            // Every element is written below: the observation rows' state,
-            // padding, landmark and residual columns, then the zero damping
-            // rows. The values are those of a zeroed buffer filled the same
-            // way, without the extra pass over the whole storage.
-            storage: LandmarkHouseholderWorkspace::take_for_overwrite(
+            storage: LandmarkHouseholderWorkspace::take_zeroed(
                 &mut workspace.storage,
                 layout.storage_len,
             ),
@@ -532,8 +512,6 @@ impl LandmarkHouseholderF32 {
             for column in 0..state_cols {
                 result.storage[destination + column] = factor.state_jacobian[(row, column)] as f32;
             }
-            result.storage[destination + state_cols..destination + layout.landmark_offset]
-                .fill(0.0_f32);
             for column in 0..landmark_cols {
                 let value = factor.landmark_jacobian[(row, column)] as f32;
                 result.storage[destination + layout.landmark_offset + column] = value;
@@ -546,8 +524,6 @@ impl LandmarkHouseholderF32 {
             }
             result.storage[destination + layout.residual_offset] = factor.residual[row] as f32;
         }
-        // The trailing damping rows start zeroed, as upstream's storage does.
-        result.storage[observation_rows * layout.storage_cols..].fill(0.0_f32);
         let mut norm_squared = 0.0_f32;
         for (column, accumulators) in norm_accumulators.iter().enumerate().take(landmark_cols) {
             let mut column_squared = 0.0_f32;
@@ -581,209 +557,7 @@ impl LandmarkHouseholderF32 {
 
     #[inline]
     fn perform_with_workspace(&mut self, workspace: &mut LandmarkHouseholderWorkspace) {
-        self.perform_active_blocks(
-            &mut workspace.essential,
-            &mut workspace.gemv,
-            &mut workspace.active_blocks,
-        );
-    }
-
-    /// [`Self::perform_with_scratch`] restricted to the columns that can
-    /// change. Bit-identical to it in every storage element, pivot and tau.
-    ///
-    /// A landmark's rows span the whole window's state columns, but only the
-    /// poses that observe it are non-zero; most four-column blocks are `+0.0`
-    /// in every row. Every update below is per column (one lane of a packet
-    /// or one scalar), and for a column that is `+0.0` in every row each
-    /// update leaves it `+0.0`, provided the operands are finite:
-    ///
-    /// - the GEMV accumulates `fma(+0.0, e, acc)` from `acc = +0.0`, and a sum
-    ///   of `+0.0` and `±0.0` is `+0.0`, so the workspace entry is `+0.0`;
-    /// - the row-0 update is `fma(-tau, +0.0, +0.0) = +0.0`;
-    /// - the rank-1 update is `fma(-tau * e, +0.0, +0.0) = +0.0`.
-    ///
-    /// Skipping those blocks therefore changes no value. A step whose `tau`,
-    /// essential entries or `tau * e` products are not all finite (where
-    /// `0 * inf` would turn a zero into NaN) runs over every column instead,
-    /// which is again exactly the full path because the skipped columns are
-    /// still `+0.0` at that point. Columns from the four-aligned end of the
-    /// row on (the scalar tail, unfused in the GEMV) are always processed, so
-    /// each column keeps the operation sequence of the full path.
-    fn perform_active_blocks(
-        &mut self,
-        essential: &mut Vec<f32>,
-        workspace: &mut Vec<f32>,
-        active_blocks: &mut Vec<(usize, usize)>,
-    ) {
-        let storage_cols = self.storage_cols();
-        let half_packet_end = storage_cols / 4 * 4;
-        active_blocks.clear();
-        let mut block = 0;
-        while block < half_packet_end {
-            let nonzero = (0..self.rows).any(|row| {
-                let start = row * storage_cols + block;
-                self.storage[start..start + 4]
-                    .iter()
-                    .any(|value| value.to_bits() != 0)
-            });
-            if nonzero {
-                match active_blocks.last_mut() {
-                    Some(last) if last.1 == block => last.1 = block + 4,
-                    _ => active_blocks.push((block, block + 4)),
-                }
-            }
-            block += 4;
-        }
-        let all_columns = [(0, half_packet_end)];
-
-        let damping_rows = self.landmark_cols;
-        for k in 0..self.landmark_cols {
-            let remaining_rows = self.rows.saturating_sub(k + damping_rows);
-            if remaining_rows == 0 {
-                self.pivots[k] = 0.0;
-                self.tau[k] = 0.0;
-                continue;
-            }
-            let landmark_column = self.landmark_offset + k;
-            let pivot_index = self.index(k, landmark_column);
-            let c0 = self.storage[pivot_index];
-            let tail_len = remaining_rows - 1;
-            let mut tail_sq_norm = 0.0_f32;
-            for offset in 0..tail_len {
-                let value = self.storage[self.index(k + 1 + offset, landmark_column)];
-                tail_sq_norm = value.fused_mul_add(value, tail_sq_norm);
-            }
-            let (tau, beta) = if tail_sq_norm <= f32::MIN_POSITIVE {
-                essential.clear();
-                essential.resize(tail_len, 0.0_f32);
-                (0.0_f32, c0)
-            } else {
-                let beta_norm = c0.fused_mul_add(c0, tail_sq_norm).sqrt();
-                let beta = if c0 >= 0.0 { -beta_norm } else { beta_norm };
-                let denominator = c0 - beta;
-                essential.clear();
-                essential.extend((0..tail_len).map(|offset| {
-                    self.storage[self.index(k + 1 + offset, landmark_column)] / denominator
-                }));
-                let tau = (beta - c0) / beta;
-                (tau, beta)
-            };
-            self.pivots[k] = beta;
-            self.tau[k] = tau;
-
-            if tau == 0.0 {
-                continue;
-            }
-
-            let finite = tau.is_finite()
-                && essential
-                    .iter()
-                    .all(|&value| value.is_finite() && (tau * value).is_finite());
-            let ranges: &[(usize, usize)] = if finite { active_blocks } else { &all_columns };
-
-            // GEMV `essential^T * bottom`, column by column as in
-            // `landmark_gemv_workspace_into`.
-            workspace.resize(storage_cols, 0.0_f32);
-            let row_start = k + 1;
-            for &(start, end) in ranges {
-                let mut column = start;
-                while column + 8 <= end {
-                    let mut packet = LandmarkPacket8([0.0; 8]);
-                    for (offset, &value) in essential.iter().enumerate() {
-                        let rhs = LandmarkPacket8([value; 8]);
-                        let lhs = landmark_packet8_load(
-                            &self.storage,
-                            (row_start + offset) * storage_cols + column,
-                        );
-                        packet = landmark_packet8_mul_add(lhs, rhs, packet);
-                    }
-                    landmark_packet8_store(workspace, column, packet);
-                    column += 8;
-                }
-                while column < end {
-                    let mut packet = LandmarkPacket4([0.0; 4]);
-                    for (offset, &value) in essential.iter().enumerate() {
-                        let rhs = LandmarkPacket4([value; 4]);
-                        let lhs = landmark_packet_load(
-                            &self.storage,
-                            (row_start + offset) * storage_cols + column,
-                        );
-                        packet = landmark_packet_mul_add(lhs, rhs, packet);
-                    }
-                    landmark_packet_store(workspace, column, packet);
-                    column += 4;
-                }
-            }
-            for column in half_packet_end..storage_cols {
-                let mut value = 0.0_f32;
-                for (offset, &essential_value) in essential.iter().enumerate() {
-                    value += essential_value
-                        * self.storage[(row_start + offset) * storage_cols + column];
-                }
-                workspace[column] = value;
-            }
-
-            // Row-0 update.
-            for &(start, end) in ranges {
-                let mut column = start;
-                while column < end {
-                    let row_index = self.index(k, column);
-                    let updated_workspace = landmark_packet_add(
-                        landmark_packet_load(workspace, column),
-                        landmark_packet_load(&self.storage, row_index),
-                    );
-                    landmark_packet_store(workspace, column, updated_workspace);
-                    let updated_row = landmark_packet_fused_sub(
-                        landmark_packet_load(&self.storage, row_index),
-                        updated_workspace,
-                        tau,
-                    );
-                    landmark_packet_store(&mut self.storage, row_index, updated_row);
-                    column += 4;
-                }
-            }
-            for column in half_packet_end..storage_cols {
-                workspace[column] += self.storage[self.index(k, column)];
-                let row_index = self.index(k, column);
-                self.storage[row_index] =
-                    (-tau).fused_mul_add(workspace[column], self.storage[row_index]);
-            }
-
-            // Rank-1 update of the rows below, one row at a time.
-            for offset in 0..tail_len {
-                let row = k + 1 + offset;
-                let scale = tau * essential[offset];
-                let row_index = self.index(row, 0);
-                for &(start, end) in ranges {
-                    let mut column = start;
-                    while column + 8 <= end {
-                        let destination = row_index + column;
-                        let updated = landmark_packet8_fused_sub(
-                            landmark_packet8_load(&self.storage, destination),
-                            landmark_packet8_load(workspace, column),
-                            scale,
-                        );
-                        landmark_packet8_store(&mut self.storage, destination, updated);
-                        column += 8;
-                    }
-                    while column < end {
-                        let destination = row_index + column;
-                        let updated = landmark_packet_fused_sub(
-                            landmark_packet_load(&self.storage, destination),
-                            landmark_packet_load(workspace, column),
-                            scale,
-                        );
-                        landmark_packet_store(&mut self.storage, destination, updated);
-                        column += 4;
-                    }
-                }
-                for column in half_packet_end..storage_cols {
-                    let index = row_index + column;
-                    self.storage[index] =
-                        (-scale).fused_mul_add(workspace[column], self.storage[index]);
-                }
-            }
-        }
+        self.perform_with_scratch(&mut workspace.essential, &mut workspace.gemv);
     }
 
     fn perform_with_scratch(&mut self, essential: &mut Vec<f32>, workspace: &mut Vec<f32>) {
@@ -927,7 +701,7 @@ impl LandmarkHouseholderF32 {
         }
     }
 
-    pub(super) fn recycle_into(self, workspace: &mut LandmarkHouseholderWorkspace) {
+    fn recycle_into(self, workspace: &mut LandmarkHouseholderWorkspace) {
         LandmarkHouseholderWorkspace::recycle(&mut workspace.storage, self.storage);
         LandmarkHouseholderWorkspace::recycle(&mut workspace.pivots, self.pivots);
         LandmarkHouseholderWorkspace::recycle(&mut workspace.tau, self.tau);
