@@ -522,6 +522,14 @@ where
     let mut diagnose_fixed_rotation_ba: Option<String> = None;
     let mut diagnose_model_score_file: Option<PathBuf> = None;
     let mut initial_poses_file: Option<PathBuf> = None;
+    let mut gps_priors_file: Option<PathBuf> = None;
+    let mut gps_priors_format = PriorCoordinates::Wgs84;
+    let mut gps_priors_from_exif = false;
+    let mut gps_prior_std = 5.0f64;
+    let mut gps_prior_std_vertical = 10.0f64;
+    let mut gps_prior_max_error: Option<f64> = None;
+    let mut gps_prior_reject_outliers = false;
+    let mut gps_prior_loss_scale: Option<f64> = None;
     let mut diagnose_colmap_track_membership: Option<PathBuf> = None;
     let mut pose_guided_track_splitting = false;
     let mut pose_guided_track_splitting_graph_support = false;
@@ -606,6 +614,26 @@ where
             "--joint-global-positioning" => joint_global_positioning = true,
             "--calibrated-view-edges-only" => calibrated_view_edges_only = true,
             "--images-dir" => images_dir = Some(PathBuf::from(a.remove(i + 1))),
+            "--gps-priors" => gps_priors_file = Some(PathBuf::from(a.remove(i + 1))),
+            "--gps-priors-format" => gps_priors_format = a.remove(i + 1).parse()?,
+            "--gps-priors-from-exif" => gps_priors_from_exif = true,
+            "--gps-prior-std" => {
+                gps_prior_std = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--gps-prior-std-vertical" => {
+                gps_prior_std_vertical = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--gps-prior-max-error" => {
+                gps_prior_max_error = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--gps-prior-reject-outliers" => gps_prior_reject_outliers = true,
+            "--gps-prior-robust-loss" => {
+                gps_prior_loss_scale =
+                    Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE)
+            }
+            "--gps-prior-loss-scale" => {
+                gps_prior_loss_scale = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
             "--feature-extractor" => {
                 feature_extractor = match a.remove(i + 1).as_str() {
                     "files" => FeatureExtractorKind::Files,
@@ -1542,6 +1570,18 @@ where
             "--sift-split-colmap-detector-grayscale cannot be combined with --sift-colmap-compatible-grayscale".into(),
         );
     }
+    if (gps_priors_file.is_some() || gps_priors_from_exif) && mapper != MapperKind::Incremental {
+        return Err(
+            "--gps-priors / --gps-priors-from-exif currently require --mapper incremental".into(),
+        );
+    }
+    if gps_priors_file.is_some() && gps_priors_from_exif {
+        return Err("--gps-priors and --gps-priors-from-exif are exclusive".into());
+    }
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !positive(gps_prior_std) || !positive(gps_prior_std_vertical) {
+        return Err("--gps-prior-std / --gps-prior-std-vertical must be positive".into());
+    }
     if initial_poses_file.is_some() && mapper != MapperKind::Incremental {
         return Err("--initial-poses currently requires --mapper incremental".into());
     }
@@ -2267,6 +2307,14 @@ where
         diagnose_fixed_rotation_ba,
         diagnose_model_score_file,
         initial_poses_file,
+        gps_priors_file,
+        gps_priors_format,
+        gps_priors_from_exif,
+        gps_prior_std,
+        gps_prior_std_vertical,
+        gps_prior_max_error,
+        gps_prior_reject_outliers,
+        gps_prior_loss_scale,
         diagnose_colmap_track_membership,
     };
     validate_persistent_match_worker_args(&parsed)?;

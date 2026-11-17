@@ -4842,3 +4842,180 @@ fn structureless_rounds_chain_an_island_through_a_higher_indexed_bridge() {
         );
     }
 }
+
+/// Metric "ENU" frame of the GPS-prior tests: the synthetic scene scaled,
+/// rotated and moved far from its own origin.
+fn gps_test_frame() -> PriorSimilarity {
+    PriorSimilarity {
+        scale: 12.0,
+        rotation: nalgebra::Rotation3::from_euler_angles(0.2, -0.4, 2.5),
+        translation: Vector3::new(350.0, -120.0, 40.0),
+    }
+}
+
+/// GPS priors of the scene's cameras in [`gps_test_frame`], with a fixed
+/// pseudo-noise of up to ±0.25 m per axis and `sigma` as their 1-σ.
+fn gps_test_priors(scene: &Scene, sigma: f64) -> Vec<Option<ImagePositionPrior>> {
+    let frame = gps_test_frame();
+    scene
+        .poses
+        .iter()
+        .enumerate()
+        .map(|(k, pose)| {
+            let noise = Vector3::new(
+                ((k * 7 + 3) % 11) as f64 / 10.0 - 0.5,
+                ((k * 5 + 1) % 13) as f64 / 12.0 - 0.5,
+                ((k * 3 + 2) % 7) as f64 / 6.0 - 0.5,
+            ) * 0.5;
+            Some(ImagePositionPrior::isotropic(
+                frame.transform_point(&pose.camera_center_world()) + noise,
+                sigma,
+            ))
+        })
+        .collect()
+}
+
+fn gps_test_config(priors: Option<SfmPositionPriors>) -> IncrementalSfmConfig {
+    IncrementalSfmConfig {
+        min_seed_matches: 8,
+        min_pnp_inliers: 6,
+        position_priors: priors,
+        ..IncrementalSfmConfig::default()
+    }
+}
+
+/// Largest distance between a reconstructed camera centre and the true one
+/// in [`gps_test_frame`].
+fn max_metric_centre_error(scene: &Scene, result: &IncrementalSfmResult) -> f64 {
+    let frame = gps_test_frame();
+    scene
+        .poses
+        .iter()
+        .zip(&result.poses)
+        .map(|(truth, estimate)| {
+            let estimate = estimate.as_ref().expect("every image registers");
+            (estimate.camera_center_world() - frame.transform_point(&truth.camera_center_world()))
+                .norm()
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn gps_position_priors_put_the_reconstruction_in_the_metric_prior_frame() {
+    let scene = build_scene();
+    let (features, pairwise) = render(&scene);
+    let without = incremental_sfm(&scene.camera, &features, &pairwise, &gps_test_config(None))
+        .expect("scene reconstructs without priors");
+    let priors = SfmPositionPriors::new(gps_test_priors(&scene, 0.5));
+    let with = incremental_sfm(
+        &scene.camera,
+        &features,
+        &pairwise,
+        &gps_test_config(Some(priors)),
+    )
+    .expect("scene reconstructs with priors");
+
+    assert_eq!(with.registered_images, scene.poses.len());
+    assert_eq!(with.registered_images, without.registered_images);
+    // Without priors the model keeps the seed's arbitrary frame and scale.
+    assert!(max_metric_centre_error(&scene, &without) > 100.0);
+    // With them it is metric and georeferenced: the arc spans ~18 m, the
+    // GPS noise is under 0.45 m.
+    let error = max_metric_centre_error(&scene, &with);
+    assert!(error < 0.6, "max centre error {error} m");
+    assert!(
+        with.mean_reprojection_px < 0.5,
+        "{}",
+        with.mean_reprojection_px
+    );
+    // The points come along. With exact pixels the optimum is the true shape
+    // under the least-squares similarity onto the priors (the arc is close to
+    // a line, so the noise tilts it about the line and the points 35 m away
+    // move by ~2.5 m): every point and centre sits there.
+    let priors = gps_test_priors(&scene, 0.5);
+    let truth_centres: Vec<Point3<f64>> =
+        scene.poses.iter().map(Pose::camera_center_world).collect();
+    let prior_positions: Vec<Point3<f64>> = priors.iter().map(|p| p.unwrap().position).collect();
+    let best =
+        visloc_tracking::umeyama_similarity_transform(&truth_centres, &prior_positions, true)
+            .unwrap();
+    let best = PriorSimilarity {
+        scale: best.scale,
+        rotation: best.rotation,
+        translation: best.translation,
+    };
+    for (truth, estimate) in truth_centres.iter().zip(&with.poses) {
+        let error =
+            (estimate.as_ref().unwrap().camera_center_world() - best.transform_point(truth)).norm();
+        assert!(error < 0.02, "centre {error} m from the best fit");
+    }
+    let mut checked = 0;
+    for track in &with.tracks {
+        let (image, keypoint, _) = track.observations[0];
+        let point_index = features[image].descriptors[keypoint][0] as usize;
+        let error = (track.position - best.transform_point(&scene.points[point_index])).norm();
+        assert!(error < 0.05, "point {error} m from the best fit");
+        checked += 1;
+    }
+    assert!(checked > 20);
+}
+
+#[test]
+fn gps_prior_jumps_are_absorbed_by_the_cauchy_loss_or_rejection() {
+    let scene = build_scene();
+    let (features, pairwise) = render(&scene);
+    let mut priors = gps_test_priors(&scene, 0.5);
+    if let Some(prior) = priors[3].as_mut() {
+        prior.position.x += 80.0; // a GPS jump
+    }
+    let run = |priors: SfmPositionPriors| {
+        let result = incremental_sfm(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &gps_test_config(Some(priors)),
+        )
+        .expect("scene reconstructs with an outlier prior");
+        max_metric_centre_error(&scene, &result)
+    };
+    // Plain least squares (COLMAP's default): the 80 m jump on one camera of
+    // a tiny six-camera model drags it.
+    let plain = run(SfmPositionPriors::new(priors.clone()));
+    let cauchy = run(SfmPositionPriors {
+        robust_loss_scale: Some(DEFAULT_PRIOR_LOSS_SCALE),
+        ..SfmPositionPriors::new(priors.clone())
+    });
+    let rejecting = run(SfmPositionPriors {
+        reject_outliers: true,
+        ..SfmPositionPriors::new(priors)
+    });
+    assert!(
+        cauchy < 0.6,
+        "max centre error {cauchy} m with the Cauchy loss"
+    );
+    assert!(
+        rejecting < 0.6,
+        "max centre error {rejecting} m with rejection"
+    );
+    assert!(plain > 2.0 * cauchy, "plain {plain} m vs Cauchy {cauchy} m");
+}
+
+#[test]
+fn too_few_gps_priors_leave_the_reconstruction_unchanged() {
+    let scene = build_scene();
+    let (features, pairwise) = render(&scene);
+    let mut priors = gps_test_priors(&scene, 0.5);
+    for prior in priors.iter_mut().skip(2) {
+        *prior = None;
+    }
+    let without =
+        incremental_sfm(&scene.camera, &features, &pairwise, &gps_test_config(None)).unwrap();
+    let with = incremental_sfm(
+        &scene.camera,
+        &features,
+        &pairwise,
+        &gps_test_config(Some(SfmPositionPriors::new(priors))),
+    )
+    .unwrap();
+    assert_eq!(with.poses, without.poses);
+}

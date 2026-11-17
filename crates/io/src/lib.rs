@@ -10,6 +10,7 @@ pub mod colmap;
 pub mod descriptors;
 pub mod euroc;
 pub mod external_deep;
+pub mod gps_prior;
 pub mod images;
 pub mod imu_csv;
 pub mod insv;

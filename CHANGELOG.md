@@ -6,6 +6,29 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **GPS priors in incremental SfM (COLMAP `pose_prior_mapper` /
+  `use_prior_position`).** `IncrementalSfmConfig::position_priors` takes a
+  prior camera centre and per-axis σ per image.
+  - **What it does.** Once three registered images have one, every global
+    and periodic BA first aligns the model to the priors with a robust,
+    deterministic Sim(3). It then adds a covariance-weighted camera-centre
+    prior in place of the anchor/scale-anchor gauge. The model comes out
+    metric in local ENU. As in COLMAP, every prior stays in the BA. A
+    Cauchy loss and outlier rejection are opt-in. Without priors, or with
+    fewer than three, nothing changes.
+  - **Inputs.** `visloc_io::gps_prior` reads EXIF GPS and a
+    `NAME LAT LON ALT [STD_H [STD_V]]` (or Cartesian) prior file and
+    converts fixes to ENU (exact WGS84).
+  - **CLIs.** `unordered_sfm_demo --gps-priors FILE | --gps-priors-from-exif`
+    (incremental mapper). In the `colmap` shim, `feature_extractor` stores
+    EXIF GPS and `pose_prior_mapper` / `mapper --Mapper.use_prior_position 1`
+    use it. Both write `enu_origin.txt`.
+  - **ETH3D courtyard, simulated GPS** (σ 0.5/0.5/1 m, two 30 m jumps).
+    Camera centres against ground truth: median 0.48 m and RMSE 1.66 m.
+    Mapping without priors and aligning to the GPS afterwards gives median
+    1.66 m and RMSE 2.52 m.
+  - Details in docs/gps_prior_sfm.md.
+
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
   The online mapper (loop closure, global BA) now runs on a one-camera rig.
   - **What changed.** The mapper's stereo stage, both batch
