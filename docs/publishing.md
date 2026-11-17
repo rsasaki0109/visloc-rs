@@ -96,7 +96,8 @@ works before the first crates.io release.
 4. Run `scripts/check.sh`.
 5. Tag the release only after the main branch CI passes, and push the tag
    (`git tag v<version> && git push origin v<version>`). The `release`
-   workflow does the rest (next section).
+   workflow creates the GitHub release and attaches the binaries (next
+   section). Nothing is published to crates.io or PyPI.
 
 ## Automated Release
 
@@ -106,13 +107,22 @@ A `v*` tag push runs `.github/workflows/release.yml`:
 | --- | --- |
 | `release` | Creates the GitHub release from the tag's `CHANGELOG.md` section. |
 | `binaries` | Attaches prebuilt Linux, Windows and macOS command-line binaries. |
+
+## Publishing to crates.io and PyPI
+
+Not done so far: no `visloc-*` crate is on crates.io and `visloc` is not on
+PyPI. The release workflow can publish them, but only when run by hand
+(Actions → release → Run workflow, with an existing tag and **publish**
+ticked); a tag push never publishes. That run adds these jobs:
+
+| Job | What it does |
+| --- | --- |
 | `crates` | Checks that the tag matches the workspace version, verify-builds every crate (`cargo package --workspace`), then uploads them in publish order with `scripts/publish_crates.sh`. |
 | `wheels`, `sdist` | Builds the `visloc` Python wheels (CPython 3.10–3.14 on Linux x86_64 / aarch64 manylinux, Windows x64 and macOS arm64) and the sdist with maturin, and smoke-tests a wheel with the bindings' pytest suite. |
 | `pypi` | Uploads the wheels and the sdist to PyPI and attaches them to the GitHub release. |
 
 `scripts/publish_crates.sh` skips every crate whose version is already on
-crates.io, so a failed or cancelled run is resumed by running the workflow by
-hand (Actions → release → Run workflow, with the tag and **publish** ticked).
+crates.io, so a failed or cancelled run is resumed by running it again.
 `scripts/publish_crates.sh --dry-run` lists what it would upload.
 
 **The first crates.io release takes about two hours.** crates.io lets an
@@ -122,8 +132,9 @@ Later releases only update existing crates and finish in minutes.
 
 ### One-time setup
 
-Until this is done the `crates` job skips itself with a notice, and the
-`pypi` job fails, so the GitHub release and binaries are unaffected.
+Needed before the first publishing run. Without it the `crates` job skips
+itself with a notice and the `pypi` job fails; the GitHub release and
+binaries are unaffected either way.
 
 **crates.io.**
 

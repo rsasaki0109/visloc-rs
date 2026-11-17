@@ -6,14 +6,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## 0.4.0 - 2026-11-17
 
-The first release published to crates.io and PyPI. Breaking:
-`GpuMatcher::match_pairs` returns a `Result` (see Changed).
+Breaking: `GpuMatcher::match_pairs` returns a `Result` (see Changed). Not
+published to crates.io or PyPI; the GitHub release carries the binaries.
 
 ### Added
 
-- **Package releases: a `v*` tag now publishes the crates to crates.io and
-  the `visloc` Python package to PyPI**, next to the GitHub release and
-  binaries (`.github/workflows/release.yml`).
+- **Package publishing, opt-in: the release workflow can publish the crates
+  to crates.io and the `visloc` Python package to PyPI**
+  (`.github/workflows/release.yml`). Only a manual run with `publish`
+  ticked does it; a `v*` tag push still creates just the GitHub release and
+  binaries. Nothing has been published yet.
   - **crates.io.** The `crates` job checks the tag against the workspace
     version, verify-builds every crate (`cargo package --workspace`), and
     uploads the eighteen crates in dependency order with
@@ -26,8 +28,8 @@ The first release published to crates.io and PyPI. Breaking:
     maturin, smoke-tested with the bindings' pytest suite, uploaded by
     trusted publishing and attached to the GitHub release.
   - Publishing needs a one-time setup: a `CARGO_REGISTRY_TOKEN` secret and a
-    PyPI pending publisher (docs/publishing.md, "One-time setup"). Without
-    the token the `crates` job skips itself with a notice.
+    PyPI pending publisher (docs/publishing.md, "Publishing to crates.io and
+    PyPI"). Without the token the `crates` job skips itself with a notice.
   - `scripts/check_release_metadata.sh` now also checks that the Python
     bindings carry the workspace version, and
     `tests/test_ci_release_gate.py` that the publish order in the script,

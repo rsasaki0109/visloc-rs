@@ -1,15 +1,15 @@
 name: release
 
 # A version tag's release: the GitHub release with prebuilt command-line
-# binaries (`gsplat_photos` (photos to SfM, splats and a mesh), `visloc_mvs`
+# binaries: `gsplat_photos` (photos to SfM, splats and a mesh), `visloc_mvs`
 # (dense multi-view stereo), `colmap_incremental_mapper` and `visloc_web`
-# (the browser UI, which runs the `gsplat_photos` next to it)), the Rust
-# crates on crates.io and the `visloc` Python wheels on PyPI.
+# (the browser UI, which runs the `gsplat_photos` next to it). A `v*` tag
+# push builds them; a manual run rebuilds an existing tag's release.
 #
-# A `v*` tag push does all of it. A manual run rebuilds an existing tag's
-# release, and publishes the packages only when `publish` is ticked.
-# Publishing needs a one-time setup (docs/publishing.md, "Automated
-# release"); without it the publish jobs skip themselves with a notice.
+# Publishing the Rust crates to crates.io and the `visloc` Python wheels to
+# PyPI is opt-in: only a manual run with `publish` ticked does it, never a
+# tag push. It needs a one-time setup (docs/publishing.md, "Publishing to
+# crates.io and PyPI").
 
 on:
   push:
@@ -146,7 +146,7 @@ jobs:
   crates:
     name: Publish to crates.io
     needs: release
-    if: github.event_name == 'push' || inputs.publish
+    if: inputs.publish
     runs-on: ubuntu-latest
     # The first release creates eighteen new crates, which crates.io admits a
     # few at a time (scripts/publish_crates.sh waits out the rate limit).
@@ -213,7 +213,7 @@ jobs:
   wheels:
     name: Python wheels (${{ matrix.os }} ${{ matrix.target }})
     needs: release
-    if: github.event_name == 'push' || inputs.publish
+    if: inputs.publish
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -275,7 +275,7 @@ jobs:
   sdist:
     name: Python sdist
     needs: release
-    if: github.event_name == 'push' || inputs.publish
+    if: inputs.publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
