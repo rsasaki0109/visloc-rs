@@ -405,6 +405,15 @@ pub struct GnssPoseGraph {
     pub lever_arm: Vector3<f64>,
     /// Nodes held constant (at least one is required to fix the gauge).
     pub fixed_nodes: BTreeSet<u64>,
+    /// Optional per-GNSS-factor multipliers (factor order) on the whitened
+    /// squared residual wherever it decides *robustness*: the GNC / kernel
+    /// weights computed between LM stages and the χ² inlier classification.
+    /// The least-squares weighting itself is unchanged. Use it when a
+    /// factor's information was deliberately down-weighted (one fix shared
+    /// between several frames) but its consistency should still be judged at
+    /// the fix's own accuracy. Empty (the default) means 1 for every factor;
+    /// IRLS inside an LM stage (`GnssRobustMode::Kernel`) does not use it.
+    pub gnss_gate_scales: Vec<f64>,
 }
 
 /// Per-factor GNSS weighting used inside one LM stage.
@@ -481,6 +490,18 @@ impl GnssPoseGraph {
             .collect()
     }
 
+    /// [`Self::gnss_squared_residuals`] times [`Self::gnss_gate_scales`]: the
+    /// statistic the robust weights and the inlier classification use.
+    pub fn gnss_gating_residuals(&self) -> Vec<f64> {
+        let mut residuals = self.gnss_squared_residuals();
+        if !self.gnss_gate_scales.is_empty() {
+            for (s, scale) in residuals.iter_mut().zip(&self.gnss_gate_scales) {
+                *s *= scale;
+            }
+        }
+        residuals
+    }
+
     /// Jointly optimize the free nodes and the alignment.
     pub fn optimize(
         &mut self,
@@ -520,7 +541,7 @@ impl GnssPoseGraph {
                     &mut symbolic,
                 )?;
                 total_iterations += stage.iterations;
-                for (weight, s) in weights.iter_mut().zip(self.gnss_squared_residuals()) {
+                for (weight, s) in weights.iter_mut().zip(self.gnss_gating_residuals()) {
                     *weight = kernel.weight(s);
                 }
                 stage.converged
@@ -539,7 +560,7 @@ impl GnssPoseGraph {
                 total_iterations += stage.iterations;
                 let mut converged = stage.converged;
                 if gnss_count > 0 {
-                    let residuals = self.gnss_squared_residuals();
+                    let residuals = self.gnss_gating_residuals();
                     let s_max = residuals.iter().copied().fold(0.0_f64, f64::max);
                     let effective = match gnc_config.auto_scale {
                         Some(k) => GncConfig {
@@ -553,7 +574,7 @@ impl GnssPoseGraph {
                     for _ in 0..gnc_config.max_outer.max(1) {
                         gnc_levels += 1;
                         let terminal = state.is_terminal();
-                        let residuals = self.gnss_squared_residuals();
+                        let residuals = self.gnss_gating_residuals();
                         if gnc_config.auto_scale_readapt {
                             if let Some(k) = gnc_config.auto_scale {
                                 if let Some(c) = gnc::estimate_scale_mad(&residuals, k) {
@@ -579,7 +600,7 @@ impl GnssPoseGraph {
                         }
                         state.anneal();
                     }
-                    for (weight, s) in weights.iter_mut().zip(self.gnss_squared_residuals()) {
+                    for (weight, s) in weights.iter_mut().zip(self.gnss_gating_residuals()) {
                         *weight = state.weight(s);
                     }
                 }
@@ -595,7 +616,7 @@ impl GnssPoseGraph {
                 .collect::<Vec<_>>()
         };
         let mut residuals = self.gnss_squared_residuals();
-        let mut inliers = classify(&weights, &residuals);
+        let mut inliers = classify(&weights, &self.gnss_gating_residuals());
 
         if config.refine_without_outliers && gnss_count > 0 {
             let mask: Vec<f64> = inliers
@@ -613,9 +634,10 @@ impl GnssPoseGraph {
             total_iterations += stage.iterations;
             converged = stage.converged;
             residuals = self.gnss_squared_residuals();
+            let gating = self.gnss_gating_residuals();
             // Hard rejection keeps the earlier verdicts; a previously-accepted
             // fix that the refined trajectory now contradicts is demoted.
-            for ((inlier, weight), &s) in inliers.iter_mut().zip(&mut weights).zip(&residuals) {
+            for ((inlier, weight), &s) in inliers.iter_mut().zip(&mut weights).zip(&gating) {
                 if *inlier && s > config.outlier_chi2_threshold {
                     *inlier = false;
                 }

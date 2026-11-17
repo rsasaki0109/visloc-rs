@@ -100,6 +100,9 @@ const OPTIONAL_KEYS: &[&str] = &[
     // EuRoC reader starts that much later (absent: off, upstream's single
     // sample); see `BasaltConfig::init_accel_average_s`.
     "config.vio_init_accel_average_s",
+    // Which camera a monocular EuRoC replay uses (absent: 0, cam0); see
+    // `BasaltConfig::mono_camera`.
+    "config.vio_mono_camera",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -222,6 +225,24 @@ impl BasaltConfig {
             )));
         }
         Ok(Some(span))
+    }
+    /// `config.vio_mono_camera` (opt-in, not upstream): the camera index a
+    /// monocular replay ([`crate::EurocSensorDataset::open_monocular`])
+    /// reads, 0 (cam0, the default) or 1 (cam1). EuRoC V2_03's cam0 drops
+    /// every other frame for about 20 s while its cam1 stays at 20 Hz; a
+    /// single camera loses its tracks across those gaps.
+    pub fn mono_camera(&self) -> Result<usize, ConfigError> {
+        let key = "config.vio_mono_camera";
+        if !self.values.contains_key(key) {
+            return Ok(0);
+        }
+        let camera: u64 = self.value(key)?;
+        if camera > 1 {
+            return Err(ConfigError::Value(format!(
+                "{key}: {camera} is not a camera index (0 or 1)"
+            )));
+        }
+        Ok(camera as usize)
     }
     /// `config.vio_earth_rotation_latitude_deg`: `w_e sin(latitude)`, or 0
     /// when the key is absent.

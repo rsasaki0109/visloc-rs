@@ -39,6 +39,9 @@ pub mod mapper;
 // offline/parity module root -- stays byte-for-byte untouched.
 #[path = "mapper/online.rs"]
 pub mod mapper_online;
+// Declared here for the same reason as `mapper_online`.
+#[path = "mapper/correction.rs"]
+pub mod mapper_correction;
 pub mod patch;
 pub mod pattern;
 pub mod platform;

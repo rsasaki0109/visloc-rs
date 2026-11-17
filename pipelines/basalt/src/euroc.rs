@@ -100,6 +100,12 @@ impl EurocSensorDataset {
 
     /// Opens the recording as a monocular-inertial (cam0 + IMU) stream.
     ///
+    /// With `config.vio_mono_camera: 1` (opt-in) the stream is cam1 + IMU
+    /// instead: cam1's manifest and images fill [`EurocSensorFrame::cam0`]
+    /// and the calibration keeps camera 1 alone, as its camera 0
+    /// ([`BasaltCalibration::select_camera`]). The rest of this paragraph
+    /// describes the default, cam0.
+    ///
     /// `mav0/cam1` is never read (it may be absent), every cam0 manifest row
     /// becomes a frame, every [`EurocSensorFrame::cam1`] is `None`, and the
     /// calibration is reduced to camera 0 with
@@ -140,9 +146,23 @@ impl EurocSensorDataset {
             return Err(EurocReaderError::MissingDirectory(root));
         }
         let mav0 = root.join("mav0");
-        let cam0_dir = mav0.join("cam0");
-        let cam1_dir = mav0.join("cam1");
         let imu0_dir = mav0.join("imu0");
+
+        let config_path = config_path.as_ref();
+        let config = timing.measure(TimingBucket::DatasetConfig, || {
+            let config_json =
+                fs::read_to_string(config_path).map_err(|source| EurocReaderError::Io {
+                    path: config_path.to_path_buf(),
+                    source,
+                })?;
+            BasaltConfig::from_json(&config_json).map_err(EurocReaderError::from)
+        })?;
+        // A monocular replay may read cam1 instead (`config.vio_mono_camera`);
+        // its frames then fill `EurocSensorFrame::cam0` and the calibration's
+        // camera 0 is cam1's. The stereo path always reads cam0 + cam1.
+        let mono_camera = if monocular { config.mono_camera()? } else { 0 };
+        let cam0_dir = mav0.join(if mono_camera == 1 { "cam1" } else { "cam0" });
+        let cam1_dir = mav0.join("cam1");
 
         let mut cam0_images = timing.measure(TimingBucket::DatasetCsvParsing, || {
             read_image_manifest(&cam0_dir.join("data.csv"), &cam0_dir)
@@ -193,18 +213,8 @@ impl EurocSensorDataset {
                 })?;
             BasaltCalibration::from_json_str(&calibration_json).map_err(EurocReaderError::from)
         })?;
-        let config_path = config_path.as_ref();
-        let config = timing.measure(TimingBucket::DatasetConfig, || {
-            let config_json =
-                fs::read_to_string(config_path).map_err(|source| EurocReaderError::Io {
-                    path: config_path.to_path_buf(),
-                    source,
-                })?;
-            BasaltConfig::from_json(&config_json).map_err(EurocReaderError::from)
-        })?;
-
         let calibration = if monocular {
-            calibration.retain_cameras(1)?
+            calibration.select_camera(mono_camera)?
         } else {
             calibration
         };
@@ -877,6 +887,62 @@ mod tests {
         assert_eq!(first.initialization_imu.unwrap().timestamp_ns, 100);
         assert_eq!(first.cam0.pixel(1, 0), Some(65_280));
         assert!(EurocSensorDataset::open(&root, &calibration, &config).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn monocular_reader_can_use_cam1_with_its_calibration() {
+        let (root, calibration, config) = make_dataset();
+        // cam1 has one more frame than cam0 (as on EuRoC V2_03, whose cam0
+        // drops frames) and different pixels.
+        write_file(
+            &root.join("mav0/cam1/data.csv"),
+            "#timestamp,filename\n100,100.png\n150,150.png\n200,200.png\n",
+        );
+        for (timestamp, pixels) in [(100, vec![9, 9, 9, 9]), (150, vec![7, 7, 7, 7])] {
+            GrayImage::from_raw(2, 2, pixels)
+                .unwrap()
+                .save(root.join(format!("mav0/cam1/data/{timestamp}.png")))
+                .unwrap();
+        }
+        let with_key = |value: &str| {
+            let text = fs::read_to_string(&config).unwrap().replacen(
+                "\"value0\": {",
+                &format!("\"value0\": {{\n        \"config.vio_mono_camera\": {value},"),
+                1,
+            );
+            let path = root.join(format!("config_mono_{value}.json"));
+            write_file(&path, &text);
+            path
+        };
+        let cam1_config = with_key("1");
+        let stereo_calibration = EurocSensorDataset::open(&root, &calibration, &config)
+            .unwrap()
+            .calibration()
+            .clone();
+
+        let dataset =
+            EurocSensorDataset::open_monocular(&root, &calibration, &cam1_config).unwrap();
+        assert!(dataset.is_monocular());
+        assert_eq!(dataset.frame_count(), 3);
+        let selected = dataset.calibration();
+        assert_eq!(selected.cameras.len(), 1);
+        assert_eq!(selected.cameras[0], stereo_calibration.cameras[1]);
+        assert_eq!(selected.t_imu_cam[0], stereo_calibration.t_imu_cam[1]);
+        assert_eq!(selected.resolutions[0], stereo_calibration.resolutions[1]);
+        let first = dataset.frame(0).unwrap();
+        assert_eq!(first.cam0.pixel(0, 0), Some(9 << 8));
+        assert!(first.cam1.is_none());
+        assert_eq!(dataset.frame(1).unwrap().timestamp_ns, 150);
+
+        // The default (key absent or 0) stays cam0; stereo ignores the key.
+        let cam0 = EurocSensorDataset::open_monocular(&root, &calibration, &with_key("0")).unwrap();
+        assert_eq!(cam0.frame_count(), 2);
+        assert_eq!(cam0.frame(0).unwrap().cam0.pixel(0, 0), Some(0));
+        let stereo = EurocSensorDataset::open(&root, &calibration, &cam1_config).unwrap();
+        assert_eq!(stereo.calibration().cameras.len(), 2);
+        assert_eq!(stereo.frame(0).unwrap().cam0.pixel(0, 0), Some(0));
+        assert!(EurocSensorDataset::open_monocular(&root, &calibration, &with_key("2")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

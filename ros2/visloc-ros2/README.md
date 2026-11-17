@@ -8,7 +8,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 
 | binary | what it does |
 |---|---|
-| `visloc_vio_node` | Stereo-inertial VIO: the repository's faithful Basalt port (`pipelines/basalt`) fed from two `sensor_msgs/Image` streams and `sensor_msgs/Imu`. Publishes odometry, pose, path and TF. |
+| `visloc_vio_node` | Stereo-inertial VIO: the repository's faithful Basalt port (`pipelines/basalt`) fed from two `sensor_msgs/Image` streams and `sensor_msgs/Imu`. Publishes odometry, pose, path and TF; opt-in (`mapper:=true`), also the online mapper's loop-closed poses and `map -> odom`. |
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
 | `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and corrects the VIO odometry into the map frame. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
 | `visloc_wheel_calibration_node` | A robot's wheel odometry calibrated while driving, against `visloc_vio_node` and `visloc_map_localize_node`'s localizations: where the wheel odometry is measured relative to `base_link`, the lean of `base_link`, and the map's scale. Publishes the wheel odometry as `base_link`'s pose and `odom -> base_link`, for `visloc_map_localize_node`. |
@@ -47,10 +47,11 @@ The calibration and config are the same Basalt JSON files
 `examples/basalt_euroc_online_slam_demo.rs` uses, parsed by the same
 `BasaltCalibration` / `BasaltConfig` code, and the estimator is built the
 same way (`BasaltVioEstimatorAdapter::from_config`, with the demo's
-urgent-keyframe defaults unless the config sets them). The node runs the
-lean VIO path (`process_without_marg_data_no_trace`); the online NFR mapper
-of the demo is **not** attached, so loop closure / global BA are not part
-of the node's output.
+urgent-keyframe defaults unless the config sets them). By default the node
+runs the lean VIO path (`process_without_marg_data_no_trace`) and publishes
+odometry only. With `mapper:=true` it also runs the demo's online mapper
+(loop closure and global BA) and publishes loop-closed poses in a `map`
+frame; see [the online mapper](#online-mapper-mappertrue) below.
 
 | topic | type | dir | notes |
 |---|---|---|---|
@@ -61,7 +62,9 @@ of the node's output.
 | `odom` | `nav_msgs/Odometry` | out | pose of the IMU (body), or of `base_frame`, in a gravity-aligned, z-up `odom` frame; twist in that frame |
 | `pose` | `geometry_msgs/PoseStamped` | out | same pose |
 | `path` | `nav_msgs/Path` | out | last `path_max_length` poses |
-| `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame`, or `odom_frame -> base_frame` |
+| `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame`, or `odom_frame -> base_frame`; with `mapper`, also `map_frame -> odom_frame` |
+| `map_pose` | `geometry_msgs/PoseStamped` | out | only with `mapper`: the same pose in `map_frame`, loop-closure corrected |
+| `map_path` | `nav_msgs/Path` | out | only with `mapper` and `publish_path`: last `path_max_length` `map_pose`s |
 
 Output stamps are the left image's header stamps.
 
@@ -83,6 +86,11 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `urgent_keyframes` | `true` | the demo's urgent-keyframe defaults |
 | `imu_seed_klt` | `false` | `config.optical_flow_imu_seed_rotation` |
 | `max_iterations` | `3` | LM iterations per frame, overriding `config.vio_max_iterations` (`0` keeps the config's); see the replay results below |
+| `mapper` | `false` | run the online mapper and publish `map_frame -> odom_frame`, `map_pose`, `map_path` |
+| `map_frame` | `map` | with `mapper` |
+| `mapper_queue` | `64` | mapper packets waiting for the mapper; when full, new packets are dropped (counted as `mapper_dropped`) |
+| `mapper_optimize_every_k` | `100` | new keyframes between background global BA passes (the demo's `--optimize-every-k`) |
+| `mapper_trajectory_out` | none | on SIGINT/SIGTERM, write the loop-closed trajectory of every frame here (TUM) |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -108,6 +116,119 @@ published, not the previous frame's. `cam_time_offset_ns` from the
 calibration is added to camera stamps. On an estimator error the node logs
 it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
 the dropped-frame counts and the frontend/estimator time per frame.
+
+### Online mapper (`mapper:=true`)
+
+```sh
+visloc_vio_node --ros-args \
+  -p calibration:=configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  -p config:=configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  -p mapper:=true -p mapper_trajectory_out:=trajectory_map.tum \
+  -r left/image_raw:=/cam0/image_raw -r right/image_raw:=/cam1/image_raw -r imu:=/imu0
+```
+
+Opt-in; without it the node's outputs and behavior are unchanged. It attaches
+`OnlineNfrMapper` the way `examples/basalt_euroc_online_slam_demo.rs` does:
+the mapper settings come from the same config file
+(`mapper_config` / `offline_mapper_config` / `mapper_global_ba_config`), with
+the demo's defaults (`--num-opt-iter 10`, loop matching on,
+`--optimize-every-k 100`). The estimator runs the MargData-retaining path
+(compact LM variant, `set_lean_marg_data(true)`), which gives the same
+trajectory as the lean path (`tests/core_pipeline.rs` checks this) but keeps
+the window keyframes' images. Each frame that marginalizes keyframes yields a
+mapper packet; already-sent images are stripped (`SentImageFilter`) and the
+packet goes through a bounded queue to a mapper thread (below-normal OS
+priority), which ingests it: features, stereo and BoW matching, loop
+candidates, and every `mapper_optimize_every_k` keyframes (or after a loop) a
+global BA on a background thread, merged into the map when it finishes.
+
+The node publishes REP-105's tree `map -> odom -> base` (`base` being
+`body_frame` or `base_frame`): `odom -> base` is the VIO as before, and
+`map_frame -> odom_frame` is the mapper's correction, sent in the same `/tf`
+message, with the same stamp. After every ingested packet the mapper thread
+takes the newest keyframe `k` whose pose the global BA has optimized and sets
+
+```text
+T_map_odom = T_mapper(k) * T_vio(k)^-1
+```
+
+where `T_vio(k)` is the pose the VIO published for that frame (the node keeps
+every frame's VIO pose, about 100 bytes per frame, for this and for the
+final trajectory). Until the first global BA
+merges, `T_map_odom` is the identity. `map_pose` is `T_map_odom` applied to
+`pose`; `map_path` collects the `map_pose`s as published, so it is not
+corrected retroactively when a later loop closure moves the map.
+
+The VIO thread never waits for the mapper. When `mapper_queue` packets are
+already waiting, a new packet is dropped and counted (`mapper_dropped` in the
+10 s status line, next to `mapper_sent`, `mapper_ingested`, `keyframes`,
+`merges`, `loops` and `correction_kf`). A dropped packet's keyframes and
+relative-pose factors never reach the map, which weakens the map there, but
+the VIO keeps its rate. The online demo makes the other choice and blocks
+its VIO when its 256-packet queue is full. A queued packet holds its new
+keyframes' images, about 1.4 MB per EuRoC stereo keyframe, so the default
+bound of 64 caps the backlog near 100 MB.
+
+On SIGINT or SIGTERM (Ctrl-C, `ros2 launch` shutdown) the node stops
+processing frames, lets the mapper ingest the queued packets, runs its final
+global optimization (`OnlineNfrMapper::finalize`, the demo's) and, with
+`mapper_trajectory_out`, writes every VIO frame's IMU pose in the map frame as
+a TUM file: the keyframe corrections interpolated between keyframes, as the
+demo's `trajectory_online.tum` (`visloc_basalt::mapper_correction::
+propagate_interpolated`), stamped with the left image stamps. This can take
+from seconds to minutes on a long run. A second signal exits at once without
+it; `ros2 launch` sends SIGTERM 5 s after SIGINT by default, so raise
+`sigterm_timeout` to keep the final optimization there. Without `mapper` the
+node installs no signal handler and stops as before.
+
+Limitations:
+
+* The mapper's output is **not deterministic run to run**: its RANSAC uses a
+  wall-clock seed and the background BA merges at timing-dependent packets,
+  as in the demo. The VIO outputs (`odom`, `pose`, `odom -> base`) stay
+  deterministic for a given frame sequence.
+* `T_map_odom` changes in steps, when a global BA merges, not smoothly.
+* On an estimator reset the VIO's world frame starts over, so the mapper
+  starts over too: the old map is discarded, `T_map_odom` returns to the
+  identity, and the trajectory file covers the frames since the last reset.
+* Stereo only, like the node. Measured on recorded EuRoC data without DDS
+  (`examples/euroc_mapper_replay.rs`, below), not yet through `ros2 bag play`.
+* Do not run it next to `visloc_map_localize_node` with the same `map_frame`:
+  both publish `map -> odom` (and both name their output `map_pose`, with
+  different types).
+
+#### On EuRoC, without DDS
+
+`examples/euroc_mapper_replay.rs` drives the node's own pieces on a EuRoC
+recording: `VioCore`'s two stages with `retain_marg_data`, `MapperSession`
+with its bounded, dropping queue, and `map_from_odom()` after each frame.
+Frames are paced at the recording's rate, as a live node receives them. It
+writes the live `map_pose` of every frame, the VIO poses and the shutdown
+trajectory (`mapper_trajectory_out`).
+
+```bash
+cargo run --release --manifest-path ros2/visloc-ros2/Cargo.toml --example euroc_mapper_replay -- \
+  --euroc-dir /data/V1_01_easy \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir target/ros2_mapper_v101
+```
+
+V1_01_easy, 2026-11-17, 4 cores, SE(3) ATE against the ground truth:
+
+| Output | ATE |
+| --- | ---: |
+| `odom` (VIO) | 0.0390 m |
+| live `map_pose` | 0.0385 m |
+| shutdown trajectory | **0.0354 m** |
+| demo `trajectory_online.tum`, same settings | 0.0354 m |
+
+409 packets were sent and none dropped, with 278 loop pairs and 3 BA merges
+during the run.
+- **The shutdown trajectory** matches the demo's.
+- **The live `map_pose`** is only slightly better than the VIO. It is
+  corrected with whatever the last merged BA said, by default every 100
+  keyframes, and the large corrections arrive in the final optimization.
 
 ## `visloc_localize_node`
 
@@ -749,7 +870,11 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   every frame yields a pose, the drift stays under 0.5 m and gravity
   alignment is correct. It also localizes a rendered query against a
   synthetic three-depth-slab COLMAP map (written to disk and read back) and
-  recovers the 0.16 m camera translation within 2 cm.
+  recovers the 0.16 m camera translation within 2 cm. With a config that
+  takes a keyframe on every frame, it checks that the MargData-retaining
+  stages give the lean path's estimates while emitting mapper packets, and
+  runs a `MapperSession` over them to a final, full-frame corrected
+  trajectory.
 * `dds_nodes` spawns the real `visloc_vio_node` / `visloc_localize_node` /
   `visloc_map_localize_node` binaries on a private domain id, and drives
   them from a `ros2-client` test node with synthetic images, IMU and
@@ -758,8 +883,10 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   content; the last against a saved map written from the ORB corners of a
   synthetic image, with a stationary odometry pose to recover, once with
   the map's extrinsics and once with `extrinsics tf` and a `base_link`
-  camera offset published once on a transient-local `/tf_static`. These
-  tests need UDP multicast on loopback. They pass in an Ubuntu 24.04
+  camera offset published once on a transient-local `/tf_static`. The VIO
+  node also runs with `mapper:=true`: `map -> odom` and `map_pose` must
+  arrive, and after a SIGINT the node must exit cleanly having written the
+  corrected trajectory. These tests need UDP multicast on loopback. They pass in an Ubuntu 24.04
   development container with no ROS installed. GitHub's `ubuntu-latest`
   runners are expected to work too, since `ros2-client`'s own CI runs
   equivalent loopback tests, but the CI job's first run is the
@@ -776,6 +903,9 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   The node adds no tuning. It has been run on synthetic data and on all
   eight EuRoC query sequences, replayed over DDS by a RustDDS player (MH_02)
   and played from a rosbag2, not on a live sensor.
+* The VIO node's online mapper (`mapper:=true`) is tested on synthetic data
+  only, and its output is not deterministic run to run
+  ([above](#online-mapper-mappertrue)).
 * `nav_msgs/Odometry` covariances are zero (unknown): the marginalized
   Basalt window does not expose a calibrated per-frame covariance.
 * The localization covariance is a fixed, configurable diagonal, not an

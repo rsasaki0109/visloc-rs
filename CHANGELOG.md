@@ -6,6 +6,101 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
+  The online mapper (loop closure, global BA) now runs on a one-camera rig.
+  - **What changed.** The mapper's stereo stage, both batch
+    `NfrMapper::match_stereo` and the online per-timestamp match, returns
+    without matching when the calibration has one camera. Before, it failed
+    on the missing camera 1. Landmarks then come from temporal keyframe
+    matches alone. A stereo rig never takes the branch: the stereo VIO
+    trajectory is byte-identical.
+  - **EuRoC, all 11** (with `config.vio_init_accel_average_s: 0.5`):
+    - mean ATE 0.139 m for the VIO alone, **0.062 m** with the mapper;
+    - every sequence improves;
+    - lower than ORB-SLAM3 mono-inertial's published values on 5 of 11
+      (its mean 0.043 m);
+    - scale error −1.3 % to +1.8 %.
+  - **TUM-VI room1:** 0.096 m → 0.014 m (stereo online 0.011 m).
+  - Details in docs/mono_inertial_vio.md, "Mapping and loop closure".
+
+- **`config.vio_mono_camera`: which camera a monocular EuRoC replay reads
+  (opt-in, 0 or 1).**
+  - **Why.** V2_03's mono failure at 73 s comes from cam0 dropping every
+    other frame (414 gaps, mostly 55–75 s; cam1 has none). Turning at
+    about 1 rad/s, the KLT tracks then live one frame, and no landmark is
+    triangulated for about 15 s.
+  - **Result on V2_03.** Reading cam1 takes the mono VIO from 0.828 m to
+    0.104 m (scale +19 % → −0.2 %), and mono online SLAM from 0.100 m to
+    0.045 m.
+  - Urgent keyframes, IMU-seeded KLT and a fourth pyramid level only got
+    cam0 to 0.21–0.29 m. On V1_01, which has no gaps, cam1 is not better
+    (0.052 against 0.047 m).
+  - `BasaltCalibration::select_camera(index)` builds the one-camera rig.
+    Absent or 0, and on the stereo path, nothing changes.
+
+- **`visloc_vio_node` can run the online mapper (opt-in, `mapper:=true`).**
+  Loop closure and global BA as in `basalt_euroc_online_slam_demo`, with
+  its mapper settings, so a ROS 2 user gets loop-closed poses.
+  - The estimator runs the MargData-retaining path (same trajectory, checked
+    by a test) and sends mapper packets through a bounded queue to a mapper
+    thread. The VIO never waits: a full queue (`mapper_queue`, 64) drops
+    the packet and counts it in the status line.
+  - Live output, REP-105: `map -> odom` on `/tf`, from
+    `T_mapper(k) * T_vio(k)^-1` at the newest keyframe the global BA has
+    optimized, plus `map_pose` and `map_path`.
+  - On SIGINT/SIGTERM the node runs the mapper's final optimization and,
+    with `mapper_trajectory_out`, writes every frame's loop-closed pose
+    (TUM, corrections interpolated between keyframes like the demo's
+    `trajectory_online.tum`). A second signal exits at once.
+  - Without `mapper` the node's outputs and signal handling are unchanged.
+    The mapper's output is not deterministic run to run.
+  - On EuRoC V1_01, replayed through the node's own stages and mapper
+    session without DDS (`ros2/visloc-ros2/examples/euroc_mapper_replay.rs`,
+    paced at the recording's rate):
+    - the shutdown trajectory has ATE 0.0354 m, the same as the demo;
+    - the live `map_pose` has 0.0385 m, against 0.0390 m for the VIO;
+    - no packet was dropped.
+
+    Not yet run through `ros2 bag play` (ros2/visloc-ros2/README.md,
+    "Online mapper").
+  - `BasaltVioFrontendStage::set_retain_marg_data` runs the two-thread
+    stages on the MargData path (default off, lean path unchanged). The
+    demo's keyframe-correction propagation moved, unchanged, to
+    `visloc_basalt::mapper_correction`.
+
+- **VO + GNSS fusion on real data: KITTI raw with OXTS ground truth.**
+  - **What.** Three `2011_09_30` drives (odometry 07/06/05; 695 m, 1.2 km,
+    2.2 km). The in-repo deep-frontend stereo VO is fused with the OXTS
+    positions, degraded to a simulated 1 Hz receiver: 2 m / 4 m sigma, 80 %
+    Gauss–Markov with τ = 45 s, multipath jumps of 10–30 m, and a 20 s
+    dropout, from a fixed seed.
+  - **Result.** Batch fusion beats both inputs on every drive and seed. The
+    3-seed means are 3.5–4.8 m, against 9.2–10.1 m for the SE(3)-aligned VO
+    and 6.0–6.6 m for the raw fixes. The gain is much smaller than the synthetic
+    improvement (5.25 → 0.90 m). The correlated receiver error is not
+    averaged out, and the sliding window is worse than batch
+    (docs/gnss_fusion.md, "Results on KITTI raw").
+  - **Negative results.** Correct fixes are rejected when the VO fails. Near
+    a crossing truck on 0027 the error peaks at 4.9 m, even with native RTK
+    fixes. The deep frontend's motion-scale rescue locks at 1.57 m per frame
+    while the car decelerates on 0020 (VO 30 m). Both are recorded.
+  - **Defect found, opt-in fix: `GnssVoFusionConfig::gate_at_fix_accuracy`.**
+    Splitting a 1 Hz fix's information over ten 10 Hz frames also loosened
+    its χ²/GNC gate by √10, so multipath jumps were accepted (0 of 151
+    adjacent frames flagged on 0027). With the option, consistency is judged
+    at the fix's own accuracy: 74–79 % of those frames are flagged, none
+    elsewhere in batch, and the 3-seed mean batch ATE drops by 0.1–0.5 m
+    (one of nine runs is 0.04 m worse). The weights are
+    unchanged (`GnssPoseGraph::gnss_gate_scales`). It is off by default, and
+    default outputs are unchanged (synthetic demo still 0.898 m, 19 frames).
+  - **New code.** `visloc_io::kitti_raw_gnss` converts WGS84 to local ENU,
+    gives OXTS IMU poses and GNSS fixes, and reads the raw
+    `calib_{cam_to_cam,imu_to_velo,velo_to_cam}` chain.
+    `examples/kitti_raw_gnss_vo_fusion.rs` and
+    `scripts/run_kitti_raw_gnss_fusion_eval.sh` run the evaluation.
+    `fetch_kitti_raw_drive.py` gains `--skip-tracklets` /
+    `--skip-extract-oxts`.
+
 - **A container image: `ghcr.io/rsasaki0109/visloc-rs`.** `gsplat_photos`,
   `visloc_mvs`, `colmap_incremental_mapper` and `visloc_web` on Debian 12,
   built by the new `Dockerfile` and pushed by the release workflow's new

@@ -7,14 +7,22 @@
 //!
 //! KLT tracking runs on its own thread, one frame ahead of the estimator
 //! (the main thread), as upstream Basalt's optical-flow and VIO threads do.
+//!
+//! With `mapper:=true` the estimator also feeds Basalt's online mapper (loop
+//! closure, global BA) on a third thread, and the node publishes the
+//! `map -> odom` correction, `map_pose` and `map_path`; on SIGINT/SIGTERM it
+//! runs the mapper's final optimization and can write the corrected
+//! trajectory (see [`visloc_ros2::vio_mapper`]).
 
 use std::process;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use nalgebra::Vector3;
 
+use visloc_basalt::mapper_correction::tum_string;
 use visloc_basalt::RawU16Image;
 use visloc_ros2::dds::{
     output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
@@ -27,6 +35,9 @@ use visloc_ros2::tf_tree::StaticTransforms;
 use visloc_ros2::vio::{
     imu_sample_from_msg, odometry_msg, pose_stamped_msg, rebase, tf_msg, PathAccumulator,
     TrackedFrame, VioCore, VioError, VioFrames, VioFrontend, VioOptions,
+};
+use visloc_ros2::vio_mapper::{
+    map_pose_msg, map_to_odom_transform, new_online_mapper, MapperParams, MapperSession,
 };
 
 const USAGE: &str = "\
@@ -58,6 +69,13 @@ PARAMETERS (--name value  or  -p name:=value):
   imu_seed_klt           seed KLT with the IMU rotation                          [false]
   max_iterations         LM iterations per frame; overrides config.vio_max_iterations
                          (0: keep the config's)                                  [3]
+  mapper                 run Basalt's online mapper (loop closure + global BA)
+                         and publish the map_frame -> odom_frame correction      [false]
+  map_frame              frame of the corrected outputs (with mapper)           [map]
+  mapper_queue           mapper packets queued before new ones are dropped      [64]
+  mapper_optimize_every_k  new keyframes between background global BA passes   [100]
+  mapper_trajectory_out  on shutdown (SIGINT/SIGTERM), write the loop-closed
+                         trajectory of every frame here (TUM, IMU frame)        [none]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -66,6 +84,8 @@ TOPICS (remap with --remap from=to or -r from:=to):
        /tf_static (tf2_msgs/TFMessage, with base_frame)
   out: odom (nav_msgs/Odometry), pose (geometry_msgs/PoseStamped),
        path (nav_msgs/Path), /tf (tf2_msgs/TFMessage)
+       with mapper: map_pose (geometry_msgs/PoseStamped), map_path (nav_msgs/Path),
+       map_frame -> odom_frame on /tf
 ";
 
 fn main() {
@@ -208,10 +228,12 @@ fn run() -> Result<(), String> {
     let imu_buffer = args.parsed_or("imu_buffer", 4000usize)?;
     let image_depth = args.parsed_or("image_qos_depth", 5usize)?;
     let imu_depth = args.parsed_or("imu_qos_depth", 400usize)?;
+    let mapper_params = MapperParams::from_args(&args)?;
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
         max_iterations: Some(args.parsed_or("max_iterations", 3u32)?).filter(|&n| n > 0),
+        retain_marg_data: mapper_params.is_some(),
     };
     let domain_id = args.domain_id()?;
     let node_name = args
@@ -227,6 +249,8 @@ fn run() -> Result<(), String> {
     let path_topic = args.topic("path");
     let tf_topic = args.topic("/tf");
     let tf_static_topic = args.topic("/tf_static");
+    let map_pose_topic = args.topic("map_pose");
+    let map_path_topic = args.topic("map_path");
     args.finish()?;
 
     let read = |path: &str| {
@@ -249,6 +273,27 @@ fn run() -> Result<(), String> {
         gyro_bias: Mutex::new(Vector3::zeros()),
         frontend_time: Mutex::new(StageTime::default()),
     });
+    // The mapper is built from the same calibration and config, and again
+    // after every VIO reset.
+    let mapper_source = mapper_params.as_ref().map(|params| {
+        (
+            core.calibration().clone(),
+            core.config().clone(),
+            params.clone(),
+        )
+    });
+    let start_mapper = || {
+        mapper_source
+            .as_ref()
+            .map(|(calibration, config, params)| {
+                MapperSession::spawn(
+                    new_online_mapper(calibration, config, params)?,
+                    params.queue_capacity,
+                )
+            })
+            .transpose()
+    };
+    let mut mapper = start_mapper()?;
     let (frontend, mut backend) = core.into_stages();
 
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
@@ -267,6 +312,37 @@ fn run() -> Result<(), String> {
     } else {
         None
     };
+    let map_pose_pub = mapper_params
+        .is_some()
+        .then(|| ros.publisher::<PoseStamped>(&map_pose_topic, output_qos(10)))
+        .transpose()?;
+    let map_path_pub = (mapper_params.is_some() && publish_path)
+        .then(|| ros.publisher::<Path>(&map_path_topic, output_qos(1)))
+        .transpose()?;
+    // Only with the mapper: the first SIGINT/SIGTERM ends the loop below so
+    // the mapper can run its final optimization; a second one exits at once.
+    // Without it the default signal handling is left alone.
+    let shutdown = mapper_params
+        .is_some()
+        .then(|| {
+            let signals = Arc::new(AtomicU32::new(0));
+            let handler_signals = Arc::clone(&signals);
+            ctrlc::set_handler(move || {
+                if handler_signals.fetch_add(1, Ordering::SeqCst) > 0 {
+                    eprintln!(
+                        "visloc_vio_node: second signal; exiting without the final mapper optimization"
+                    );
+                    process::exit(130);
+                }
+                eprintln!(
+                    "visloc_vio_node: shutting down after the final mapper optimization \
+                     (signal again to skip it)"
+                );
+            })
+            .map(|()| signals)
+            .map_err(|error| format!("installing the signal handler: {error}"))
+        })
+        .transpose()?;
 
     let mut tf_static = base_frame
         .is_some()
@@ -333,6 +409,18 @@ fn run() -> Result<(), String> {
             String::new()
         },
     );
+    if let Some(params) = &mapper_params {
+        eprintln!(
+            "visloc_vio_node: online mapper on; out: {map_pose_topic}{} and {} -> {} on /tf",
+            if publish_path {
+                format!(" {map_path_topic}")
+            } else {
+                String::new()
+            },
+            params.map_frame,
+            frames.odom_frame,
+        );
+    }
 
     // Frontend thread: KLT-track frames in order and hand them over. The
     // hand-over blocks rather than drops: every tracked frame carries the
@@ -365,6 +453,7 @@ fn run() -> Result<(), String> {
     }
 
     let mut path = PathAccumulator::new(path_max_length);
+    let mut map_path = PathAccumulator::new(path_max_length);
     let mut processed = 0u64;
     let mut generation = 0u64;
     let mut error_log = RateLimitedLog::new(Duration::from_secs(2));
@@ -372,6 +461,12 @@ fn run() -> Result<(), String> {
     let mut last_status = Instant::now();
     let mut estimator_time = StageTime::default();
     loop {
+        if shutdown
+            .as_ref()
+            .is_some_and(|signals| signals.load(Ordering::SeqCst) > 0)
+        {
+            break;
+        }
         let received = tracked_rx.recv_timeout(Duration::from_secs(1));
         if last_status.elapsed() >= Duration::from_secs(10) {
             let stats = shared.with(|inputs| inputs.stats());
@@ -383,13 +478,17 @@ fn run() -> Result<(), String> {
             eprintln!(
                 "visloc_vio_node: processed={processed} pairs={} dropped_behind={} \
                  sync_dropped={} imu_out_of_order={} imu_evicted={} \
-                 frontend={frontend_time} estimator={} (avg/max)",
+                 frontend={frontend_time} estimator={} (avg/max){}",
                 stats.pairs,
                 stats.frames_dropped_behind,
                 stats.sync_dropped,
                 stats.imu_out_of_order,
                 stats.imu_evicted,
                 estimator_time.take(),
+                mapper.as_ref().map_or_else(String::new, |session| format!(
+                    " {}",
+                    session.status().summary()
+                )),
             );
             last_status = Instant::now();
         }
@@ -405,15 +504,26 @@ fn run() -> Result<(), String> {
             continue;
         }
         let started = Instant::now();
-        let estimated = tracked.and_then(|frame| backend.estimate(frame));
+        let estimated = tracked.and_then(|frame| backend.estimate_with_marg_data(frame));
         estimator_time.add(started.elapsed());
         match estimated {
-            Ok(estimate) => {
+            Ok((estimate, marg_data)) => {
                 processed += 1;
                 if processed == 1 {
                     eprintln!("visloc_vio_node: first pose published");
                 }
                 *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
+                if let Some(session) = mapper.as_mut() {
+                    // The IMU pose, as the mapper's keyframe poses are.
+                    session.record_vio_pose(
+                        estimate.frame_id,
+                        estimate.header_stamp_ns,
+                        &estimate.imu_to_world,
+                    );
+                    if let Some(packet) = marg_data {
+                        session.offer(packet);
+                    }
+                }
                 let estimate = match &base_frame {
                     None => estimate,
                     Some(base) => {
@@ -449,8 +559,33 @@ fn run() -> Result<(), String> {
                     publish_logged(path_pub, path.msg(&output_frames.odom_frame), "path");
                 }
                 publish_logged(&pose_pub, pose, "pose");
+                let map_from_odom = mapper.as_ref().map(MapperSession::map_from_odom);
+                if let (Some(map_from_odom), Some(params)) = (&map_from_odom, &mapper_params) {
+                    let map_pose = map_pose_msg(
+                        map_from_odom,
+                        &estimate.imu_to_world,
+                        estimate.header_stamp_ns,
+                        &params.map_frame,
+                    );
+                    if let Some(map_path_pub) = &map_path_pub {
+                        map_path.push(map_pose.clone());
+                        publish_logged(map_path_pub, map_path.msg(&params.map_frame), "map_path");
+                    }
+                    if let Some(map_pose_pub) = &map_pose_pub {
+                        publish_logged(map_pose_pub, map_pose, "map_pose");
+                    }
+                }
                 if let Some(tf_pub) = &tf_pub {
-                    publish_logged(tf_pub, tf_msg(&estimate, &output_frames), "tf");
+                    let mut tf = tf_msg(&estimate, &output_frames);
+                    if let (Some(map_from_odom), Some(params)) = (&map_from_odom, &mapper_params) {
+                        tf.transforms.push(map_to_odom_transform(
+                            map_from_odom,
+                            estimate.header_stamp_ns,
+                            &params.map_frame,
+                            &output_frames.odom_frame,
+                        ));
+                    }
+                    publish_logged(tf_pub, tf, "tf");
                 }
             }
             Err(error) => {
@@ -462,10 +597,49 @@ fn run() -> Result<(), String> {
                     backend.reset()?;
                     path.clear();
                     eprintln!("visloc_vio_node: estimator reset; re-initializing from IMU");
+                    if mapper.is_some() {
+                        // The new VIO world frame is unrelated to the old
+                        // one, so the map starts over too.
+                        drop(mapper.take());
+                        mapper = start_mapper()?;
+                        map_path.clear();
+                        eprintln!("visloc_vio_node: online mapper restarted with the estimator");
+                    }
                 }
             }
         }
     }
+    // Only a shutdown signal leaves the loop, and only with the mapper.
+    match (mapper, &mapper_params) {
+        (Some(session), Some(params)) => finish_mapper(session, params),
+        _ => Ok(()),
+    }
+}
+
+/// Runs the mapper's final global optimization and writes the corrected
+/// trajectory if asked to.
+fn finish_mapper(session: MapperSession, params: &MapperParams) -> Result<(), String> {
+    eprintln!(
+        "visloc_vio_node: final mapper optimization ({})",
+        session.status().summary()
+    );
+    let started = Instant::now();
+    let finished = session.finish()?;
+    eprintln!(
+        "visloc_vio_node: mapper finished in {:.1} s: {} keyframes, {} frames corrected",
+        started.elapsed().as_secs_f64(),
+        finished.keyframe_count,
+        finished.trajectory.len()
+    );
+    if let Some(path) = &params.trajectory_out {
+        std::fs::write(path, tum_string(&finished.trajectory))
+            .map_err(|error| format!("writing {}: {error}", path.display()))?;
+        eprintln!(
+            "visloc_vio_node: wrote the loop-closed trajectory to {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Frontend-thread body: pops synchronized frames, tracks them and sends

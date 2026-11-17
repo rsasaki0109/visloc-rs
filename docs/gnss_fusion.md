@@ -123,6 +123,10 @@ Lower-level pieces, usable on their own:
 - `visloc_slam::{bootstrap_gnss_alignment, fit_gnss_alignment}` — robust / closed-form alignment.
 - `visloc_slam::gnss_synthetic` — deterministic synthetic scenarios.
 - `gnss_fusion::{position_rmse, aligned_position_rmse, transform_trajectory}` — evaluation helpers.
+- `visloc_io::kitti_raw_gnss::{LocalEnuFrame, kitti_oxts_gnss_measurements, KittiRawStereoCalibration}` —
+  KITTI raw OXTS to ENU positions / IMU poses / GNSS fixes, and the raw IMU → camera calibration chain.
+- `GnssVoFusionConfig::gate_at_fix_accuracy` (opt-in, default off) — gate each
+  fix at its own accuracy rather than the shared one; see "Results on KITTI raw".
 
 Choose the alignment/scale model to match the VO:
 
@@ -171,6 +175,176 @@ Runtime: the full-batch 600-frame demo takes ~16 s in an unoptimized debug
 build (≈40 LM iterations including GNC); release builds are one to two orders
 of magnitude faster.
 
+## Results on KITTI raw
+
+The first run on real data: three KITTI raw drives with their OXTS RT3003
+GPS/INS logs (2026-11).
+
+### Setup
+
+- **Drives** (`2011_09_30`, the residential/city drives behind KITTI odometry
+  05/06/07; all three revisit places):
+
+  | Drive | Odometry seq | Frames used | Path | Duration |
+  | --- | --- | --- | --- | --- |
+  | `2011_09_30_drive_0027` | 07 | 1,106 (10 Hz) | 695 m | 114 s |
+  | `2011_09_30_drive_0020` | 06 | 1,104 (10 Hz) | 1,236 m | 114 s |
+  | `2011_09_30_drive_0018` | 05 | 1,381 (every 2nd of 2,762, 5 Hz) | 2,207 m | 287 s |
+
+  0018 runs at stride 2 only because the VO demo holds all frames in memory
+  (~5 GB RSS per 1,100 frames), which did not fit next to other jobs.
+- **Ground truth**: the synced OXTS packets (`oxts/data`, 10 Hz, RTK: the
+  reported `pos_accuracy` has a median of 6 / 1.3 / 2 cm on 0027 / 0020 /
+  0018), converted exactly (WGS84 → ECEF → ENU at the first packet, with the
+  meridian convergence applied to the attitude) by the new
+  `visloc_io::kitti_raw_gnss`. The camera pose is
+  `T_enu_imu · (R_rect_00 · T_cam0_velo · T_velo_imu)⁻¹`, and the lever arm
+  (the OXTS reference point in the rectified camera-0 frame) is
+  (−0.32, 0.73, −1.14) m. Frames and packets are paired by index (the sync
+  timestamps differ by a few ms). With the native fixes, the fused camera
+  positions match this ground truth to typically 5–10 cm away from VO
+  failures, which checks the calibration chain and the lever arm.
+- **VO**: `online_slam_stereo_vo_kitti_demo --frontend deep --no-stereo-ba`
+  (the pure-Rust HOG-like + mutual-softmax frontend with the
+  `run_kitti_deep_vo_smoke.sh` defaults; no BA, no loop closure) on the
+  rectified `image_00` / `image_01`, plus
+  `--motion-scale-rescue-min-translation-ratio 0` (see the negative results).
+  This is **not** the SuperPoint/LightGlue + BA + loop-closure stack of
+  [`kitti_multiseq_benchmark.md`](kitti_multiseq_benchmark.md) (1.4–2.3 m on
+  these sequences), which needs a torch export; its drift here is 9–10 m.
+- **Degraded GNSS** (`--gnss degraded`, the default of
+  `examples/kitti_raw_gnss_vo_fusion.rs`): the OXTS positions subsampled to
+  1 Hz; per-axis noise σ = 2 m east/north and 4 m up, of which 80 % of the
+  variance is a first-order Gauss–Markov process with τ = 45 s and 20 % white;
+  multipath bursts of 1–3 fixes offset 10–30 m horizontally (vertical
+  N(0, (offset/3)²)) started with probability 1.5 % per fix (≈3 % of fixes);
+  a 20 s dropout starting halfway through the drive; every fix reports
+  2 m / 4 m accuracy. SplitMix64 + Box–Muller from `--seed` (1, 2, 3).
+- **Native GNSS** (`--gnss native`): the same OXTS positions at 1 Hz with their
+  own `pos_accuracy`. Since they are also the ground truth, this run measures
+  only how well the fusion follows near-perfect fixes through the VO.
+- **Fusion**: `GnssVoFusionConfig::metric_gravity_aligned()` with
+  `rotation_dof = Full` (the VO map is the first camera frame, not gravity
+  aligned), GNC, default VO noise model, the lever arm above; sliding window =
+  30 s (300 frames at 10 Hz, 150 at 5 Hz), update stride 10.
+- **Metrics**: RMS of camera-centre error vs OXTS ground truth. VO alone after
+  its best-fit SE(3) alignment onto the ground truth (oracle); raw GNSS = RMS of
+  the fixes against the true antenna (OXTS) position, no alignment; fused = the
+  ENU trajectory, no alignment.
+
+### Results (seed 1, default fusion)
+
+| Drive | VO alone, SE(3)-aligned | Raw degraded GNSS (3-D / horizontal) | Fused batch (3-D / horizontal) | Fused sliding window (3-D / horizontal) | Fused, native OXTS fixes (batch / window) |
+| --- | --- | --- | --- | --- | --- |
+| 0027 (07) | 9.22 m | 5.59 / 4.39 m | **3.74** / 2.69 m | 3.83 / 2.82 m | 0.61 / 0.87 m |
+| 0020 (06) | 9.79 m | 5.62 / 4.39 m | **4.59** / 3.77 m | 6.24 / 3.10 m | 0.16 / 0.17 m |
+| 0018 (05) | 10.06 m | 5.78 / 4.18 m | **4.03** / 2.20 m | 4.67 / 2.91 m | 0.09 / 0.09 m |
+
+Mean over seeds 1–3 (fused 3-D ATE; "gate" = the new opt-in
+`gate_at_fix_accuracy`, "gravity" = `--alignment gravity-yaw`):
+
+| Drive | Raw GNSS (3-D / horiz.) | Batch | Batch + gate | Window | Window + gate | Window + gate + gravity | Multipath-adjacent frames flagged (batch: default → gate) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0027 | 6.55 / 5.73 m | 4.08 m | **3.56 m** | 4.42 m | 4.09 m | 4.10 m | 0 → 112 of 151 |
+| 0020 | 6.56 / 5.72 m | 4.76 m | **4.33 m** | 6.05 m | 5.84 m | **4.24 m** | 1 → 118 of 149 |
+| 0018 | 5.97 / 4.81 m | 3.50 m | **3.38 m** | 4.04 m | 3.80 m | **3.71 m** | 26 → 121 of 160 |
+
+Frames flagged away from injected multipath: 0 in every batch run; 24 in one
+run (0020, seed 1, window + gate without gravity), 0 elsewhere.
+
+What this shows:
+
+- **Batch fusion beats both inputs on every drive and seed**: seed means of
+  3.4–4.8 m against 9–10 m for the oracle-aligned VO and 6.0–6.6 m for the
+  raw fixes. The default sliding window does not always: on 0020 it is worse
+  than the raw fixes in 3-D for seeds 1 and 3 (6.24 vs 5.62 m, 6.69 vs
+  6.23 m). The gain
+  over raw GNSS is mostly horizontal (e.g. 5.73 → 2.94 m on 0027 with the
+  gate); the vertical error stays close to the receiver's correlated vertical
+  error, which the VO cannot observe.
+- **The gain is far smaller than on the synthetic drive** (5.25 → 0.90 m).
+  The synthetic receiver has white noise; here 80 % of the error is
+  correlated over 45 s, so averaging over ~100–300 fixes removes little of
+  it, and the fusion still treats the fixes as independent.
+- **Batch beats the sliding window** on all three drives. With a full
+  rotation the 30 s window lets roll and pitch wander: on 0020 the window's
+  horizontal error is lower than batch, but its 3-D error is 6.05 m. Levelling
+  the VO with the first frame's roll/pitch (an accelerometer stand-in) and
+  estimating yaw only fixes that (4.24 m). For batch it changes nothing.
+- **Multipath was mostly not rejected by default** (see the defect below). With
+  the gate, 70–80 % of the frames next to a jump are flagged, and batch ATE
+  improves on every drive and seed except 0020 seed 3 (+0.04 m).
+- Runtime (release, 4-core shared machine): VO 0.3–0.6 s per frame,
+  single-threaded; fusion batch 0.1–0.9 s, sliding window 0.8–4.5 s per drive.
+
+### Negative results and defects found
+
+- **Information sharing hid multipath from the gate.** With a 10 Hz camera
+  and a 1 Hz receiver each fix feeds ~10 frames, and
+  `share_fix_information` multiplies each frame's covariance by ~10. The χ²
+  gate and GNC then judge each frame at √10 ≈ 3.2× the fix sigma, so a 20 m
+  jump against 2 m sigmas passes as an inlier (0 of 151 adjacent frames
+  flagged on 0027). The new opt-in `GnssVoFusionConfig::gate_at_fix_accuracy`
+  (backed by `GnssPoseGraph::gnss_gate_scales`) judges consistency at the
+  unshared fix accuracy while keeping the shared weighting. It is neutral on
+  the synthetic drive (0.898 → 0.897 m, 20 instead of 19 frames flagged,
+  none elsewhere) and helps batch on KITTI. It stays off by default until it
+  has been measured on more data.
+- **VO failures are not robustified; correct GNSS gets rejected instead.**
+  GNC acts only on GNSS factors, and the VO noise model is a fixed, confident
+  per-step sigma. On 0027 a truck crossing in front of the camera (frames
+  ~615–640, the event analysed in
+  [`kitti_multiseq_benchmark.md`](kitti_multiseq_benchmark.md)) corrupts the
+  VO rotation. Even with near-perfect native fixes, 17 of those frames' fixes
+  are rejected and the error peaks at 4.9 m (0.61 m RMS against 0.09–0.16 m
+  on the other drives).
+- **A VO frontend lock-in on deceleration.** With the default motion-scale
+  rescue, the deep frontend on 0020 clamps every step to 1.57 m from frame
+  ~790 on while the car slows to 0.7–1 m per frame (raw PnP had it right). Each
+  rescued step feeds the history the rescue compares against, so it never
+  releases: 308 of 1,103 pairs were rescued. The VO reached 30.2 m ATE. Fusing
+  that VO gave 24.4 m (max 104 m) with degraded GNSS and 13.3 m (max 74 m)
+  even with the native fixes, because the fixes were rejected as outliers.
+  `--motion-scale-rescue-min-translation-ratio 0` turns off that collapse
+  branch. It is used for all three drives above. On 0027 the default run
+  fired no rescue at all, so its VO is unchanged; 0018 was run only with the
+  flag. The frontend default is not changed here.
+- **Levelling the VO with gravity (yaw-only alignment) does not help batch**
+  (±0.04 m), only the sliding window.
+
+### Reproduce
+
+```sh
+# Data (KITTI raw, ~0.5 GB per 1,100-frame drive: only image_00/image_01/oxts
+# and the date's calibration are fetched, by HTTP range requests):
+#   https://s3.eu-central-1.amazonaws.com/avg-kitti/raw_data/2011_09_30_calib.zip
+#   https://s3.eu-central-1.amazonaws.com/avg-kitti/raw_data/2011_09_30_drive_00XX/2011_09_30_drive_00XX_sync.zip
+for d in 0027 0020 0018; do
+  python3 scripts/fetch_kitti_raw_drive.py --drive 2011_09_30_drive_$d \
+      --out ~/data/kitti_raw/2011_09_30_drive_$d --skip-tracklets --skip-extract-oxts
+done
+# VO + fusion (degraded seed 1 and native), outputs in target/kitti_raw_gnss/<drive>/:
+scripts/run_kitti_raw_gnss_fusion_eval.sh --drive 2011_09_30_drive_0027 \
+    --data-root ~/data/kitti_raw/2011_09_30_drive_0027
+scripts/run_kitti_raw_gnss_fusion_eval.sh --drive 2011_09_30_drive_0020 \
+    --data-root ~/data/kitti_raw/2011_09_30_drive_0020
+scripts/run_kitti_raw_gnss_fusion_eval.sh --drive 2011_09_30_drive_0018 \
+    --data-root ~/data/kitti_raw/2011_09_30_drive_0018 --vo-stride 2
+# Variants (seeds 2/3, gate, gravity levelling) on an existing VO run:
+target/release/examples/kitti_raw_gnss_vo_fusion \
+    --date-dir ~/data/kitti_raw/2011_09_30_drive_0027/2011_09_30 \
+    --drive 2011_09_30_drive_0027 \
+    --vo-poses target/kitti_raw_gnss/2011_09_30_drive_0027/vo/vo_poses.txt \
+    --window 300 --seed 2 --gate-at-fix-accuracy --alignment gravity-yaw
+```
+
+Each run writes `summary.json` (all metrics and the noise parameters),
+`trajectory.csv` (truth, SE(3)-aligned VO, batch and window ENU positions with
+per-frame GNSS status) and `gnss.csv` (fix, true antenna position, multipath
+flag). Once the VO has run, the fusion needs only `oxts/`,
+`image_00/timestamps.txt` and the calibration files. The fusion's own RANSAC
+seed is the default `GnssBootstrapConfig::seed`.
+
 ## Tests
 
 - `pipelines/slam/src/gnss_pose_graph.rs` unit tests: finite-difference checks
@@ -183,8 +357,13 @@ of magnitude faster.
 - `pipelines/slam/tests/gnss_fusion.rs`: end-to-end synthetic drives — fused
   ATE well below VO-only, every outlier-touched frame rejected and none
   elsewhere, outliers do not pull the trajectory (vs plain least squares),
-  dropout bridged, monocular scale recovered, sliding window, and
-  unobservable-alignment / bad-timestamp errors.
+  dropout bridged, monocular scale recovered, sliding window,
+  unobservable-alignment / bad-timestamp errors, and a 10 Hz camera / 1 Hz
+  receiver drive where only `gate_at_fix_accuracy` flags a 12 m jump.
+- `crates/io/src/kitti_raw_gnss.rs` unit tests: WGS84/ECEF reference values,
+  ENU axes, the OXTS roll/pitch/yaw convention and meridian convergence, GNSS
+  fix conversion, and the raw calibration parser and IMU → rectified-camera
+  chain.
 
 ## Limits
 
@@ -192,16 +371,22 @@ of magnitude faster.
   receiver clock or multipath modelling beyond robust down-weighting.
 - GNSS noise is treated as white per fix. Real receivers have time-correlated
   errors; the convex covariance blending and information sharing are
-  conservative heuristics, not a colored-noise model.
+  conservative heuristics, not a colored-noise model. On KITTI raw with
+  simulated 45 s-correlated errors this caps the gain over the raw fixes
+  (seed means 6.0–6.6 m → 3.4–4.3 m, not the synthetic 5×).
+- Robustness covers GNSS only: a VO failure (dynamic object, frontend
+  lock-in) is trusted, and correct fixes near it are rejected instead.
 - The VO noise model is a hand-set per-step sigma; VO covariances from the
   front end are not consumed yet, and the VO factors are only between
   consecutive frames (no loop closures inside this graph).
 - Yaw-only alignment assumes a gravity-aligned map with `+z` up. With a full
   rotation, roll about a straight-line trajectory is unobservable until the
   path turns.
-- The ENU frame is whatever the fixes are expressed in; geodetic (LLA/ECEF) to
-  local ENU conversion is not provided here.
+- The ENU frame is whatever the fixes are expressed in. Geodetic (WGS84) to
+  local ENU conversion is in `visloc_io::kitti_raw_gnss::LocalEnuFrame`; the
+  fusion itself does not convert.
 - The sliding window has no marginalization prior on the frames it drops; the
   oldest window frame is simply held fixed.
-- Validated only on synthetic data so far; no public GNSS+camera dataset run is
-  claimed.
+- Real-data validation is three KITTI raw drives with the OXTS GPS/INS as
+  ground truth and a **simulated** degraded receiver derived from it; no run
+  with a real consumer receiver's output is claimed.

@@ -925,6 +925,14 @@ impl OnlineNfrMapper {
         images: &[OfImageData],
         calibration: &BasaltCalibration,
     ) -> Result<(), OnlineMapperError> {
+        // Monocular rig (`BasaltCalibration::retain_cameras(1)`, the
+        // `--mono` replay): there is no stereo pair to match. Landmarks come
+        // from temporal matches between keyframes alone, which
+        // `match_new_keyframe` already provides; a stereo rig never takes
+        // this branch.
+        if calibration.cameras.len() < 2 {
+            return Ok(());
+        }
         let camera_0 = calibration
             .camera_to_imu(0)
             .ok_or(OnlineMapperError::MissingCamera {

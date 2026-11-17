@@ -425,12 +425,18 @@ impl BasaltVioEstimatorAdapter {
     /// (`config.optical_flow_imu_seed_rotation`) uses whichever gyro bias
     /// the caller passes rather than the estimator's estimate from the
     /// previous frame.
+    ///
+    /// [`BasaltVioFrontendStage::set_retain_marg_data`] switches the pair to
+    /// the MargData-retaining path instead (an online mapper's input), as
+    /// [`Self::process_euroc_stream_pipelined`] with `retain_marg_data` and
+    /// no trace does.
     pub fn into_stages(self) -> (BasaltVioFrontendStage, BasaltVioEstimatorStage) {
         (
             BasaltVioFrontendStage {
                 frontend: self.frontend,
                 platform: self.platform,
                 timing: self.timing,
+                retain_marg_data: false,
             },
             BasaltVioEstimatorStage {
                 estimator: self.estimator,
@@ -446,6 +452,9 @@ pub struct BasaltFrontendPacket {
     pub tracks: TrackFrameOutput,
     imu: Vec<ImuSample>,
     initialization_imu: Option<ImuSample>,
+    /// The frame's raw images, for the estimator's MargData; only with
+    /// [`BasaltVioFrontendStage::set_retain_marg_data`].
+    of_images: Option<Vec<OfImageData>>,
 }
 
 /// The frontend half of [`BasaltVioEstimatorAdapter::into_stages`].
@@ -454,9 +463,21 @@ pub struct BasaltVioFrontendStage {
     frontend: DirectKltStream,
     platform: Option<crate::platform::PlatformFilter>,
     timing: TimingBreakdown,
+    retain_marg_data: bool,
 }
 
 impl BasaltVioFrontendStage {
+    /// Captures each frame's raw images in its packet so that
+    /// [`BasaltVioEstimatorStage::process`] runs the MargData-retaining
+    /// estimator path (keyframe images and marginalization data for an
+    /// online mapper) instead of the lean one. Off by default. Set it before
+    /// the first frame: the estimator cannot start retaining once it has run
+    /// lean (active keyframes would lack their images). The trajectory is
+    /// the lean path's either way.
+    pub fn set_retain_marg_data(&mut self, retain: bool) {
+        self.retain_marg_data = retain;
+    }
+
     /// Tracks one frame. `gyro_bias` (IMU frame, rad/s) bias-corrects the
     /// optional IMU rotation seed; pass the latest estimate the estimator
     /// stage has produced, or zero.
@@ -465,6 +486,13 @@ impl BasaltVioFrontendStage {
         frame: EurocSensorFrame,
         gyro_bias: Vector3<f64>,
     ) -> Result<BasaltFrontendPacket, BasaltAdapterError> {
+        // Captured before `StereoFrame::new` takes the images, as on the
+        // adapter's own retaining path.
+        let of_images = if self.retain_marg_data {
+            Some(pipeline_of_images(&frame)?)
+        } else {
+            None
+        };
         let stereo =
             crate::StereoFrame::new(frame.frame_id, frame.timestamp_ns, frame.cam0, frame.cam1);
         let mut tracks = self.frontend.process_frame_with_timing_imu(
@@ -480,6 +508,7 @@ impl BasaltVioFrontendStage {
             tracks,
             imu: frame.imu,
             initialization_imu: frame.initialization_imu,
+            of_images,
         })
     }
 }
@@ -492,12 +521,22 @@ pub struct BasaltVioEstimatorStage {
 
 impl BasaltVioEstimatorStage {
     /// Runs the estimator step for one frontend packet; packets must arrive
-    /// in the order the frontend stage produced them.
+    /// in the order the frontend stage produced them. A packet from a
+    /// frontend with [`BasaltVioFrontendStage::set_retain_marg_data`] runs
+    /// the MargData-retaining path (without the diagnostic trace), so
+    /// `output.estimator.marg_data` carries the mapper packets.
     pub fn process(
         &mut self,
         packet: BasaltFrontendPacket,
     ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
         let imu_count = packet.imu.len();
+        let retain_marg_data = packet.of_images.is_some();
+        if retain_marg_data && self.estimator.no_output_mode_active() {
+            return Err(BasaltAdapterError::Estimator(
+                "cannot retain MargData after no-output mode: active keyframes may lack complete OfImageData; recreate the stages"
+                    .into(),
+            ));
+        }
         let estimator = self
             .estimator
             .process_adapter_frame(
@@ -506,8 +545,8 @@ impl BasaltVioEstimatorStage {
                 &packet.tracks.observations,
                 &packet.imu,
                 packet.initialization_imu,
-                None,
-                false,
+                packet.of_images,
+                retain_marg_data,
                 false,
             )
             .map_err(BasaltAdapterError::Estimator)?;

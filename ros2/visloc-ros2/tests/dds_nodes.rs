@@ -603,3 +603,144 @@ fn map_localize_node_takes_the_camera_extrinsics_from_tf_static() {
         map_from_base.translation
     );
 }
+
+/// `mapper:=true`: the node publishes `map -> odom` next to `odom ->
+/// imu_link` and `map_pose`, and on SIGINT runs the final mapper
+/// optimization and writes the corrected trajectory.
+#[cfg(unix)]
+#[test]
+fn vio_node_with_mapper_publishes_map_to_odom_and_writes_the_trajectory() {
+    let domain = domain_id(5);
+    let dir =
+        std::env::temp_dir().join(format!("visloc_ros2_dds_vio_mapper_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A keyframe on every frame, so the static rig feeds the mapper.
+    let config = dir.join("config.json");
+    std::fs::write(&config, keyframe_every_frame_config_json()).unwrap();
+    let trajectory = dir.join("trajectory_map.tum");
+    let mut node = spawn_node(
+        env!("CARGO_BIN_EXE_visloc_vio_node"),
+        &[
+            "--ros-args".into(),
+            "-p".into(),
+            format!("calibration:={}", euroc_calibration_path().display()),
+            "-p".into(),
+            format!("config:={}", config.display()),
+            "-p".into(),
+            format!("domain_id:={domain}"),
+            "-p".into(),
+            "mapper:=true".into(),
+            "-p".into(),
+            format!("mapper_trajectory_out:={}", trajectory.display()),
+        ],
+    );
+
+    let mut test_node = RosNode::new(domain, "/", "vio_mapper_test_driver").unwrap();
+    let left_pub = test_node
+        .publisher::<Image>("left/image_raw", output_qos(5))
+        .unwrap();
+    let right_pub = test_node
+        .publisher::<Image>("right/image_raw", output_qos(5))
+        .unwrap();
+    let imu_pub = test_node.publisher::<Imu>("imu", output_qos(50)).unwrap();
+    let map_pose_sub = test_node
+        .subscription::<PoseStamped>("map_pose", sensor_qos(50))
+        .unwrap();
+    let tf_sub = test_node
+        .subscription::<TfMessage>("/tf", sensor_qos(50))
+        .unwrap();
+    let (map_pose_tx, map_pose_rx) = mpsc::channel();
+    spawn_receiver("map-pose-rx", map_pose_sub, move |msg: PoseStamped| {
+        let _ = map_pose_tx.send(msg);
+    })
+    .unwrap();
+    let (tf_tx, tf_rx) = mpsc::channel();
+    spawn_receiver("tf-rx", tf_sub, move |msg: TfMessage| {
+        let _ = tf_tx.send(msg);
+    })
+    .unwrap();
+
+    let stereo = SyntheticStereo::euroc_sized();
+    let mut map_poses = Vec::new();
+    let mut map_to_odom = Vec::new();
+    let mut imu_ns = START_NS - 20 * IMU_PERIOD_NS;
+    let started = Instant::now();
+    let mut frame = 0i64;
+    // Enough frames for keyframes to be marginalized into mapper packets.
+    while started.elapsed() < Duration::from_secs(90)
+        && (frame < 80 || map_poses.len() < 10 || map_to_odom.is_empty())
+    {
+        node.assert_running();
+        let stamp = START_NS + frame * CAMERA_PERIOD_NS;
+        while imu_ns <= stamp + 2 * IMU_PERIOD_NS {
+            publish_logged(&imu_pub, stationary_imu_msg(imu_ns), "imu");
+            imu_ns += IMU_PERIOD_NS;
+        }
+        publish_logged(&left_pub, stereo.image_msg(false, stamp), "left");
+        publish_logged(&right_pub, stereo.image_msg(true, stamp), "right");
+        frame += 1;
+        std::thread::sleep(Duration::from_millis(50));
+        map_poses.extend(map_pose_rx.try_iter());
+        for tf in tf_rx.try_iter() {
+            assert_eq!(tf.transforms[0].header.frame_id, "odom");
+            assert_eq!(tf.transforms[0].child_frame_id, "imu_link");
+            map_to_odom.extend(
+                tf.transforms
+                    .into_iter()
+                    .filter(|transform| transform.header.frame_id == "map"),
+            );
+        }
+    }
+    assert!(
+        map_poses.len() >= 10 && !map_to_odom.is_empty(),
+        "received {} map_pose / {} map -> odom after {frame} frames",
+        map_poses.len(),
+        map_to_odom.len()
+    );
+    for pose in &map_poses {
+        assert_eq!(pose.header.frame_id, "map");
+        let p = pose.pose.position;
+        assert!((p.x * p.x + p.y * p.y + p.z * p.z).sqrt() < 5.0, "{p:?}");
+    }
+    for transform in &map_to_odom {
+        assert_eq!(transform.child_frame_id, "odom");
+        let t = transform.transform.translation;
+        assert!(t.x.is_finite() && t.y.is_finite() && t.z.is_finite());
+    }
+
+    // Ctrl-C: the node finalizes the mapper, writes the trajectory, exits 0.
+    let status = Command::new("kill")
+        .args(["-INT", &node.0.id().to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let exit = loop {
+        if let Some(exit) = node.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node did not exit after SIGINT within 180 s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(exit.success(), "node exited with {exit}");
+    let tum = std::fs::read_to_string(&trajectory).unwrap();
+    let rows = tum.lines().filter(|line| !line.starts_with('#')).count();
+    assert!(
+        rows >= map_poses.len(),
+        "{rows} trajectory rows for {} map poses",
+        map_poses.len()
+    );
+    for line in tum.lines().skip(1) {
+        let values = line
+            .split_whitespace()
+            .map(|value| value.parse::<f64>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 8, "{line}");
+        assert!(values.iter().all(|value| value.is_finite()), "{line}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

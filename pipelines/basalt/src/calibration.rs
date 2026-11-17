@@ -98,6 +98,25 @@ impl BasaltCalibration {
         Ok(retained)
     }
 
+    /// Returns a one-camera copy holding camera `index` as its camera 0
+    /// (intrinsics, `T_imu_cam` and resolution); every other field is kept.
+    /// `select_camera(0)` equals `retain_cameras(1)`.
+    pub fn select_camera(&self, index: usize) -> Result<Self, CalibrationError> {
+        if index >= self.cameras.len() {
+            return Err(CalibrationError::Invalid {
+                reason: format!(
+                    "cannot select camera {index} of {} calibrated cameras",
+                    self.cameras.len()
+                ),
+            });
+        }
+        let mut selected = self.clone();
+        selected.t_imu_cam = vec![self.t_imu_cam[index].clone()];
+        selected.cameras = vec![self.cameras[index]];
+        selected.resolutions = vec![self.resolutions[index]];
+        Ok(selected)
+    }
+
     /// Converts a camera timestamp interval into the corrected IMU clock.
     ///
     /// Basalt's `cam_time_offset_ns` convention is additive:

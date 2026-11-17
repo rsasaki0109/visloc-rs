@@ -5,7 +5,10 @@ synthetic data, including rendered images through the real KLT frontend.
 On EuRoC it tracks 8 of the 11 sequences and diverges in the first 5 s on
 the other three (see "Results on EuRoC"). With the opt-in
 `config.vio_init_accel_average_s: 0.5` it tracks all 11 (see "A static
-start on EuRoC"). The stereo-inertial path is unchanged.
+start on EuRoC"). The online mapper (loop closure and global BA) runs on
+it too: `basalt_euroc_online_slam_demo --mono` averages 0.062 m on the 11
+EuRoC sequences against 0.139 m for the VIO alone (see "Mapping and loop
+closure"). The stereo-inertial path is unchanged.
 
 ## Summary
 
@@ -30,7 +33,7 @@ metric scale from the IMU.
 | Initialization (`initial_nav_from_imu`) | Same as upstream `initialize()`: roll and pitch come from the first accelerometer sample at or after the first frame. Yaw, position, velocity and biases start at zero. The prior covers position, yaw and biases; velocity is left free. | Already worked. It needs no stereo baseline: the first keyframe hosts no landmarks, and later keyframes triangulate against the IMU-propagated poses, so landmark depth (and therefore scale) is metric. |
 | Keyframe policy (`decide_keyframe`) | Counts cam0 tracks that are connected to a landmark versus all cam0 tracks. | Unchanged. While no landmark exists the ratio is 0, so a keyframe is taken as soon as `frames_after_kf > vio_min_frames_after_kf`. |
 | Marginalization / MargData | Built from the active window's pose/state blocks and per-camera `OfImageData`. | Unchanged. Mono MargData passes `validate_contract`, and mapper packets are emitted on keyframe marginalization (tested). |
-| Mapper / online SLAM (`mapper/`, `basalt_euroc_online_slam_demo`) | The NFR mapper has a stereo matching stage. | **Not wired for mono.** `--mono` exists only on the VIO demo. |
+| Mapper / online SLAM (`mapper/`, `basalt_euroc_online_slam_demo`) | The NFR mapper has a stereo matching stage (left-right match per timestamp) before the temporal keyframe matching. | **Gap (closed 2026-11-17)**: the stereo stage failed on the missing camera 1. It now returns without matching on a one-camera rig, so landmarks come from temporal matches alone, and the online demo has `--mono`. See "Mapping and loop closure". |
 
 Related work elsewhere in the repo, not duplicated here:
 
@@ -245,7 +248,8 @@ above. ATE is over the poses the run has, that is, from 0.5 s on:
   single sample. The option suits recordings that start at rest.
 - **V2_03 now passes its start** (first frame faster than 3 m/s: 4.9 s →
   72.9 s). It still fails late, at 73 s, near where stereo also settles
-  late (74 s). That failure is not a start effect.
+  late (74 s). That failure is not a start effect: cam0 drops frames there
+  (see "The late failure on V2_03").
 - With 1.0 s, MH_03 is 0.085 m. Only MH_03 was run with 1.0 s.
 
 **A parallax gate was tried and not kept.** It required, on top of the
@@ -261,6 +265,168 @@ since its tilt error is there before any landmark. MH_01 worsened to
 | MH_05_difficult | 0.191 m | 0.233 m |
 | V2_02_medium | 0.122 m | 0.152 m |
 | V2_03_difficult | 0.828 m | 0.927 m |
+
+### The late failure on V2_03: cam0 drops frames
+
+With the 0.5 s mean, V2_03 still fails at 73 s (0.828 m, scale +19 %).
+**The cause is cam0's frame rate, not the estimator.** Measured 2026-11-17
+with the same build inputs as the table above (calibration
+`benchmarks/basalt/release_inputs/euroc_ds_calib.json`, config
+`configs/basalt/euroc_config.json` plus the 0.5 s mean, `--mono`); the
+0.828 m run reproduces byte for byte.
+
+- **cam0 has gaps.** V2_03's cam0 manifest has 414 gaps of 100 ms (one
+  frame dropped). Between 55 s and 75 s it runs at 10 Hz most of the time.
+  cam1 has none: 20 Hz throughout. The other ten sequences have no cam0
+  gap at all. The stereo reader keeps only the timestamps both cameras
+  have, so stereo sees the same 10 Hz stretch, but it creates landmarks from
+  the left-right match at every keyframe.
+- **Tracks do not survive the gaps.** The platform turns at about
+  1 rad/s there (mean gyro norm 0.92–0.99 rad/s at 60–80 s). From the VIO
+  trace, at 65–75 s the KLT keeps 5 tracks per frame and creates 121
+  (at 45–55 s it keeps 85 and creates 70). Most tracks are dropped by the
+  forward-backward check. A track that lives one frame never spans two
+  keyframes, so mono VIO triangulates nothing: 0–1 of about 126 cam0
+  tracks are connected to a landmark from 65 s to 80 s. Translation follows
+  the IMU alone, and the error grows by about 0.5 m/s from 72 s.
+- **Images are not the problem.** Mean intensity and gradient energy at
+  65–75 s are in the range of the rest of the sequence.
+
+**The option.** `config.vio_mono_camera: 1` (opt-in, not upstream) makes
+`open_monocular` read cam1 instead: cam1's manifest fills
+`EurocSensorFrame::cam0`, and the calibration keeps camera 1 alone as its
+camera 0 (`BasaltCalibration::select_camera`). Absent or 0 is cam0, and the
+stereo path ignores the key.
+
+| V2_03_difficult, `--mono`, 0.5 s mean | SE(3) ATE | Scale |
+| --- | ---: | ---: |
+| cam0 (table above) | 0.828 m | +19.0 % |
+| cam0, urgent keyframes (0.5, 2) | 0.294 m | +3.9 % |
+| cam0, urgent keyframes + IMU-seeded KLT | 0.264 m | +1.9 % |
+| cam0, urgent keyframes + `optical_flow_levels: 4` | 0.214 m | +1.5 % |
+| **cam1** | **0.104 m** | **−0.2 %** |
+| cam1, urgent keyframes (0.5, 2) | 0.105 m | −0.1 % |
+
+On cam1 the error stays at 0.10–0.11 m from 60 s to the end. As a
+control, V1_01 (no gaps on either camera) gives 0.052 m on cam1 against
+0.047 m on cam0, so cam1 is not simply the better camera. The option is
+for recordings whose chosen camera drops frames; on EuRoC that is V2_03
+alone.
+
+**Not the static start, and not a ZUPT case.** The ground truth moves at
+0.5–1.3 m/s through 66–80 s, so a zero-velocity update has nothing to
+act on. Making cam0's KLT more tolerant (IMU-seeded rotation, a fourth
+pyramid level, a looser forward-backward gate of 0.09) helped only partly
+(0.21–0.29 m, rows above and 0.286 m for the looser gate).
+
+**Urgent keyframes on all 11** (`vio_urgent_kf_keypoints_thresh 0.5`,
+`vio_urgent_min_frames_after_kf 2`, the online demo's default), on top of
+the 0.5 s mean, cam0:
+
+| Sequence | 0.5 s mean | + urgent keyframes | Scale |
+| --- | ---: | ---: | ---: |
+| MH_01_easy | 0.072 m | 0.088 m | -1.2 % |
+| MH_02_easy | 0.092 m | 0.060 m | +0.4 % |
+| MH_03_medium | 0.087 m | 0.077 m | +0.6 % |
+| MH_04_difficult | 0.169 m | 0.164 m | +0.9 % |
+| MH_05_difficult | 0.191 m | 0.182 m | +1.0 % |
+| V1_01_easy | 0.047 m | 0.051 m | -1.4 % |
+| V1_02_medium | 0.057 m | 0.059 m | -1.5 % |
+| V1_03_difficult | 0.086 m | 0.068 m | -1.5 % |
+| V2_01_easy | 0.052 m | 0.051 m | -0.4 % |
+| V2_02_medium | 0.122 m | 0.146 m | +0.2 % |
+| V2_03_difficult | 0.828 m | 0.294 m | +3.9 % |
+| mean | 0.164 m | 0.113 m | |
+
+They help V2_03 because the few multi-frame tracks are triangulated
+sooner, but they are not the fix: on the other ten they move ATE both
+ways, by −3.2 to +2.4 cm. The VIO demo keeps its default.
+
+### Mapping and loop closure (online mapper)
+
+`basalt_euroc_online_slam_demo --mono` runs the online NFR mapper on the
+monocular VIO. The VIO thread, the MargData packets, the BoW loop
+candidates, the periodic background BA and the final full BA are as in
+stereo. Only the mapper's stereo stage changes: with one camera
+(`calibration.cameras.len() < 2`) the per-timestamp left-right match
+(online, `match_stereo_one_timestamp`) and batch `NfrMapper::match_stereo`
+return without matching. Before, they failed on the missing camera 1.
+Every landmark then comes from temporal matches between keyframes (BoW
+candidates, 5-point RANSAC). The relative-pose and roll-pitch factors that
+the mapper recovers from the VIO's marginalization priors carry the VIO's
+metric scale into the global BA. A stereo rig never takes the new branch:
+the stereo VIO trajectory is byte-identical, and the stereo online column
+below matches the published table (V1_01 0.0354 against 0.0355 m, V2_03
+0.0436 against 0.0445 m).
+
+**EuRoC, all 11**, run 2026-11-17 on 4 cores. Calibration and config are
+the online benchmark's (`configs/basalt/variants/official_euroc_ds/`) plus
+`config.vio_init_accel_average_s: 0.5`, with `--optimize-every-k 100
+--periodic-iterations 4` and the demo's default urgent keyframes. "Mono
+VIO" is the same run's VIO trajectory (`trajectory_vio.tum`), and "online"
+is its corrected full-frame trajectory (`trajectory_online.tum`). Both are
+SE(3) ATE. The VIO numbers differ from the tables above, which used the
+VIO demo's settings (another calibration, 7 LM iterations, no urgent
+keyframes). Each sequence ran once. The online mapper is not reproducible
+run to run (live-threaded optimizer timing), so read single-sequence
+differences of a few millimetres as noise. Bold marks a mono result below
+ORB-SLAM3's published mono-inertial value, which comes from the full
+system with multi-map, median of 10 runs.
+
+| Sequence | Mono VIO | Mono online SLAM | Scale | Stereo online SLAM | ORB-SLAM3 mono-inertial |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MH_01_easy | 0.112 m | **0.031 m** | +0.6 % | 0.0150 m | 0.062 m |
+| MH_02_easy | 0.085 m | 0.082 m | +1.7 % | 0.0253 m | 0.037 m |
+| MH_03_medium | 0.092 m | **0.044 m** | +1.0 % | 0.0250 m | 0.046 m |
+| MH_04_difficult | 0.246 m | 0.147 m | +1.4 % | 0.0704 m | 0.075 m |
+| MH_05_difficult | 0.270 m | 0.130 m | +1.8 % | 0.0632 m | 0.057 m |
+| V1_01_easy | 0.088 m | **0.040 m** | -0.7 % | 0.0354 m | 0.049 m |
+| V1_02_medium | 0.058 m | 0.025 m | -1.2 % | 0.0132 m | 0.015 m |
+| V1_03_difficult | 0.072 m | 0.041 m | -1.3 % | 0.0200 m | 0.037 m |
+| V2_01_easy | 0.056 m | **0.027 m** | +0.9 % | 0.0168 m | 0.042 m |
+| V2_02_medium | 0.118 m | **0.014 m** | -0.0 % | 0.0117 m | 0.021 m |
+| V2_03_difficult | 0.331 m | 0.100 m | +1.2 % | 0.0436 m | 0.027 m |
+| V2_03_difficult, `vio_mono_camera: 1` | 0.113 m | 0.045 m | +0.2 % | | |
+| mean (cam0) | 0.139 m | 0.062 m | | 0.0309 m | 0.043 m |
+
+- **The mapper more than halves the mono error.** The mean is 0.139 → 0.062 m
+  and the median 0.092 → 0.041 m. Every sequence improves, MH_02 least
+  (0.085 → 0.082 m).
+- **Against ORB-SLAM3 mono-inertial** (mean 0.043 m), mono online SLAM is
+  lower on 5 of 11: MH_01, MH_03, V1_01, V2_01 and V2_02. On the other six
+  it is higher:
+  - by 0.004 m on V1_03;
+  - by 1.7–2.3× on V1_02, MH_02, MH_04 and MH_05;
+  - by 3.7× on V2_03 with cam0.
+  With cam1 on V2_03 (next section) the mean is 0.057 m.
+- **Scale stays metric.** Scale errors are −1.3 % to +1.8 %.
+- **Stereo online SLAM is still about 2× better** (mean 0.031 m).
+- **Upstream init** (without the 0.5 s mean): the online runs are within
+  2.1 cm of these, except V2_01, which still diverges at the start. The
+  mapper cannot repair a diverged VIO.
+- **Speed.** Mono is lighter than stereo. Every mono run finished faster than
+  its recording except MH_01 (real-time factor 0.77 on this 4-core machine,
+  0.56 for stereo). The RTFs, from 0.77 to 2.53, were measured while
+  other jobs shared the machine.
+
+**TUM-VI room1** (TUM-VI calibration and config from `configs/basalt/tumvi`,
+same flags):
+
+| room1 | VIO | Online SLAM | Scale |
+| --- | ---: | ---: | ---: |
+| mono | 0.096 m | 0.014 m | −0.9 % |
+| stereo | 0.096 m | 0.011 m | −0.7 % |
+
+How to run:
+
+```bash
+cargo run --profile release-rt --example basalt_euroc_online_slam_demo -- \
+  --euroc-dir /data/V1_01_easy \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config my_config_with_vio_init_accel_average_s.json \
+  --out-dir target/v101_mono_online --mono \
+  --optimize-every-k 100 --periodic-iterations 4
+```
 
 ## Verification
 
@@ -333,8 +499,10 @@ platforms do not make them flaky.
 3. **Constant-velocity segments.** These keep metric scale only through the
    IMU's bias and gravity terms, the textbook mono-VIO observability limit.
    The synthetic tests always contain acceleration.
-4. **Mapping / loop closure.** The online SLAM demo and the NFR mapper stay
-   stereo-only.
+4. **Mapping / loop closure.** Done for the online SLAM demo and the NFR
+   mapper (see "Mapping and loop closure"). Not done: the ROS 2 node's
+   mapper is stereo-only, and `--save-map` / localization against a mono
+   map has not been tried.
 5. **Triangulation gate.** The 5 cm gate is still the hard-coded upstream
    constant (`vio_min_triangulation_dist` in the EuRoC config has the same
    value). Mono-specific tuning, such as a parallax-angle gate, has not been

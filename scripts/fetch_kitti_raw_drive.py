@@ -46,6 +46,8 @@ def fetch_members(url: str, keep, out: Path, timeout: int) -> int:
     wanted = []
     for entry in entries:
         name = str(entry["name"])
+        if name.startswith("/") or ".." in name.split("/"):
+            raise ValueError(f"refusing zip member outside the output directory: {name!r}")
         if name.endswith("/") or not keep(name.strip("/").split("/")):
             continue
         if not (out / name).exists():
@@ -62,6 +64,9 @@ def fetch_zip(url: str, out: Path, timeout: int) -> int:
         archive = zipfile.ZipFile(io.BytesIO(response.read()))
     names = [n for n in archive.namelist() if not n.endswith("/") and not (out / n).exists()]
     for name in names:
+        if name.startswith("/") or ".." in name.split("/"):
+            raise ValueError(f"refusing zip member outside the output directory: {name!r}")
+    for name in names:
         path = out / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(archive.read(name))
@@ -73,16 +78,24 @@ def main() -> int:
     parser.add_argument("--drive", required=True, help="for example 2011_09_26_drive_0091")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument(
+        "--skip-tracklets", action="store_true", help="do not fetch the tracklets zip (most drives have none)"
+    )
+    parser.add_argument(
+        "--skip-extract-oxts", action="store_true", help="do not fetch the 100 Hz OXTS from the _extract zip"
+    )
     args = parser.parse_args()
     date = args.drive[:10]
     url = f"{BASE_URL}/{args.drive}/{args.drive}"
 
     n = fetch_zip(f"{BASE_URL}/{date}_calib.zip", args.out, args.timeout)
     print(f"calibration: {n} files", file=sys.stderr)
-    n = fetch_zip(f"{url}_tracklets.zip", args.out, args.timeout)
-    print(f"tracklets: {n} files", file=sys.stderr)
-    n = fetch_members(f"{url}_extract.zip", lambda p: len(p) > 2 and p[2] == "oxts", args.out, args.timeout)
-    print(f"extract oxts (100 Hz): {n} files", file=sys.stderr)
+    if not args.skip_tracklets:
+        n = fetch_zip(f"{url}_tracklets.zip", args.out, args.timeout)
+        print(f"tracklets: {n} files", file=sys.stderr)
+    if not args.skip_extract_oxts:
+        n = fetch_members(f"{url}_extract.zip", lambda p: len(p) > 2 and p[2] == "oxts", args.out, args.timeout)
+        print(f"extract oxts (100 Hz): {n} files", file=sys.stderr)
     n = fetch_members(
         f"{url}_sync.zip", lambda p: len(p) > 2 and p[2] in ("image_00", "image_01", "oxts"), args.out, args.timeout
     )
