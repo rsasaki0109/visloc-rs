@@ -2930,6 +2930,51 @@ keypoint detected there. The flow adds 1.30 M links and 0.90 M keypoints
 scale error in its sub-windows. More observations of the same kind do not
 fix the scale; the flow stays off.
 
+### The gyroscope and the temperature
+
+SLAM Dunk's thermal model lets the gyroscope's bias and scale follow the
+temperature. Here T is the SLAM cameras' mean temperature from the
+recording's own VRS (the curve of [SLAM Dunk's gyroscope
+matrix](#slam-dunks-gyroscope-matrix-and-time-varying-calibration),
+interpolated at every IMU sample, less its median over the recording). The
+solve reads each measured rate ω as ω + T (g_s ⊙ ω − g_b), with g_b the
+bias change per degree and g_s the scale change per degree, three axes each.
+`solve --imu-temp CSV --est-gyro-bias-temp` estimates g_b (prior 5e-5 rad/s
+per °C), and `--est-gyro-scale-temp` adds g_s (prior 3e-5 per °C), in the
+border like the response matrix. The bias random walk still runs on top.
+
+The seeds of [How far the chain moves for
+nothing](#how-far-the-chain-moves-for-nothing) apply: the IMU with a tenth of
+its noise density added, and the run's SIFT keyframes linked. Each seed ran
+the chain from the start, and both variants reran the pass, revisits,
+rematch and final solve from that run's online result, so each pair differs
+in the temperature terms only:
+
+| Sequence | Camera temperature | Control, seeds 1 / 2 / 3 | Mean | Bias per degree | Mean | Bias and scale per degree | Mean |
+|---|---|---|---:|---|---:|---|---:|
+| sequence_1_19 | 6 → 23 °C (outdoors) | 82.79 / 82.95 / 82.73 | 82.82 | 84.18 / 84.21 / 83.32 | 83.90 | 86.85 / 86.21 / 85.95 | **86.33** |
+| sequence_2_11 | 23 → 41 °C | 88.18 / 88.03 / 88.49 | 88.23 | 88.99 / 89.76 / 88.58 | 89.11 | 89.91 / 88.66 / 89.32 | **89.30** |
+| sequence_3_17 | 28 → 40 °C in 100 s, then flat | 79.91 / 79.80 / 80.15 | 79.95 | 79.55 / 79.40 / 80.17 | 79.70 | 79.60 / 79.75 / 80.37 | 79.91 |
+| Mean | | | 83.67 | | 84.24 | | **85.18** |
+
+With the scale too, seven of the nine pairs gain: sequence_1_19 by +3.2 to
++4.1, sequence_2_11 by +0.6 to +1.7. sequence_3_17's temperature is flat
+after its first 100 s, and its pairs stay within its seed spread (−0.31,
+−0.04, +0.22). The mean rises by 1.51. The coefficients differ between the
+recordings (bias per degree, single runs: sequence_3_17
+[−51, −157, −48], sequence_2_11 [74, −272, −52], sequence_1_19 [69, 4, −88]
+µrad/s per °C; scale up to −644 ppm per °C on sequence_1_19). They are a
+property of the device and the recording, so each solve estimates its own.
+
+By day, on Short, Medium and Long, the chain now estimates both
+(`lamaria_ba_chain.py --temperature CSV`, which the pass's three solves
+read; not the online windows). The submission driver fetches the curve per
+sequence (`--ba-temperature`, on by default on `--ba-temperature-tracks`
+1 2 3). It takes every 200th record of the two SLAM cameras' streams from
+the `.vrs` over HTTP range requests, a sparse copy, then reads them with
+projectaria_tools. A sequence without it runs the pass as before. Low light
+and Moving platform stay without it: neither was measured.
+
 ### The IMU's clock
 
 SLAM Dunk refines a time offset per IMU channel. Before adding one to the

@@ -115,6 +115,12 @@ By day the chain then matches once more after its pass, guided by the pass's
 trajectory, and solves again (lamaria_ba_chain.py --rematch; `--no-ba-rematch`
 skips it): +0.26 on the eight day training sequences, +3.21 on R_12_10cp,
 whose VIO heading drifts most.
+By day on Short, Medium and Long the pass also estimates the gyroscope's bias
+and scale change per degree of the SLAM cameras' temperature, which it reads
+from every 200th camera record of the `.vrs` (a sparse copy over HTTP range
+requests; needs projectaria_tools; `--no-ba-temperature` skips it):
+83.67 -> 85.18 on sequence_1_19, 2_11 and 3_17 over three IMU seeds
+(docs/lamaria_batch_ba.md#the-gyroscope-and-the-temperature).
 `--ba-pass-features aliked` gives that pass learned keypoints (LightGlue's, on
 the GPU; lamaria_ba_chain.py --pass-features) on `--ba-pass-features-tracks`
 (default Short) from the devices in `--ba-pass-features-serials` (default
@@ -160,6 +166,10 @@ DEFAULT_PLATFORM_TRACKS = (5,)  # Moving platform: docs/lamaria_submission.md
 # Where --ba-pass-features applies by default: the Short training sequences of this device gain with it
 DEFAULT_PASS_FEATURES_TRACKS = (1,)
 DEFAULT_PASS_FEATURES_SERIALS = ("1WM093701G1276",)
+# Where the BA's pass estimates the gyroscope's change with the temperature (--ba-temperature): the day tracks it was
+# measured on (docs/lamaria_batch_ba.md#the-gyroscope-and-the-temperature)
+DEFAULT_TEMPERATURE_TRACKS = (1, 2, 3)
+TEMPERATURE_EVERY = 200  # every 200th SLAM camera record: 10 s at 20 Hz
 DEFAULT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json")
 DEFAULT_LOW_LIGHT_CONFIG = Path(
     "configs/basalt/variants/lamaria/euroc_config_big_window_multicam_lowlight.json")
@@ -241,6 +251,23 @@ def rectify_imu(seq: str, inner: Path, work: Path, calib_dir: Path,
         + (f", delays gyro {delays['gyro_delay_ns']} ns accel {delays['accel_delay_ns']} ns"
            if refinement else "") + ")")
     return refinement
+
+
+def temperature_csv(seq: str, work: Path, scripts: Path, python: str, split: str = "test") -> Path:
+    """The SLAM cameras' temperature over the recording (timestamp_ns,cam0_c,cam1_c), from a sparse copy of
+    every TEMPERATURE_EVERY-th camera record of its .vrs (scripts/lamaria_vrs_fetch.py, lamaria_temperature.py)."""
+    out = work / f"{seq}_temperature.csv"
+    if out.is_file():
+        return out
+    vrs = work / "temperature" / f"{seq}.vrs"
+    vrs.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run([python, scripts / "lamaria_vrs_fetch.py", f"{BASE_URL}/raw_data/{split}/{seq}.vrs", vrs,
+             "--sample-streams", "1201-1,1201-2", "--every", TEMPERATURE_EVERY])
+        run([python, scripts / "lamaria_temperature.py", vrs, out, "--every", TEMPERATURE_EVERY])
+    finally:
+        shutil.rmtree(vrs.parent, ignore_errors=True)
+    return out
 
 
 def sequence_track(seq: str) -> int:
@@ -530,6 +557,12 @@ def main() -> int:
     parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
                         help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
+    parser.add_argument("--ba-temperature", action=argparse.BooleanOptionalAction, default=True,
+                        help="--ba-chain: on --ba-temperature-tracks by day, fetch the SLAM cameras' temperature "
+                             "from the .vrs and let the pass estimate the gyroscope's bias and scale change per "
+                             "degree (lamaria_ba_chain.py --temperature; default on)")
+    parser.add_argument("--ba-temperature-tracks", type=int, nargs="*", default=list(DEFAULT_TEMPERATURE_TRACKS),
+                        choices=sorted(TRACK_COUNTS), help="--ba-temperature: the tracks it applies to (default 1 2 3)")
     parser.add_argument("--ba-jobs", type=int, default=4, help="--ba-chain: processes for features, match, loops")
     parser.add_argument("--ba-threads", type=int, default=2, help="--ba-chain: threads for its solves")
     parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
@@ -683,13 +716,20 @@ def main() -> int:
                                                  work, submit_vio)
             if args.ba_chain:
                 learned = pass_features(args, track, device_serial(calib_dir, seq))
-                log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass)" if learned else ")"))
+                temperature = None
+                if args.ba_temperature and track in args.ba_temperature_tracks and not low_light:
+                    try:
+                        temperature = temperature_csv(seq, work, args.repo / "scripts", python, args.split)
+                    except Exception as error:  # the pass runs without it
+                        log(f"{seq}: WARN no camera temperature ({error!r})")
+                log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass" if learned else "")
+                    + (", the temperature" if temperature else "") + ")")
                 try:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
                                            low_light=low_light, rematch=args.ba_rematch, pass_features=learned,
-                                           pass_match=args.ba_pass_match)
+                                           pass_match=args.ba_pass_match, temperature=temperature)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = work / "ba" / "ba2.tum"

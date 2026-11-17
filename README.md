@@ -334,7 +334,10 @@ lowers it there. (The chain has since run the pass in low light too, with 30
 iterations: 63.87 → 68.77 on the two low-light sequences over three seeds,
 [Low light: the pass after all](docs/lamaria_batch_ba.md#low-light-the-pass-after-all);
 with the gyroscope's response matrix in that pass, 71.19,
-[Low light: the gyroscope's response matrix](docs/lamaria_batch_ba.md#low-light-the-gyroscopes-response-matrix).) Above GroundedSLAM on the mean: ahead on Short, Medium and
+[Low light: the gyroscope's response matrix](docs/lamaria_batch_ba.md#low-light-the-gyroscopes-response-matrix).
+By day the pass now also follows the gyroscope's change with the temperature:
+83.67 → 85.18 on three day sequences over three seeds,
+[The gyroscope and the temperature](docs/lamaria_batch_ba.md#the-gyroscope-and-the-temperature).) Above GroundedSLAM on the mean: ahead on Short, Medium and
 Long, level on Low light, behind on Moving (sequence_5_12's tram ride, which
 the solve halves: 7.4). Per sequence:
 [the real-time chain](docs/lamaria_batch_ba.md#the-first-minutes-online);

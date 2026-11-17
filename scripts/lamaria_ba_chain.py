@@ -24,6 +24,10 @@ training R_12_10cp, whose VIO heading drifts 0.78 deg/min, goes from 61.09 to 64
 VIO's matches: 60.48), the eight day training sequences from 64.50 to 64.76 on average
 (docs/lamaria_batch_ba.md#matching-again-after-the-pass).
 
+--temperature (the SLAM cameras' temperature, lamaria_temperature.py) lets the pass by day estimate the
+gyroscope's bias and scale change per degree, SLAM Dunk's thermal model: sequence_1_19, 2_11 and 3_17 over three
+IMU seeds from 83.67 to 85.18 (docs/lamaria_batch_ba.md#the-gyroscope-and-the-temperature).
+
 --features and --pass-features (the pass only, by day) try LightGlue's learned keypoints on the GPU; neither beats
 SIFT across the training sequences (docs/lamaria_batch_ba.md#learned-features).
 
@@ -77,7 +81,7 @@ def pass_work(work, pass_features=None):
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
           num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False,
-          final=False):
+          final=False, temperature=None):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -90,7 +94,9 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     30 iterations per solve and the gyroscope's response matrix; `low_light_pass=False` stops there at the online windows instead. `match_args` are
     extra options of the match steps (the first matching and the rematch); `flow` links consecutive keyframes
     by Lucas-Kanade flow through the frames between them (the flow step, after match) for every solve; `final`
-    solves once more after the last solve with its calibration held (SLAM Dunk's final refinement, ba4.tum)."""
+    solves once more after the last solve with its calibration held (SLAM Dunk's final refinement, ba4.tum);
+    `temperature`, the SLAM cameras' temperature over the recording (lamaria_temperature.py), lets the pass by day
+    estimate the gyroscope's bias and scale change per degree (SLAM Dunk's thermal model)."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
@@ -113,7 +119,9 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
             out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
         iters = ["--iterations", "30", "--rel-tol", "1e-5", "--est-gyro-m"] if low else ["--iterations", "60"]
-        pas = [*solve, *iters, "--gyro-rw-scale", "10", *WARMUP, *pass_args]
+        thermal = ["--imu-temp", temperature, "--est-gyro-bias-temp", "--est-gyro-scale-temp"] \
+            if temperature and not low else []
+        pas = [*solve, *iters, "--gyro-rw-scale", "10", *WARMUP, *thermal, *pass_args]
         out += [
             ("pass solve", ["solve", "--work", pw, "--vio", work / "online.tum", "--out", work / "ba1.tum",
                             "--save-states", *pas], work / "ba1.done", True),
@@ -154,7 +162,8 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=True, fina
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False, final=False):
+              pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False, final=False,
+              temperature=None):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -164,7 +173,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
                                            num_features, pass_features, pass_match, pass_args, low_light_pass,
-                                           match_args, flow, final):
+                                           match_args, flow, final, temperature):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -218,13 +227,16 @@ def main():
                    "the frames between them, for every solve")
     p.add_argument("--final-refinement", action="store_true",
                    help="after the last solve, solve once more with its calibration held (ba4.tum)")
+    p.add_argument("--temperature", default=None,
+                   help="the SLAM cameras' temperature (lamaria_temperature.py CSV): by day the pass estimates the "
+                        "gyroscope's bias and scale change per degree")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
               pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online,
-              match_args=a.match_args.split(), flow=a.flow, final=a.final_refinement)
+              match_args=a.match_args.split(), flow=a.flow, final=a.final_refinement, temperature=a.temperature)
 
 
 if __name__ == "__main__":

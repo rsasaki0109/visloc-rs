@@ -192,6 +192,21 @@ class StepsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4, low_light_pass=False, final=True)
 
+    def test_the_temperature_reaches_the_passs_solves_by_day(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4,
+                                                rematch=True, temperature="t.csv")}
+        for name in ("pass solve", "pass solve with the revisits", "solve with the new matches"):
+            self.assertEqual(value(p[name], "--imu-temp"), "t.csv")
+            self.assertIn("--est-gyro-bias-temp", p[name])
+            self.assertIn("--est-gyro-scale-temp", p[name])
+        self.assertNotIn("--imu-temp", p["online"])
+        self.assertNotIn("--imu-temp", plan(2)["pass solve"])
+        low = {name: [str(c) for c in cmd]
+               for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                  temperature="t.csv")}
+        self.assertNotIn("--imu-temp", low["pass solve"])
+
 
 FAKE_BA = textwrap.dedent('''
     import sys
