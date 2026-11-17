@@ -2930,6 +2930,23 @@ keypoint detected there. The flow adds 1.30 M links and 0.90 M keypoints
 scale error in its sub-windows. More observations of the same kind do not
 fix the scale; the flow stays off.
 
+### The IMU's clock
+
+SLAM Dunk refines a time offset per IMU channel. Before adding one to the
+solve, a sweep checked whether there is one to find: the accelerometer
+readings shifted by ±2 and ±4 ms against the camera timestamps (each value
+read at t + shift, linear interpolation), and the solve rerun on keyframes
+300–600 of the baseline (`--kf-range 300:600`) with each:
+
+| Accelerometer shift | −4 ms | −2 ms | 0 | +2 ms | +4 ms | Parabola's minimum |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_3_17, final cost | 20,231 | 20,045 | **20,023** | 20,142 | 20,397 | −0.6 ms |
+| sequence_4_10, final cost | 3,005 | 2,970 | 2,971 | 2,981 | 3,009 | −0.2 ms |
+
+Both minima are within a millisecond of zero, about one IMU sample, and the
+cost changes by 0.1–0.3 % over ±2 ms. The recording's own time alignment
+holds; the solve gets no time offset.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
