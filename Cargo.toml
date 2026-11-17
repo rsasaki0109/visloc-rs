@@ -70,6 +70,14 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+# Debug builds and tests optimize the dependencies (nalgebra, faer, image,
+# ...) but not the workspace crates, which keep full debug info and
+# overflow checks. On 4 cores this halves the `visloc-slam` unit tests
+# (293 s -> 154 s) and cuts `mono_inertial_synthetic` from 79 s to 55 s,
+# with no slower cold build. `ros2/visloc-ros2` does the same.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.package]
 version = "0.3.1"
 edition = "2021"

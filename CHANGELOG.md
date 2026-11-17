@@ -1387,6 +1387,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **Debug builds and tests optimize the dependencies**
+  (`[profile.dev.package."*"] opt-level = 2`). The workspace crates are
+  still unoptimized, with full debug info. On 4 cores the `visloc-slam`
+  unit tests take 154 s instead of 293 s, and `mono_inertial_synthetic`
+  55 s instead of 79 s. These two are most of CI's `rust` job.
+
 - **CUDA trainer: raster_bwd stages splats per warp.**
   - **How.** Each warp of a tile reads 32 list entries and keeps, by a
     ballot, those whose sub-tile mask reaches its pixels, in shared-memory
