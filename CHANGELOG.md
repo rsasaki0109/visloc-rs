@@ -153,6 +153,32 @@ All notable changes to `visloc-rs` will be documented here.
   picks another ref. A new `image` input chooses whether the image is
   rebuilt.
 
+### Fixed
+
+- **The default SIFT was not rotation invariant** (CPU `extract_sift` and
+  the GPU shaders, which mirrored it). A 180° turn of an image left 3
+  ratio-test matches, all wrong.
+  - **Orientation.** The isotropic orientation histogram read the gradient
+    at the keypoint's row for every window row, so orientations stayed near
+    0 / π whatever the image rotation.
+  - **Descriptor.** The default and scale-adaptive descriptors binned
+    samples by their image-frame offset instead of the keypoint-frame one,
+    so the 4×4 grid never turned with the keypoint.
+  - **Test.** The new `sift_descriptors_are_rotation_invariant` turns a
+    texture by 90° and 180°: 4 / 3 consistent matches before, 163 / 149
+    after.
+  - **Effect on the gravel-mine drone block**, whose strips alternate
+    heading by ~165°: exhaustive SfM registers 142 of 158 images (was 54)
+    and verifies 1,280 pairs (was 448).
+  - **Effect on ETH3D courtyard** (upright photos): 262 verified pairs and
+    32k inlier correspondences (were 233 and 21k).
+  - **The default SIFT output changes**, so results measured with the
+    built-in extractor shift. That includes
+    `--sift-vlfeat-compatible-descriptor`: its descriptor was already
+    rotation invariant, but it takes the default detector's orientations.
+    `--sift-vlfeat-compatible-detector` has its own orientation code and
+    is unchanged.
+
 ## 0.4.0 - 2026-11-17
 
 ### Highlights
