@@ -4906,7 +4906,11 @@ fn gps_position_priors_put_the_reconstruction_in_the_metric_prior_frame() {
     let (features, pairwise) = render(&scene);
     let without = incremental_sfm(&scene.camera, &features, &pairwise, &gps_test_config(None))
         .expect("scene reconstructs without priors");
-    let priors = SfmPositionPriors::new(gps_test_priors(&scene, 0.5));
+    // Least squares: its optimum is the best similarity checked below.
+    let priors = SfmPositionPriors {
+        robust_loss_scale: None,
+        ..SfmPositionPriors::new(gps_test_priors(&scene, 0.5))
+    };
     let with = incremental_sfm(
         &scene.camera,
         &features,
@@ -4980,13 +4984,15 @@ fn gps_prior_jumps_are_absorbed_by_the_cauchy_loss_or_rejection() {
     };
     // Plain least squares (COLMAP's default): the 80 m jump on one camera of
     // a tiny six-camera model drags it.
-    let plain = run(SfmPositionPriors::new(priors.clone()));
-    let cauchy = run(SfmPositionPriors {
-        robust_loss_scale: Some(DEFAULT_PRIOR_LOSS_SCALE),
+    let plain = run(SfmPositionPriors {
+        robust_loss_scale: None,
         ..SfmPositionPriors::new(priors.clone())
     });
+    // The default carries the Cauchy loss.
+    let cauchy = run(SfmPositionPriors::new(priors.clone()));
     let rejecting = run(SfmPositionPriors {
         reject_outliers: true,
+        robust_loss_scale: None,
         ..SfmPositionPriors::new(priors)
     });
     assert!(

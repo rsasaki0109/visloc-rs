@@ -1586,11 +1586,12 @@ fn geometry_conflict_recovery_flag_is_default_off_and_parseable() {
     assert!(!defaults.refine_uncalibrated_f_to_essential);
     assert!(!defaults.strict_uncalibrated_f_to_essential);
     assert!(!defaults.calibrated_essential_primary);
-    assert_eq!(defaults.sift_descriptor_magnification, 8.0);
+    // COLMAP/VLFeat-compatible SIFT by default (see the snapshot test).
+    assert_eq!(defaults.sift_descriptor_magnification, 3.0);
     assert!(!defaults.sift_scale_adaptive_gradients);
-    assert!(!defaults.sift_vlfeat_compatible_descriptor);
-    assert!(!defaults.sift_vlfeat_compatible_detector);
-    assert!(!defaults.sift_vlfeat_bilinear_orientations);
+    assert!(defaults.sift_vlfeat_compatible_descriptor);
+    assert!(defaults.sift_vlfeat_compatible_detector);
+    assert!(defaults.sift_vlfeat_bilinear_orientations);
     assert!(!defaults.sift_vlfeat_compatible_output_order);
     assert!(!defaults.sift_colmap_compatible_grayscale);
     assert!(!defaults.sift_split_colmap_detector_grayscale);
@@ -2067,7 +2068,13 @@ fn geometry_conflict_recovery_flag_is_default_off_and_parseable() {
     .unwrap();
     assert!(dsp.sift_dsp);
     assert_eq!(dsp.sift_dsp_num_scales, 15);
-    assert!(parse_args_from(minimal_args(&["--sift-dsp"])).is_err());
+    // The default preset includes the compatible descriptor DSP needs.
+    assert!(
+        parse_args_from(minimal_args(&["--sift-dsp"]))
+            .unwrap()
+            .sift_dsp
+    );
+    assert!(parse_args_from(minimal_args(&["--sift-dsp", "--sift-legacy"])).is_err());
     assert!(parse_args_from(minimal_args(&[
         "--sift-dsp",
         "--sift-vlfeat-compatible-descriptor",
@@ -2084,7 +2091,16 @@ fn geometry_conflict_recovery_flag_is_default_off_and_parseable() {
     ]))
     .unwrap();
     assert!(split.sift_split_colmap_detector_grayscale);
-    assert!(parse_args_from(minimal_args(&["--sift-split-colmap-detector-grayscale",])).is_err());
+    assert!(
+        parse_args_from(minimal_args(&["--sift-split-colmap-detector-grayscale"]))
+            .unwrap()
+            .sift_split_colmap_detector_grayscale
+    );
+    assert!(parse_args_from(minimal_args(&[
+        "--sift-split-colmap-detector-grayscale",
+        "--sift-legacy",
+    ]))
+    .is_err());
     assert!(parse_args_from(minimal_args(&[
         "--sift-vlfeat-compatible-detector",
         "--sift-vlfeat-compatible-descriptor",
@@ -2154,7 +2170,16 @@ fn geometry_conflict_recovery_flag_is_default_off_and_parseable() {
     ]))
     .is_err());
     assert!(parse_args_from(minimal_args(&["--sift-vlfeat-bilinear-orientations"])).is_err());
-    assert!(parse_args_from(minimal_args(&["--sift-vlfeat-compatible-output-order"])).is_err());
+    assert!(
+        parse_args_from(minimal_args(&["--sift-vlfeat-compatible-output-order"]))
+            .unwrap()
+            .sift_vlfeat_compatible_output_order
+    );
+    assert!(parse_args_from(minimal_args(&[
+        "--sift-vlfeat-compatible-output-order",
+        "--sift-legacy",
+    ]))
+    .is_err());
     assert!(parse_args_from(minimal_args(&["--colmap-guided-matching"])).is_err());
 }
 
@@ -2738,15 +2763,36 @@ fn effective_config_snapshot_is_stable_and_experimental_defaults_are_off() {
     assert!(!first.sift_affine);
     assert!(!first.sift_multi_anisotropy);
     assert!(!first.sift_dsp);
-    assert!(!first.sift_l1_root);
+    // The default SIFT is the COLMAP/VLFeat-compatible preset.
+    assert!(first.sift_l1_root);
     assert!(!first.sift_standard_orientations);
-    assert!(!first.sift_prefer_larger_scale);
+    assert!(first.sift_prefer_larger_scale);
+    assert_eq!(first.sift_max_orientations, 2);
+    assert_eq!(first.sift_descriptor_magnification, 3.0);
     assert!(!first.sift_full_pyramid);
     assert!(!first.sift_scale_adaptive_gradients);
-    assert!(!first.sift_vlfeat_compatible_descriptor);
-    assert!(!first.sift_vlfeat_compatible_detector);
-    assert!(!first.sift_vlfeat_bilinear_orientations);
+    assert!(first.sift_vlfeat_compatible_descriptor);
+    assert!(first.sift_vlfeat_compatible_detector);
+    assert!(first.sift_vlfeat_bilinear_orientations);
     assert!(!first.sift_vlfeat_compatible_output_order);
+    // `--sift-legacy`, or a flag only the legacy extractor supports, keeps the
+    // historical settings.
+    for legacy_flags in [&["--sift-legacy"][..], &["--sift-affine"][..]] {
+        let legacy = parse_args_from(minimal_args(legacy_flags)).unwrap();
+        assert!(!legacy.sift_l1_root);
+        assert!(!legacy.sift_prefer_larger_scale);
+        assert_eq!(legacy.sift_max_orientations, 0);
+        assert_eq!(legacy.sift_descriptor_magnification, 8.0);
+        assert!(!legacy.sift_vlfeat_compatible_descriptor);
+        assert!(!legacy.sift_vlfeat_compatible_detector);
+        assert!(!legacy.sift_vlfeat_bilinear_orientations);
+    }
+    // An explicit compatible flag selects only what it names.
+    let detector_only =
+        parse_args_from(minimal_args(&["--sift-vlfeat-compatible-detector"])).unwrap();
+    assert!(detector_only.sift_vlfeat_compatible_detector);
+    assert!(!detector_only.sift_vlfeat_compatible_descriptor);
+    assert!(!detector_only.sift_l1_root);
     assert!(!first.sift_colmap_compatible_grayscale);
     assert!(!first.sift_split_colmap_detector_grayscale);
     assert!(first.sift_append_descriptor_magnification.is_none());

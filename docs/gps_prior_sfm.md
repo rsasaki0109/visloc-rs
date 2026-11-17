@@ -24,19 +24,25 @@ one, every global and periodic bundle adjustment:
 
 Every prior enters the BA, including the alignment's outliers, as in COLMAP.
 When the model disagrees with a fix, the model is often what is wrong (drift,
-a bad registration), and that prior is what pulls it back. Two opt-ins handle
-bad fixes:
+a bad registration), and that prior is what pulls it back.
 
-- a Cauchy loss on the normalised residual, COLMAP's
-  `use_robust_loss_on_prior_position` (scale `sqrt(χ²₀.₉₅(3)) ≈ 2.8` by
-  default). It is applied by reweighting each BA's prior at its current
-  residual, so it works as IRLS across the mapper's BA calls;
-- dropping the alignment's outliers from the BA.
+Bad fixes (a GPS jump) are handled by a Cauchy loss on the normalised
+residual: COLMAP's `use_robust_loss_on_prior_position`, scale
+`sqrt(χ²₀.₉₅(3)) ≈ 2.8`.
+- It is applied by reweighting each BA's prior at its current residual, so
+  it works as IRLS across the mapper's BA calls.
+- **It is on by default, unlike COLMAP.** With COLMAP-compatible features:
+  - on real onboard GNSS (the gravel-mine set below) it equals least
+    squares;
+  - on simulated GPS with 30 m jumps (ETH3D courtyard) it keeps the model
+    at 0.30 m where least squares leaves 1.21 m.
+- `--gps-prior-least-squares` (`--use_robust_loss_on_prior_position 0` in
+  the shim) turns it off.
+- With the legacy SIFT, whose models are much weaker, least squares was the
+  better choice: a weak model needs the full pull of every fix.
 
-With real onboard GNSS (the gravel-mine set below) both opt-ins are worse
-than plain least squares, so neither is the default. On simulated GPS with
-30 m jumps (ETH3D courtyard) they trade a worse median for fewer cameras
-far off.
+Dropping the alignment's outliers from the BA instead is a further opt-in.
+It was never the best in these measurements.
 
 Fewer than three registered prior images leave every solve unchanged, so
 the model is byte-identical to a run without priors. When the inlier priors
@@ -85,7 +91,8 @@ cargo run --release --features image-io --example unordered_sfm_demo -- \
 | `--gps-priors-from-exif` | priors from the images' EXIF GPS |
 | `--gps-prior-std M`, `--gps-prior-std-vertical M` | σ where a fix states none (default 1 m each, as COLMAP; see "Choosing σ") |
 | `--gps-prior-max-error M` | inlier threshold of the alignment (default 3 σ) |
-| `--gps-prior-robust-loss`, `--gps-prior-loss-scale C` | Cauchy loss on the priors |
+| `--gps-prior-loss-scale C` | scale of the Cauchy loss on the priors (default 2.8) |
+| `--gps-prior-least-squares` | plain least squares instead of the Cauchy loss |
 | `--gps-prior-reject-outliers` | drop the alignment's outliers from the BA |
 
 `colmap` CLI shim, mirroring COLMAP's command surface:

@@ -539,7 +539,8 @@ where
     let mut spatial_max_neighbors = 50usize;
     let mut spatial_max_distance = 100.0f64;
     let mut spatial_use_z = false;
-    let mut gps_prior_loss_scale: Option<f64> = None;
+    let mut gps_prior_loss_scale: Option<f64> =
+        Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE);
     let mut diagnose_colmap_track_membership: Option<PathBuf> = None;
     let mut pose_guided_track_splitting = false;
     let mut pose_guided_track_splitting_graph_support = false;
@@ -586,6 +587,7 @@ where
     let mut sift_vlfeat_compatible_descriptor = false;
     let mut sift_vlfeat_compatible_detector = false;
     let mut sift_vlfeat_bilinear_orientations = false;
+    let mut sift_legacy = false;
     let mut sift_vlfeat_compatible_output_order = false;
     let mut sift_colmap_compatible_grayscale = false;
     let mut sift_split_colmap_detector_grayscale = false;
@@ -648,6 +650,7 @@ where
                 gps_prior_loss_scale =
                     Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE)
             }
+            "--gps-prior-least-squares" => gps_prior_loss_scale = None,
             "--gps-prior-loss-scale" => {
                 gps_prior_loss_scale = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
             }
@@ -690,6 +693,7 @@ where
             "--sift-vlfeat-compatible-descriptor" => sift_vlfeat_compatible_descriptor = true,
             "--sift-vlfeat-compatible-detector" => sift_vlfeat_compatible_detector = true,
             "--sift-vlfeat-bilinear-orientations" => sift_vlfeat_bilinear_orientations = true,
+            "--sift-legacy" => sift_legacy = true,
             "--sift-vlfeat-compatible-output-order" => sift_vlfeat_compatible_output_order = true,
             "--sift-colmap-compatible-grayscale" => sift_colmap_compatible_grayscale = true,
             "--sift-split-colmap-detector-grayscale" => sift_split_colmap_detector_grayscale = true,
@@ -1512,6 +1516,44 @@ where
         )
     };
 
+    // The built-in SIFT defaults to the COLMAP/VLFeat-compatible detector and
+    // descriptor, with the settings `gsplat_photos` uses (L1-root, m = 3, two
+    // orientations, larger scales kept first). The historical extractor stays
+    // behind `--sift-legacy`. It is also used, with a note, when a flag only
+    // it supports is given (affine shapes, anisotropic views, scale-adaptive
+    // gradients, standard orientation peaks, an appended magnification, GPU
+    // extraction), so such commands keep their meaning. An explicit
+    // `--sift-vlfeat-compatible-*` flag selects exactly what it names.
+    let legacy_only_flag = sift_affine
+        || sift_multi_anisotropy
+        || sift_scale_adaptive_gradients
+        || sift_standard_orientations
+        || sift_append_descriptor_magnification.is_some()
+        || gpu_sift;
+    let explicit_compatible = sift_vlfeat_compatible_detector
+        || sift_vlfeat_compatible_descriptor
+        || sift_vlfeat_bilinear_orientations;
+    if !sift_legacy && !explicit_compatible {
+        if legacy_only_flag {
+            if feature_extractor == FeatureExtractorKind::Sift {
+                eprintln!(
+                    "note: a legacy-only SIFT flag is set; using the legacy SIFT extractor (--sift-legacy)"
+                );
+            }
+        } else {
+            sift_vlfeat_compatible_detector = true;
+            sift_vlfeat_compatible_descriptor = true;
+            sift_vlfeat_bilinear_orientations = true;
+            sift_l1_root = true;
+            sift_prefer_larger_scale = true;
+            if sift_max_orientations == 0 {
+                sift_max_orientations = 2;
+            }
+            if !sift_descriptor_magnification_explicit {
+                sift_descriptor_magnification = 3.0;
+            }
+        }
+    }
     if !sift_descriptor_magnification.is_finite() || sift_descriptor_magnification <= 0.0 {
         return Err(format!(
             "--sift-descriptor-magnification must be finite and > 0, got {sift_descriptor_magnification}"

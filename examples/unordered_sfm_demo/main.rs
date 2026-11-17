@@ -243,9 +243,9 @@
 //! cartesian` for `NAME X Y Z ...` in a metric frame); `--gps-prior-std` /
 //! `--gps-prior-std-vertical` (default 1 m each, as COLMAP) fill in a missing sigma,
 //! `--gps-prior-max-error M` sets the alignment's inlier threshold (default
-//! 3 sigma), `--gps-prior-robust-loss` (or `--gps-prior-loss-scale C`) puts
-//! COLMAP's Cauchy loss on the priors, and `--gps-prior-reject-outliers`
-//! drops the alignment's outliers from the BA instead.
+//! 3 sigma), the priors carry COLMAP's Cauchy loss (`--gps-prior-loss-scale
+//! C` sets its scale, `--gps-prior-least-squares` turns it off), and
+//! `--gps-prior-reject-outliers` drops the alignment's outliers from the BA.
 //!
 //! `--pair-source spatial` (with GPS priors) proposes candidate pairs like
 //! COLMAP's `spatial_matcher`: each image with a fix is paired with up to
@@ -769,7 +769,8 @@ struct Args {
     gps_prior_max_error: Option<f64>,
     /// Drop the alignment's outlier priors from the BA prior factor.
     gps_prior_reject_outliers: bool,
-    /// Cauchy loss scale on the normalised prior residual (`None`: least squares).
+    /// Cauchy loss scale on the normalised prior residual (default COLMAP's
+    /// 2.8; `None`, `--gps-prior-least-squares`: plain least squares).
     gps_prior_loss_scale: Option<f64>,
     /// `--pair-source spatial`: neighbours per image, their largest distance
     /// (prior units), and whether the distance includes the vertical axis.

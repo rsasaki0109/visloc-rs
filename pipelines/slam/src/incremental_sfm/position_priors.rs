@@ -25,13 +25,18 @@
 //! As in COLMAP, every prior enters the BA, outliers of the alignment
 //! included: a camera can disagree with its prior because the *model* is
 //! wrong there (drift, a bad registration), and its prior is what pulls it
-//! back. Bad fixes (a GPS jump) are handled by the visual terms and, when
-//! [`SfmPositionPriors::robust_loss_scale`] is set (COLMAP's
-//! `use_robust_loss_on_prior_position`), a Cauchy loss on the normalised
-//! residual.
+//! back. Bad fixes (a GPS jump) are handled by a Cauchy loss on the
+//! normalised residual ([`SfmPositionPriors::robust_loss_scale`], COLMAP's
+//! `use_robust_loss_on_prior_position`).
 //!
 //! Deviations from COLMAP:
 //!
+//! - The Cauchy loss is on by default (COLMAP's default is plain least
+//!   squares). With COLMAP-compatible features, on a drone block with real
+//!   onboard GNSS the two are equal, and on simulated GPS with 30 m jumps the
+//!   Cauchy loss keeps the model at 0.30 m where least squares leaves 1.21 m
+//!   (`docs/gps_prior_sfm.md`).
+
 //! - The Cauchy loss is applied by reweighting: each BA call weights a prior
 //!   by `1 / (1 + e²/c²)` for its normalised residual `e` at the start of that
 //!   call. The mapper runs many BAs, which makes this iteratively reweighted
@@ -113,9 +118,9 @@ pub struct SfmPositionPriors {
     pub reject_outliers: bool,
     /// Cauchy loss scale `c` on the normalised prior residual
     /// `e = ‖(C − p) / σ‖`, applied by reweighting each BA's prior by
-    /// `1 / (1 + e²/c²)`. `None` (default, as COLMAP): plain least squares.
-    /// COLMAP's `prior_position_loss_scale` default is
-    /// [`DEFAULT_PRIOR_LOSS_SCALE`].
+    /// `1 / (1 + e²/c²)`. Default [`DEFAULT_PRIOR_LOSS_SCALE`] (COLMAP's
+    /// `prior_position_loss_scale`); `None`: plain least squares, COLMAP's
+    /// default.
     pub robust_loss_scale: Option<f64>,
     /// RANSAC iterations of the alignment.
     pub ransac_iterations: usize,
@@ -129,7 +134,7 @@ impl SfmPositionPriors {
             min_num_priors: 3,
             alignment_max_error: None,
             reject_outliers: false,
-            robust_loss_scale: None,
+            robust_loss_scale: Some(DEFAULT_PRIOR_LOSS_SCALE),
             ransac_iterations: 1000,
         }
     }

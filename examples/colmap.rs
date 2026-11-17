@@ -37,8 +37,9 @@
 //! `--prior_position_std_x/_y/_z` (metres, used where a fix states none;
 //! default 1 m each, as COLMAP), `--overwrite_priors_covariance 1` (use them everywhere),
 //! `--Mapper.prior_position_ransac_max_error` (alignment inlier threshold,
-//! default 3 sigma), `--use_robust_loss_on_prior_position 1` with
-//! `--prior_position_loss_scale` (Cauchy loss, default sqrt(chi2_95(3))),
+//! default 3 sigma), `--use_robust_loss_on_prior_position` (Cauchy loss, on
+//! by default here, unlike COLMAP; `0` turns it off) with
+//! `--prior_position_loss_scale` (default sqrt(chi2_95(3))),
 //! and this shim's `--pose_priors_path FILE`
 //! (`NAME LAT LON ALT [STD_H [STD_V]]` lines, or `NAME X Y Z ...` with
 //! `--pose_priors_format cartesian`) in place of the EXIF fixes.
@@ -212,9 +213,27 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
         std::fs::create_dir_all(dir.join("features"))
             .map_err(|e| format!("mkdir {:?}: {e}", dir.join("features")))?;
         let images = list_images(&image_dir)?;
-        let config = SiftConfig {
-            max_keypoints,
-            ..SiftConfig::default()
+        // COLMAP's SIFT: the VLFeat-compatible detector (subpixel
+        // localization) and descriptor, with `gsplat_photos`' settings. The
+        // GPU extractor implements the legacy detector only, so `use_gpu`
+        // keeps that.
+        let config = if gpu {
+            SiftConfig {
+                max_keypoints,
+                ..SiftConfig::default()
+            }
+        } else {
+            SiftConfig {
+                max_keypoints,
+                normalization: visloc_rs::vision::features::sift::SiftNormalization::L1Root,
+                descriptor_magnification: 3.0,
+                max_orientations: 2,
+                prefer_larger_scale: true,
+                vlfeat_compatible_detector: true,
+                vlfeat_compatible_descriptor: true,
+                vlfeat_bilinear_orientations: true,
+                ..SiftConfig::default()
+            }
         };
         #[cfg(feature = "gpu")]
         let mut sift_gpu = if gpu {
@@ -564,7 +583,13 @@ fn load_position_priors(
     }
     let (local, frame) = set.to_local_enu(names, None, nalgebra::Vector3::new(std_x, std_y, std_z));
     let mut priors = SfmPositionPriors::from_local_priors(&local);
-    if flag(args, "use_robust_loss_on_prior_position") {
+    // Cauchy loss on by default (COLMAP's default is off): see
+    // docs/gps_prior_sfm.md. `--use_robust_loss_on_prior_position 0` turns it off.
+    priors.robust_loss_scale = None;
+    if !matches!(
+        args.get("use_robust_loss_on_prior_position"),
+        Some("0") | Some("false") | Some("False")
+    ) {
         priors.robust_loss_scale = Some(parse_f64(
             args,
             "prior_position_loss_scale",
