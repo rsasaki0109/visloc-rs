@@ -4,6 +4,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-17
+
+The first release published to crates.io and PyPI. Breaking:
+`GpuMatcher::match_pairs` returns a `Result` (see Changed).
+
 ### Added
 
 - **Package releases: a `v*` tag now publishes the crates to crates.io and

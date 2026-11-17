@@ -14,8 +14,11 @@ rejected there.
 
 ## Current status (2026-10-27)
 
-- Latest release: **0.3.0** (tagged, with prebuilt binaries); main is at
-  **0.3.1** (CHANGELOG cut, not tagged). See [`CHANGELOG.md`](CHANGELOG.md).
+- Latest release: **0.3.0** (tagged, with prebuilt binaries). 0.3.1 was cut
+  in the CHANGELOG but never tagged; main is at **0.4.0** (CHANGELOG cut,
+  2026-11-17), the first release the `release` workflow also publishes to
+  crates.io and PyPI ([`docs/publishing.md`](docs/publishing.md)). See
+  [`CHANGELOG.md`](CHANGELOG.md).
 - Moving to a local GPU machine: the handovers are
   [`docs/photos_sfm_handover.md`](docs/photos_sfm_handover.md) (photos to
   SfM / MVS / 3DGS, release, evaluation scripts) and
