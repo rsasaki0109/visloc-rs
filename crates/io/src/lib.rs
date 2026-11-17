@@ -16,6 +16,7 @@ pub mod insv;
 #[cfg(feature = "image-io")]
 pub mod kitti;
 pub mod kitti_imu;
+pub mod kitti_raw_gnss;
 pub mod query_features;
 pub mod sensors;
 pub mod two_view_matches;

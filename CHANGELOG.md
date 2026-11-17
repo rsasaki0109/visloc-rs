@@ -29,6 +29,39 @@ All notable changes to `visloc-rs` will be documented here.
     demo's keyframe-correction propagation moved, unchanged, to
     `visloc_basalt::mapper_correction`.
 
+- **VO + GNSS fusion on real data: KITTI raw with OXTS ground truth.**
+  - **What.** Three `2011_09_30` drives (odometry 07/06/05; 695 m, 1.2 km,
+    2.2 km). The in-repo deep-frontend stereo VO is fused with the OXTS
+    positions, degraded to a simulated 1 Hz receiver: 2 m / 4 m sigma, 80 %
+    Gauss–Markov with τ = 45 s, multipath jumps of 10–30 m, and a 20 s
+    dropout, from a fixed seed.
+  - **Result.** Batch fusion beats both inputs on every drive and seed. The
+    3-seed means are 3.5–4.8 m, against 9.2–10.1 m for the SE(3)-aligned VO
+    and 6.0–6.6 m for the raw fixes. The gain is much smaller than the synthetic
+    improvement (5.25 → 0.90 m). The correlated receiver error is not
+    averaged out, and the sliding window is worse than batch
+    (docs/gnss_fusion.md, "Results on KITTI raw").
+  - **Negative results.** Correct fixes are rejected when the VO fails. Near
+    a crossing truck on 0027 the error peaks at 4.9 m, even with native RTK
+    fixes. The deep frontend's motion-scale rescue locks at 1.57 m per frame
+    while the car decelerates on 0020 (VO 30 m). Both are recorded.
+  - **Defect found, opt-in fix: `GnssVoFusionConfig::gate_at_fix_accuracy`.**
+    Splitting a 1 Hz fix's information over ten 10 Hz frames also loosened
+    its χ²/GNC gate by √10, so multipath jumps were accepted (0 of 151
+    adjacent frames flagged on 0027). With the option, consistency is judged
+    at the fix's own accuracy: 74–79 % of those frames are flagged, none
+    elsewhere in batch, and the 3-seed mean batch ATE drops by 0.1–0.5 m
+    (one of nine runs is 0.04 m worse). The weights are
+    unchanged (`GnssPoseGraph::gnss_gate_scales`). It is off by default, and
+    default outputs are unchanged (synthetic demo still 0.898 m, 19 frames).
+  - **New code.** `visloc_io::kitti_raw_gnss` converts WGS84 to local ENU,
+    gives OXTS IMU poses and GNSS fixes, and reads the raw
+    `calib_{cam_to_cam,imu_to_velo,velo_to_cam}` chain.
+    `examples/kitti_raw_gnss_vo_fusion.rs` and
+    `scripts/run_kitti_raw_gnss_fusion_eval.sh` run the evaluation.
+    `fetch_kitti_raw_drive.py` gains `--skip-tracklets` /
+    `--skip-extract-oxts`.
+
 - **The ROS 2 nodes are tested against ROS 2 Lyrical** (Ubuntu 26.04), with
   both Fast DDS 3.6 and Cyclone DDS 11.0, on one host. The binaries are
   unchanged, and the message layouts match Lyrical's `.msg` files. All

@@ -34,7 +34,7 @@ rejected there.
 | Map-based localization | Benchmarked. OpenLORIS rig 98.96% localized; RNE simulated house 38 ms/frame | [`docs/map_matching_localization_plan.md`](docs/map_matching_localization_plan.md) |
 | Stereo / RGB-D VO | Benchmarked. KITTI 00 1.23 m, 09 2.07 m; TUM fr1_xyz 1.4 cm | [`docs/kitti_multiseq_benchmark.md`](docs/kitti_multiseq_benchmark.md) |
 | Monocular + IMU VIO (Basalt port) | Experimental. Synthetic scale error < 0.3%; no EuRoC result yet | [`docs/mono_inertial_vio.md`](docs/mono_inertial_vio.md) |
-| VO + GNSS | Experimental. Joint pose-graph fusion; synthetic ATE 5.25 m → 0.90 m | [`docs/gnss_fusion.md`](docs/gnss_fusion.md) |
+| VO + GNSS | Experimental. Joint pose-graph fusion; synthetic ATE 5.25 m → 0.90 m; KITTI raw (3 drives, OXTS GT, simulated 1 Hz receiver) 6.0–6.6 m raw GNSS / 9–10 m VO → 3.5–4.8 m batch | [`docs/gnss_fusion.md`](docs/gnss_fusion.md) |
 | Multi-camera rig SfM | Experimental. OpenLORIS 10k registered; RMSE 0.3890 m vs COLMAP 0.3843 m | [`docs/sfm_benchmarks.md`](docs/sfm_benchmarks.md) |
 | Python bindings | `bindings/python` (pyo3 + maturin), outside the root workspace | [`bindings/python/README.md`](bindings/python/README.md) |
 | ROS 2 nodes | `ros2/visloc-ros2` over pure-Rust DDS, outside the root workspace | [`ros2/visloc-ros2/README.md`](ros2/visloc-ros2/README.md) |

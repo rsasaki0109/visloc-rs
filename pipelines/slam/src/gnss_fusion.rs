@@ -164,6 +164,14 @@ pub struct GnssVoFusionConfig {
     pub interpolation: GnssInterpolationConfig,
     /// Split a fix's information between the frames it feeds.
     pub share_fix_information: bool,
+    /// Judge each GNSS factor's consistency (bootstrap RANSAC gate, GNC /
+    /// kernel weights, χ² inlier classification) at the fix's own accuracy,
+    /// i.e. before [`Self::share_fix_information`] inflated its covariance.
+    /// Without it, a fix shared by `k` frames is gated `√k` times more
+    /// loosely, so with a 10 Hz camera and a 1 Hz receiver a 20 m multipath
+    /// jump against 2 m sigmas passes as an inlier. Opt-in (default `false`)
+    /// while it is being measured; see docs/gnss_fusion.md.
+    pub gate_at_fix_accuracy: bool,
     pub vo_noise: VoNoiseModel,
     /// GNSS antenna position in the camera frame (metres).
     pub lever_arm: Vector3<f64>,
@@ -184,6 +192,7 @@ impl Default for GnssVoFusionConfig {
         Self {
             interpolation: GnssInterpolationConfig::default(),
             share_fix_information: true,
+            gate_at_fix_accuracy: false,
             vo_noise: VoNoiseModel::default(),
             lever_arm: Vector3::zeros(),
             bootstrap: GnssBootstrapConfig::default(),
@@ -451,14 +460,16 @@ impl GnssVoFusion {
         )
     }
 
-    /// Interpolated fixes for frames `start..`, with information sharing.
-    fn window_fixes(&self, start: usize) -> Vec<Option<InterpolatedGnssFix>> {
+    /// Interpolated fixes for frames `start..`, with information sharing, and
+    /// each fix's covariance inflation factor from that sharing (1 without).
+    fn window_fixes(&self, start: usize) -> (Vec<Option<InterpolatedGnssFix>>, Vec<f64>) {
         let mut fixes: Vec<Option<InterpolatedGnssFix>> = self.frames[start..]
             .iter()
             .map(|frame| {
                 interpolate_gnss_fix(&self.gnss, frame.timestamp, &self.config.interpolation)
             })
             .collect();
+        let mut share_factors = vec![1.0; fixes.len()];
         if self.config.share_fix_information {
             let mut usage = vec![0.0_f64; self.gnss.len()];
             for fix in fixes.iter().flatten() {
@@ -468,7 +479,8 @@ impl GnssVoFusion {
                     }
                 }
             }
-            for fix in fixes.iter_mut().flatten() {
+            for (fix, share) in fixes.iter_mut().zip(&mut share_factors) {
+                let Some(fix) = fix else { continue };
                 let factor = fix
                     .source_weights()
                     .iter()
@@ -477,24 +489,36 @@ impl GnssVoFusion {
                     .sum::<f64>()
                     .max(1.0);
                 fix.covariance *= factor;
+                *share = factor;
             }
         }
-        fixes
+        (fixes, share_factors)
     }
 
     fn try_bootstrap(&mut self) -> bool {
-        let fixes = self.window_fixes(0);
+        let (fixes, share_factors) = self.window_fixes(0);
+        let gate_at_fix_accuracy = self.config.gate_at_fix_accuracy;
         let correspondences: Vec<AlignmentCorrespondence> = self
             .frames
             .iter()
             .zip(&fixes)
-            .filter_map(|(frame, fix)| {
+            .zip(&share_factors)
+            .filter_map(|((frame, fix), &share)| {
                 let fix = fix.as_ref()?;
+                let (horizontal_sigma, vertical_sigma) = if gate_at_fix_accuracy {
+                    let unshare = share.sqrt().recip();
+                    (
+                        fix.horizontal_sigma() * unshare,
+                        fix.vertical_sigma() * unshare,
+                    )
+                } else {
+                    (fix.horizontal_sigma(), fix.vertical_sigma())
+                };
                 Some(AlignmentCorrespondence {
                     camera_to_map: frame.state.camera_to_map.clone(),
                     position_enu: fix.position_enu,
-                    horizontal_sigma: fix.horizontal_sigma(),
-                    vertical_sigma: fix.vertical_sigma(),
+                    horizontal_sigma,
+                    vertical_sigma,
                 })
             })
             .collect();
@@ -552,7 +576,7 @@ impl GnssVoFusion {
             .config
             .window
             .map_or(0, |window| self.frames.len().saturating_sub(window.max(2)));
-        let fixes = self.window_fixes(start);
+        let (fixes, share_factors) = self.window_fixes(start);
 
         let mut graph = GnssPoseGraph::new();
         graph.lever_arm = self.config.lever_arm;
@@ -589,6 +613,9 @@ impl GnssVoFusion {
                 position_enu: fix.position_enu,
                 information,
             });
+            if self.config.gate_at_fix_accuracy {
+                graph.gnss_gate_scales.push(share_factors[offset]);
+            }
             factor_frames.push(start + offset);
         }
         if start > 0 {
