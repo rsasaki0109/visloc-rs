@@ -11151,3 +11151,86 @@ fn m11_frame4_visual_stack_compact_matches_legacy_each_iteration() {
         }
     }
 }
+
+/// The production QR (`factor_from_whitened_with_workspace`, which skips
+/// four-column blocks that are `+0.0` in every row) must equal the full-width
+/// reference (`factor_from_whitened`) bit for bit: storage, pivots and tau.
+/// The factors span a window-wide state with only a few non-zero pose blocks,
+/// as visual landmark factors do, and one workspace is reused across factors
+/// of different sizes so stale values from a larger factor are present.
+#[test]
+fn active_block_landmark_qr_matches_full_width_bitwise() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        // Uniform in [-1, 1).
+        (seed >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    };
+    let mut workspace = LandmarkHouseholderWorkspace::default();
+    let shapes = [
+        // (observation rows, state cols, landmark cols, non-zero pose blocks)
+        (8, 87, 3, vec![(0, 6), (42, 57)]),
+        (2, 87, 3, vec![(6, 12)]),
+        (14, 105, 3, vec![(0, 6), (12, 18), (30, 36), (90, 105)]),
+        (6, 60, 2, vec![(18, 24), (54, 60)]),
+        (5, 43, 1, vec![(1, 7), (40, 43)]),
+        (12, 87, 3, vec![(0, 87)]),
+        (4, 87, 3, vec![]),
+        (10, 96, 3, vec![(48, 54)]),
+    ];
+    for (case, (rows, state_cols, landmark_cols, blocks)) in shapes.iter().enumerate() {
+        let mut state = DMatrix::<f64>::zeros(*rows, *state_cols);
+        for &(start, end) in blocks {
+            for row in 0..*rows {
+                for column in start..end {
+                    state[(row, column)] = next() * 3.0;
+                }
+            }
+        }
+        // A signed zero is not `+0.0`, so its block must be processed.
+        if *state_cols > 30 {
+            state[(0, 29)] = -0.0;
+        }
+        let landmark = DMatrix::<f64>::from_fn(*rows, *landmark_cols, |_, _| next() * 2.0);
+        let residual = DVector::<f64>::from_fn(*rows, |_, _| next());
+        let factor = WhitenedFactorRowStack::new(state, landmark, residual)
+            .unwrap()
+            .with_kind(FactorKind::Visual);
+        let (expected, expected_norm) =
+            LandmarkHouseholderF32::factor_from_whitened(&factor).unwrap();
+        let (actual, actual_norm) =
+            LandmarkHouseholderF32::factor_from_whitened_with_workspace(&factor, &mut workspace)
+                .unwrap();
+        let label = format!("case {case}");
+        assert_landmark_qr_bitwise_equal(&actual, &expected, &label);
+        assert_eq!(
+            actual_norm.to_bits(),
+            expected_norm.to_bits(),
+            "{label} norm"
+        );
+        // Return the buffers so the next factor reuses (stale) capacity.
+        actual.recycle_into(&mut workspace);
+    }
+
+    // Non-finite landmark values make tau NaN: the step must fall back to every
+    // column, as the full path does, and still match bit for bit.
+    let mut state = DMatrix::<f64>::zeros(6, 87);
+    for row in 0..6 {
+        for column in 12..18 {
+            state[(row, column)] = next();
+        }
+    }
+    let mut landmark = DMatrix::<f64>::from_fn(6, 3, |_, _| next());
+    landmark[(3, 0)] = f64::NAN;
+    let residual = DVector::<f64>::from_fn(6, |_, _| next());
+    let factor = WhitenedFactorRowStack::new(state, landmark, residual)
+        .unwrap()
+        .with_kind(FactorKind::Visual);
+    let (expected, _) = LandmarkHouseholderF32::factor_from_whitened(&factor).unwrap();
+    let (actual, _) =
+        LandmarkHouseholderF32::factor_from_whitened_with_workspace(&factor, &mut workspace)
+            .unwrap();
+    assert_landmark_qr_bitwise_equal(&actual, &expected, "non-finite fallback");
+}
