@@ -1351,7 +1351,8 @@ class Reprojection:
 
 
 def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_rw_scale=1.0, gyro_rw_scale=1.0,
-               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None, accel_m=None):
+               prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None, accel_m=None,
+               temp=None, gyro_temp=None):
     """GTSAM values and factors for poses, velocities, biases, the IMU and the gauge priors.
 
     The first keyframe's position is pinned (1e-4 m); its rotation gets prior_rot_sigma (rad). Gravity
@@ -1362,6 +1363,8 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
     gyro bias random walk at the start of the recording, by 1 + (scale - 1) exp(-t / seconds) at t seconds after
     start_ns (default: the first keyframe), while the device warms up. imu_path is a csv path or the loaded
     array; gyro_m (3 x 3) is the gyroscope's response error M: the rate is (I + M) times the measured one.
+    temp (one per IMU sample, degrees from a reference) and gyro_temp (6: the bias's change per degree c, then each
+    axis's scale change per degree s) make the rate (I + M) w + dT (s * w) - dT c, less the bias.
     """
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
@@ -1372,6 +1375,9 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
         imu[:, 1:4] = imu[:, 1:4] @ (np.eye(3) + np.asarray(gyro_m).reshape(3, 3)).T
     if accel_m is not None:
         imu[:, 4:7] = imu[:, 4:7] @ (np.eye(3) + np.asarray(accel_m).reshape(3, 3)).T
+    if temp is not None and gyro_temp is not None:
+        gt_ = np.asarray(gyro_temp, dtype=np.float64)
+        imu[:, 1:4] += temp[:, None] * (imu[:, 1:4] * gt_[3:6] - gt_[0:3])
     imu_ns = imu[:, 0].astype(np.int64)
 
     def make_params(gyro_rw):
@@ -1663,16 +1669,28 @@ def cmd_solve(a):
     init_st = getattr(a, "init_states", None)
     # the gyroscope's response error M (rate = (I + M) measured - bias), row-major: given, carried over from the
     # solve before, or zero; --est-gyro-m estimates it (docs/lamaria_batch_ba.md#the-gyroscopes-response)
-    # and the accelerometer's (specific force = (I + M_a) measured - bias), --est-accel-m: one vector of 18,
-    # of which the estimated entries `act` join the border
-    gm = np.zeros(18)
-    for name, sl in (("gyro_m", slice(0, 9)), ("accel_m", slice(9, 18))):
+    # and the accelerometer's (specific force = (I + M_a) measured - bias), --est-accel-m, then the gyroscope's
+    # bias change per degree and scale change per degree (--est-gyro-bias-temp, --est-gyro-scale-temp; SLAM Dunk's
+    # thermal model, docs/lamaria_batch_ba.md#the-gyroscope-and-the-temperature): one vector of 24, of which the
+    # estimated entries `act` join the border
+    gm = np.zeros(24)
+    imu_temp = None
+    if a.imu_temp:  # the SLAM cameras' mean temperature at every IMU sample, from the recording's median
+        tab = np.loadtxt(a.imu_temp, delimiter=",", skiprows=1)
+        tc = tab[:, 1:3].mean(axis=1)
+        imu_temp = np.interp(imu_data[:, 0], tab[:, 0], tc) - np.median(tc)
+    elif a.est_gyro_bias_temp or a.est_gyro_scale_temp:
+        raise SystemExit("--est-gyro-bias-temp and --est-gyro-scale-temp need --imu-temp")
+    for name, sl in (("gyro_m", slice(0, 9)), ("accel_m", slice(9, 18)), ("gyro_temp", slice(18, 24))):
         if init_st is not None and init_st.get(name) is not None:
             gm[sl] = np.array(init_st[name], dtype=np.float64).ravel()
-        if getattr(a, name):
+        if getattr(a, name, ""):
             gm[sl] = [float(v) for v in getattr(a, name).split(",")]
-    act = np.r_[np.arange(9) if a.est_gyro_m else [], np.arange(9, 18) if a.est_accel_m else []].astype(np.int64)
-    msig = np.r_[np.full(9, a.gyro_m_sigma), np.full(9, a.accel_m_sigma)][act]
+    act = np.r_[np.arange(9) if a.est_gyro_m else [], np.arange(9, 18) if a.est_accel_m else [],
+                np.arange(18, 21) if a.est_gyro_bias_temp else [],
+                np.arange(21, 24) if a.est_gyro_scale_temp else []].astype(np.int64)
+    msig = np.r_[np.full(9, a.gyro_m_sigma), np.full(9, a.accel_m_sigma), np.full(3, a.gyro_bias_temp_sigma),
+                 np.full(3, a.gyro_scale_temp_sigma)][act]
     ng = len(act)
 
     def build_imu(m_vec):
@@ -1680,17 +1698,20 @@ def cmd_solve(a):
                           a.gyro_rw_scale, a.prior_rot_sigma, omega, init_st,
                           (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0]),
                           gyro_m=m_vec[:9].reshape(3, 3) if np.any(m_vec[:9]) else None,
-                          accel_m=m_vec[9:].reshape(3, 3) if np.any(m_vec[9:]) else None)
+                          accel_m=m_vec[9:18].reshape(3, 3) if np.any(m_vec[9:18]) else None,
+                          temp=imu_temp, gyro_temp=m_vec[18:24] if np.any(m_vec[18:24]) else None)
 
     graph, values, index, imu_factors = build_imu(gm)
     gm_pass = gm.copy()  # the M the IMU factors were preintegrated with
 
     def gyro_jac(vals, m_vec, h=1e-4):
-        """d(whitened error)/dM of every IMU factor at vals, by preintegrating again with each entry moved by h."""
+        """d(whitened error)/dM of every IMU factor at vals, by preintegrating again with each entry moved by h
+        (at most its prior sigma)."""
         e0 = np.array([f.whitenedError(vals) for f in imu_factors])
         jm_ = np.zeros((len(imu_factors), e0.shape[1], ng))
         for jj, j in enumerate(act):
             mp_ = m_vec.copy()
+            h = min(1e-4, msig[jj])
             mp_[j] += h
             fac = build_imu(mp_)[3]
             jm_[:, :, jj] = (np.array([f.whitenedError(vals) for f in fac]) - e0) / h
@@ -1979,6 +2000,8 @@ def cmd_solve(a):
                 msg += f" focal {100 * np.expm1(rp.foc[c * n_seg]):+.3f} .. {100 * np.expm1(rp.foc[c * n_seg + n_seg - 1]):+.3f} %"
         if ng:
             msg += f" | gyro M diag {np.round(100 * gm[[0, 4, 8]], 3)} % accel {np.round(100 * gm[[9, 13, 17]], 3)} %"
+            if np.any(gm[18:]):
+                msg += f" | per degree: bias {np.round(gm[18:21] * 1e6, 2)} urad/s, scale {np.round(gm[21:] * 1e6, 1)} ppm"
         print(msg, flush=True)
         if not accepted or rel < a.rel_tol:
             if ng and accepted and np.abs(gm - gm_pass).max() > 1e-5 and passes < 5:
@@ -2010,7 +2033,9 @@ def cmd_solve(a):
         "biases": {str(k): {"accel": values.atConstantBias(B(k)).accelerometer().tolist(),
                             "gyro": values.atConstantBias(B(k)).gyroscope().tolist()} for k in (0, n // 2, n - 1)},
         "gyro_m": gm[:9].reshape(3, 3).tolist(),
-        "accel_m": gm[9:].reshape(3, 3).tolist(),
+        "accel_m": gm[9:18].reshape(3, 3).tolist(),
+        "gyro_bias_per_degree": gm[18:21].tolist(),
+        "gyro_scale_per_degree": gm[21:24].tolist(),
         "seconds": time.time() - t0,
     }
     print(json.dumps(summary, indent=1), flush=True)
@@ -2026,7 +2051,7 @@ def cmd_solve(a):
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
     return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
-            "gyro_m": gm[:9].copy(), "accel_m": gm[9:].copy()}
+            "gyro_m": gm[:9].copy(), "accel_m": gm[9:18].copy(), "gyro_temp": gm[18:24].copy()}
 
 
 def cmd_online(a):
@@ -2504,6 +2529,14 @@ def main():
                        help="estimate the accelerometer's response error M_a likewise (scales, misalignment)")
         s.add_argument("--accel-m-sigma", type=float, default=0.003, help="prior on each entry of M_a")
         s.add_argument("--accel-m", default="", help="9 comma-separated values: M_a to start from (row-major)")
+        s.add_argument("--imu-temp", default="",
+                       help="the SLAM cameras' temperature (lamaria_temperature.py) for the gyroscope's thermal model")
+        s.add_argument("--est-gyro-bias-temp", action="store_true",
+                       help="estimate the gyroscope bias's change per degree (rad/s per degree, one per axis)")
+        s.add_argument("--gyro-bias-temp-sigma", type=float, default=5e-5, help="its prior (rad/s per degree)")
+        s.add_argument("--est-gyro-scale-temp", action="store_true",
+                       help="estimate each gyroscope axis's scale change per degree")
+        s.add_argument("--gyro-scale-temp-sigma", type=float, default=3e-5, help="its prior (per degree)")
         s.add_argument("--save-states", action="store_true",
                        help="also write <out>_states.npz (keyframes, landmarks, observations) for loop-correct")
 
