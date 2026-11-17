@@ -1743,6 +1743,19 @@ pub struct StereoVoFrontendConfig {
     /// but laggy PnP pairs, while the median-translation gate keeps slow
     /// urban windows on the raw estimator path.
     pub motion_scale_rescue_max_pnp_inlier_ratio: f64,
+    /// Release a motion-scale rescue that has rescued a whole history window
+    /// (`motion_scale_rescue_min_history` pairs) in a row. The rescue judges
+    /// each step against the recent rescued steps. After a full window of
+    /// rescues that history holds only the rescue's own outputs, so a real,
+    /// sustained slowdown locks in: every slower step counts as "collapsed"
+    /// and is scaled back up to the old speed, for good (KITTI odometry 09:
+    /// 1,312 pairs in a row; raw drive 2011_09_30_0020: 307). On release the
+    /// streak's entries in the rescue's history are replaced by the
+    /// estimator's raw step lengths and the current step is kept as
+    /// estimated, so the median follows the real speed again. On by
+    /// default. The short streaks the rescue exists for (at most 17 pairs on
+    /// KITTI 01's highway slice) never reach it.
+    pub motion_scale_rescue_release_full_window: bool,
     /// Number of prior relative-motion estimates required before translation
     /// direction rescue can clamp a weak-consensus lateral outlier.
     pub translation_direction_rescue_min_history: usize,
@@ -1901,6 +1914,7 @@ impl Default for StereoVoFrontendConfig {
             motion_scale_rescue_max_translation_ratio: 1.6,
             motion_scale_rescue_target_percentile: 0.75,
             motion_scale_rescue_max_pnp_inlier_ratio: 1.05,
+            motion_scale_rescue_release_full_window: true,
             translation_direction_rescue_min_history: 20,
             translation_direction_rescue_min_median_translation_m: 1.5,
             translation_direction_rescue_max_angle_deg: 10.0,
@@ -2024,6 +2038,10 @@ where
     /// per call after the first). Used by track-extension callers to
     /// adapt the projection search radius to the observed motion.
     pub per_pair_translation_m: Vec<f64>,
+    /// Per-pair translation magnitudes before any frontend rescue (the
+    /// estimator's own step lengths).
+    pub per_pair_raw_translation_m: Vec<f64>,
+    motion_scale_rescue: MotionScaleRescue,
     /// Per-pair relative translation vectors in the current camera frame,
     /// after any guarded frontend rescues have been applied.
     pub per_pair_translation_vectors: Vec<Vector3<f64>>,
@@ -2094,6 +2112,8 @@ where
             right_features: Vec::new(),
             stereo_per_frame: Vec::new(),
             per_pair_translation_m: Vec::new(),
+            per_pair_raw_translation_m: Vec::new(),
+            motion_scale_rescue: MotionScaleRescue::default(),
             per_pair_translation_vectors: Vec::new(),
             per_pair_rotation_deg: Vec::new(),
             per_pair_rotation_vectors: Vec::new(),
@@ -2371,9 +2391,8 @@ where
                 &self.camera,
                 &self.config,
             );
-            let motion_scale_rescued = rescue_collapsed_motion_scale(
+            let motion_scale_rescued = self.motion_scale_rescue.apply(
                 &mut relative_pose,
-                &self.per_pair_translation_m,
                 pnp_report.as_ref(),
                 source,
                 &self.config,
@@ -2407,6 +2426,9 @@ where
             let rotation_deg = relative_rotation_angle_deg(&relative_pose);
             let rotation_vector = relative_pose.world_to_camera.rotation.scaled_axis();
             self.per_pair_translation_m.push(translation_m);
+            self.per_pair_raw_translation_m.push(raw_translation_m);
+            self.motion_scale_rescue
+                .record(raw_translation_m, translation_m);
             self.per_pair_translation_vectors
                 .push(relative_pose.world_to_camera.translation);
             self.per_pair_rotation_deg.push(rotation_deg);
@@ -2474,6 +2496,59 @@ where
     pub fn trajectory_length_m(&self) -> f64 {
         let centers: Vec<_> = self.poses.iter().map(|p| p.camera_center_world()).collect();
         centers.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
+    }
+}
+
+/// The motion-scale rescue's own history: the step lengths it judges
+/// against (the rescued ones, except a released streak, whose entries are
+/// the raw ones) and its current run of consecutive rescues
+/// ([`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`]).
+#[derive(Debug, Clone, Default)]
+struct MotionScaleRescue {
+    history_m: Vec<f64>,
+    raw_m: Vec<f64>,
+    streak: usize,
+}
+
+impl MotionScaleRescue {
+    /// Rescues `relative_pose`'s translation magnitude if it collapsed (or
+    /// inflated) against the history, unless the rescue has just rescued a
+    /// whole window in a row: then the streak is released instead and the
+    /// pose is kept. Returns whether the pose was rescued.
+    fn apply(
+        &mut self,
+        relative_pose: &mut Pose,
+        pnp_report: Option<&PnpSelectedReport>,
+        source: StereoRelativePoseSource,
+        config: &StereoVoFrontendConfig,
+    ) -> bool {
+        let window = config.motion_scale_rescue_min_history;
+        let rescued = if config.motion_scale_rescue_release_full_window
+            && window > 0
+            && self.streak >= window
+        {
+            // The window holds only the rescue's own outputs: hand the
+            // streak back to the estimator's raw step lengths.
+            let start = self.history_m.len() - self.streak;
+            self.history_m[start..].copy_from_slice(&self.raw_m[start..]);
+            false
+        } else {
+            rescue_collapsed_motion_scale(
+                relative_pose,
+                &self.history_m,
+                pnp_report,
+                source,
+                config,
+            )
+        };
+        self.streak = if rescued { self.streak + 1 } else { 0 };
+        rescued
+    }
+
+    /// Records the pair's raw step length and the one it ended with.
+    fn record(&mut self, raw_m: f64, final_m: f64) {
+        self.raw_m.push(raw_m);
+        self.history_m.push(final_m);
     }
 }
 
@@ -3568,6 +3643,68 @@ mod tests {
             100,
             f64::NAN,
         ));
+    }
+
+    /// A vehicle that cruises at 2 m/frame, then slows to 1 m/frame, through
+    /// the motion-scale rescue with the default settings (every PnP pose
+    /// counts as weak consensus). Returns the steps the frontend keeps.
+    fn decelerate_through_rescue(release: bool) -> Vec<f64> {
+        let config = StereoVoFrontendConfig {
+            motion_scale_rescue_release_full_window: release,
+            ..StereoVoFrontendConfig::default()
+        };
+        let mut rescue = MotionScaleRescue::default();
+        (0..160)
+            .map(|frame| {
+                let step = match frame {
+                    0..40 => 2.0,
+                    40..60 => 2.0 - 0.05 * f64::from(frame - 39),
+                    _ => 1.0,
+                };
+                let mut pose = Pose {
+                    world_to_camera: SE3::new(
+                        UnitQuaternion::identity(),
+                        Vector3::new(0.0, 0.0, step),
+                    ),
+                };
+                rescue.apply(&mut pose, None, StereoRelativePoseSource::Pnp, &config);
+                let kept = pose.world_to_camera.translation.norm();
+                rescue.record(step, kept);
+                kept
+            })
+            .collect()
+    }
+
+    #[test]
+    fn motion_scale_rescue_releases_after_a_full_window_of_rescues() {
+        // Without the release the rescued steps keep the median at the old
+        // speed and every slower step is scaled back up, for good.
+        let locked = decelerate_through_rescue(false);
+        assert!(locked[60..].iter().all(|&step| step > 1.9), "{locked:?}");
+        // With it the streak ends after one window (20 pairs), the history
+        // takes the raw steps, and the rescue stays off at the new speed.
+        let released = decelerate_through_rescue(true);
+        let first_kept = (40..160)
+            .find(|&frame| (released[frame] - 1.0).abs() < 1e-12)
+            .expect("the rescue never released");
+        assert!(first_kept <= 62, "released only at frame {first_kept}");
+        assert!(
+            released[first_kept..]
+                .iter()
+                .all(|&step| (step - 1.0).abs() < 1e-12),
+            "{released:?}"
+        );
+        // A single collapsed step during the cruise is still rescued.
+        let mut rescue = MotionScaleRescue::default();
+        let config = StereoVoFrontendConfig::default();
+        for _ in 0..30 {
+            rescue.record(2.0, 2.0);
+        }
+        let mut collapsed = Pose {
+            world_to_camera: SE3::new(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.5)),
+        };
+        assert!(rescue.apply(&mut collapsed, None, StereoRelativePoseSource::Pnp, &config));
+        assert!((collapsed.world_to_camera.translation.norm() - 2.0).abs() < 1e-12);
     }
 
     #[test]
