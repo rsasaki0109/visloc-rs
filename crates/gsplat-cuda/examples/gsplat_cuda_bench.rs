@@ -205,6 +205,7 @@ fn main() {
                 lr_semantic: 0.0,
                 semantic_geometry: 0,
                 moments_bf16: args.bf16_moments as u32,
+                filter3d: 0,
             };
             let t = std::time::Instant::now();
             cuda.train_step(&step).expect("train step");
