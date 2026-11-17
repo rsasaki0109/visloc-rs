@@ -27,6 +27,12 @@ All notable changes to `visloc-rs` will be documented here.
     Camera centres against ground truth: median 0.48 m and RMSE 1.66 m.
     Mapping without priors and aligning to the GPS afterwards gives median
     1.66 m and RMSE 2.52 m.
+  - **Real onboard GNSS** (gravel-mine UAV set, 158 nadir images, low-cost
+    GNSS against a control-point-adjusted reference). Without priors the
+    block is bent (14 m shape RMSE). With the GNSS as priors at σ 1/2 m,
+    the shape error is 0.63 m and the bias-removed error 0.67 m; the GNSS
+    itself scatters 1.69 m. A too-large σ (5/10 m) leaves 8 m, so the CLIs
+    default to 1 m per axis, as COLMAP does.
   - Details in docs/gps_prior_sfm.md.
 
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**

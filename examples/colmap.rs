@@ -32,7 +32,7 @@
 //! priors in every global bundle adjustment, so the model comes out metric in
 //! a local ENU frame (origin in `sparse/enu_origin.txt`). Flags:
 //! `--prior_position_std_x/_y/_z` (metres, used where a fix states none;
-//! default 5/5/10), `--overwrite_priors_covariance 1` (use them everywhere),
+//! default 1 m each, as COLMAP), `--overwrite_priors_covariance 1` (use them everywhere),
 //! `--Mapper.prior_position_ransac_max_error` (alignment inlier threshold,
 //! default 3 sigma), `--use_robust_loss_on_prior_position 1` with
 //! `--prior_position_loss_scale` (Cauchy loss, default sqrt(chi2_95(3))),
@@ -497,9 +497,9 @@ fn load_position_priors(
         ));
     }
     let mut set = GpsPriorSet::read(&path, coordinates).map_err(|e| e.to_string())?;
-    let std_x = parse_f64(args, "prior_position_std_x", 5.0)?;
+    let std_x = parse_f64(args, "prior_position_std_x", 1.0)?;
     let std_y = parse_f64(args, "prior_position_std_y", std_x)?;
-    let std_z = parse_f64(args, "prior_position_std_z", 10.0)?;
+    let std_z = parse_f64(args, "prior_position_std_z", 1.0)?;
     if flag(args, "overwrite_priors_covariance") {
         for prior in set.priors.values_mut() {
             prior.std_horizontal_m = None;

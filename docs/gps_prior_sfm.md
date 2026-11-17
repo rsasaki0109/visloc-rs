@@ -72,7 +72,7 @@ difference is a constant offset over a capture and does not matter.
 cargo run --release --features image-io --example unordered_sfm_demo -- \
   --feature-extractor sift --images-dir photos/ --image-suffix .jpg \
   --width 4000 --height 3000 --fx 3000 --fy 3000 --cx 2000 --cy 1500 \
-  --gps-priors-from-exif --gps-prior-std 5 --gps-prior-std-vertical 10 \
+  --gps-priors-from-exif --gps-prior-std 1 --gps-prior-std-vertical 2 \
   --out-colmap sparse/
 ```
 
@@ -81,7 +81,7 @@ cargo run --release --features image-io --example unordered_sfm_demo -- \
 | `--gps-priors FILE` | priors from a file (instead of EXIF) |
 | `--gps-priors-format wgs84\|cartesian` | how the file's three numbers read (default `wgs84`) |
 | `--gps-priors-from-exif` | priors from the images' EXIF GPS |
-| `--gps-prior-std M`, `--gps-prior-std-vertical M` | σ where a fix states none (default 5 m / 10 m) |
+| `--gps-prior-std M`, `--gps-prior-std-vertical M` | σ where a fix states none (default 1 m each, as COLMAP; see "Choosing σ") |
 | `--gps-prior-max-error M` | inlier threshold of the alignment (default 3 σ) |
 | `--gps-prior-robust-loss`, `--gps-prior-loss-scale C` | Cauchy loss on the priors |
 | `--gps-prior-reject-outliers` | drop the alignment's outliers from the BA |
@@ -92,7 +92,7 @@ cargo run --release --features image-io --example unordered_sfm_demo -- \
 colmap feature_extractor --database_path db.db --image_path images/   # stores EXIF GPS
 colmap exhaustive_matcher --database_path db.db
 colmap pose_prior_mapper --database_path db.db --output_path out/ \
-  --prior_position_std_x 5 --prior_position_std_y 5 --prior_position_std_z 10
+  --prior_position_std_x 1 --prior_position_std_y 1 --prior_position_std_z 2
 ```
 
 `mapper --Mapper.use_prior_position 1` is the same as `pose_prior_mapper`.
@@ -117,7 +117,7 @@ for name in &image_names {
         set.insert_geodetic(name.clone(), fix);
     }
 }
-let (local, enu_frame) = set.to_local_enu(&image_names, None, Vector3::new(5.0, 5.0, 10.0));
+let (local, enu_frame) = set.to_local_enu(&image_names, None, Vector3::new(1.0, 1.0, 1.0));
 let config = IncrementalSfmConfig {
     position_priors: Some(SfmPositionPriors::from_local_priors(&local)),
     ..IncrementalSfmConfig::default()
@@ -190,6 +190,79 @@ python3 scripts/gps_prior/eval_centres.py out truth.csv
 
 `scripts/gps_prior/posthoc_alignment.py` scores a model built without priors
 after a Sim(3) to the GPS. `upscale_keep_exif.py` makes the shim's input.
+
+## Measured: real onboard GNSS (gravel-mine UAV)
+
+This is the open-pit gravel-mine set of Shahbazi et al., "Unmanned aerial
+image dataset: Ready for 3D reconstruction", *Data in Brief* 25 (2019),
+CC BY 4.0. A 16 MP camera at about 70 m took 158 nadir images.
+
+- **GPS:** `DirectEOPs.txt`, the camera centres from the drone's
+  low-cost GNSS/IMU.
+- **Reference:** `RefinedEOPs.txt`, centres bundle-adjusted against 109
+  RTK/total-station control points (2–5 mm).
+
+Against the reference, the onboard GNSS is off by RMSE 3.2 m (registered
+images). Most of that is a constant bias of (1.0, 1.5, 2.4) m; without it,
+1.7 m RMSE remains.
+
+`scripts/gps_prior/gravel_prepare.py` undistorts the images with the
+dataset's calibration and scales them by 1/4 to 1218×812 pinhole JPEGs.
+The calibration convention is checked by `gravel_model_check.py`: it
+reprojects the dataset's own tie points at 0.29 px median. The mapper runs
+with `--exhaustive --sift-max-keypoints 8192 --verification-mode full
+--match-ratio 0.9 --min-matches 15 --min-pnp-inliers 10`, the GNSS as
+`--gps-priors gps_priors.txt --gps-priors-format cartesian`, and
+`scripts/gps_prior/eval_metric.py` scores it. 53–54 images register in
+every run, the same along-track runs each time.
+
+Camera-centre error against the reference (metres; "bias removed" takes out
+the best translation, "shape" the best similarity):
+
+| Run | Absolute RMSE | Bias removed RMSE / median / max | Shape RMSE |
+|---|---:|---:|---:|
+| Onboard GNSS itself | 3.23 | 1.69 / 1.54 / 2.96 | – |
+| No priors, Sim(3)-aligned to the GNSS afterwards | 14.34 | 14.07 / 9.44 / 39.75 | 14.07 |
+| GPS priors, σ 0.5 / 1 m | 3.06 | **0.66** / 0.50 / 2.27 | 0.62 |
+| GPS priors, σ 1 / 2 m | 2.86 | **0.67** / 0.56 / 2.33 | 0.63 |
+| GPS priors, σ 1 / 2 m, Cauchy loss | 2.88 | 0.71 / 0.59 / 1.27 | 0.68 |
+| GPS priors, σ 2 / 4 m | 4.08 | 2.72 / 2.20 / 6.38 | 1.89 |
+| GPS priors, σ 5 / 10 m | 8.82 | 8.35 / 4.67 / 30.44 | 7.98 |
+
+- **Without priors the nadir block is badly bent** (14 m shape RMSE,
+  40 m at worst), as monocular nadir blocks tend to be. No alignment
+  afterwards removes that.
+- **With priors at a realistic σ the shape is right** to 0.6 m, 2.5×
+  better than the GNSS's own scatter. The absolute error (about 3 m) is
+  the GNSS's constant bias. Position priors cannot see a bias: correcting it
+  needs control points.
+- The Cauchy loss is neutral here: a better worst camera, a slightly worse
+  median.
+
+### Choosing σ
+
+σ that is too large costs far more than σ that is too small. At 2–5× the
+GNSS's real scatter, the priors lose to the bend that the visual terms
+prefer (1.9 m, then 8.0 m). At 0.5–1× they win. Set σ to the receiver's
+real per-fix accuracy, or a little below it. The CLIs default to 1 m on
+every axis, as COLMAP's `pose_prior_mapper` does. A constant bias does not
+bend the model, so it is no reason to raise σ.
+
+Reproduce: download `mmc2.zip` (the text files) from the article's
+supplementary material and `Part3-RawImages.zip` (5.9 GB) from its Google
+Drive link, then:
+
+```bash
+python3 scripts/gps_prior/gravel_prepare.py supp/ Part3-RawImages.zip gravel/ 4
+cargo run --release --features image-io --example unordered_sfm_demo -- \
+  --feature-extractor sift --images-dir gravel/images --image-suffix .jpg \
+  --width 1218 --height 812 --fx 1216.5643 --fy 1216.5643 --cx 609 --cy 406 \
+  --exhaustive --sift-max-keypoints 8192 --verification-mode full \
+  --match-ratio 0.9 --min-matches 15 --min-pnp-inliers 10 \
+  --gps-priors gravel/gps_priors.txt --gps-priors-format cartesian \
+  --gps-prior-std 1 --gps-prior-std-vertical 2 --out-colmap out_s1/
+python3 scripts/gps_prior/eval_metric.py gravel/truth.csv out_nopri:posthoc out_s1
+```
 
 ## Limits
 

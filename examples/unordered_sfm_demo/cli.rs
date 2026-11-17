@@ -525,8 +525,8 @@ where
     let mut gps_priors_file: Option<PathBuf> = None;
     let mut gps_priors_format = PriorCoordinates::Wgs84;
     let mut gps_priors_from_exif = false;
-    let mut gps_prior_std = 5.0f64;
-    let mut gps_prior_std_vertical = 10.0f64;
+    let mut gps_prior_std = 1.0f64;
+    let mut gps_prior_std_vertical = 1.0f64;
     let mut gps_prior_max_error: Option<f64> = None;
     let mut gps_prior_reject_outliers = false;
     let mut gps_prior_loss_scale: Option<f64> = None;

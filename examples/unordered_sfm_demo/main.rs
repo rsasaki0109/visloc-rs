@@ -241,7 +241,7 @@
 //! in a local ENU frame (origin written to `OUT_COLMAP/enu_origin.txt`). The
 //! file holds `NAME LAT LON ALT [STD_H [STD_V]]` lines (`--gps-priors-format
 //! cartesian` for `NAME X Y Z ...` in a metric frame); `--gps-prior-std` /
-//! `--gps-prior-std-vertical` (default 5 / 10 m) fill in a missing sigma,
+//! `--gps-prior-std-vertical` (default 1 m each, as COLMAP) fill in a missing sigma,
 //! `--gps-prior-max-error M` sets the alignment's inlier threshold (default
 //! 3 sigma), `--gps-prior-robust-loss` (or `--gps-prior-loss-scale C`) puts
 //! COLMAP's Cauchy loss on the priors, and `--gps-prior-reject-outliers`
