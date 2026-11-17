@@ -6,6 +6,38 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
+  The online mapper (loop closure, global BA) now runs on a one-camera rig.
+  - **What changed.** The mapper's stereo stage, both batch
+    `NfrMapper::match_stereo` and the online per-timestamp match, returns
+    without matching when the calibration has one camera. Before, it failed
+    on the missing camera 1. Landmarks then come from temporal keyframe
+    matches alone. A stereo rig never takes the branch: the stereo VIO
+    trajectory is byte-identical.
+  - **EuRoC, all 11** (with `config.vio_init_accel_average_s: 0.5`):
+    - mean ATE 0.139 m for the VIO alone, **0.062 m** with the mapper;
+    - every sequence improves;
+    - lower than ORB-SLAM3 mono-inertial's published values on 5 of 11
+      (its mean 0.043 m);
+    - scale error −1.3 % to +1.8 %.
+  - **TUM-VI room1:** 0.096 m → 0.014 m (stereo online 0.011 m).
+  - Details in docs/mono_inertial_vio.md, "Mapping and loop closure".
+
+- **`config.vio_mono_camera`: which camera a monocular EuRoC replay reads
+  (opt-in, 0 or 1).**
+  - **Why.** V2_03's mono failure at 73 s comes from cam0 dropping every
+    other frame (414 gaps, mostly 55–75 s; cam1 has none). Turning at
+    about 1 rad/s, the KLT tracks then live one frame, and no landmark is
+    triangulated for about 15 s.
+  - **Result on V2_03.** Reading cam1 takes the mono VIO from 0.828 m to
+    0.104 m (scale +19 % → −0.2 %), and mono online SLAM from 0.100 m to
+    0.045 m.
+  - Urgent keyframes, IMU-seeded KLT and a fourth pyramid level only got
+    cam0 to 0.21–0.29 m. On V1_01, which has no gaps, cam1 is not better
+    (0.052 against 0.047 m).
+  - `BasaltCalibration::select_camera(index)` builds the one-camera rig.
+    Absent or 0, and on the stereo path, nothing changes.
+
 - **`visloc_vio_node` can run the online mapper (opt-in, `mapper:=true`).**
   Loop closure and global BA as in `basalt_euroc_online_slam_demo`, with
   its mapper settings, so a ROS 2 user gets loop-closed poses.
@@ -21,8 +53,15 @@ All notable changes to `visloc-rs` will be documented here.
     (TUM, corrections interpolated between keyframes like the demo's
     `trajectory_online.tum`). A second signal exits at once.
   - Without `mapper` the node's outputs and signal handling are unchanged.
-    The mapper's output is not deterministic run to run, and it is not yet
-    measured through the node on EuRoC (ros2/visloc-ros2/README.md,
+    The mapper's output is not deterministic run to run.
+  - On EuRoC V1_01, replayed through the node's own stages and mapper
+    session without DDS (`ros2/visloc-ros2/examples/euroc_mapper_replay.rs`,
+    paced at the recording's rate):
+    - the shutdown trajectory has ATE 0.0354 m, the same as the demo;
+    - the live `map_pose` has 0.0385 m, against 0.0390 m for the VIO;
+    - no packet was dropped.
+
+    Not yet run through `ros2 bag play` (ros2/visloc-ros2/README.md,
     "Online mapper").
   - `BasaltVioFrontendStage::set_retain_marg_data` runs the two-thread
     stages on the MargData path (default off, lean path unchanged). The

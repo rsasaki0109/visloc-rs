@@ -30,6 +30,10 @@
 //!   --out-dir target/basalt_mh01_online --optimize-every-k 100 --periodic-iterations 4
 //! ```
 //!
+//! `--mono` replays cam0 + IMU only (monocular-inertial VIO); the mapper
+//! then builds its landmarks from temporal keyframe matches alone. See
+//! `docs/mono_inertial_vio.md`, "Mapping and loop closure".
+//!
 //! `--save-map DIR` also saves the final map (keyframe poses, ORB landmarks
 //! and descriptors, as a COLMAP text model plus descriptor store) for
 //! `basalt_euroc_localize_demo`; see `examples/basalt_map/map_files.rs`.

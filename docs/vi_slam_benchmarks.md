@@ -363,6 +363,40 @@ fast/motion-blurred sequences, not mapper or calibration limits — see
 [`vi_slam_global_consistency_plan.md`](vi_slam_global_consistency_plan.md)
 for next steps.
 
+### VIO speed: skipping zero columns in the landmark QR (2026-11-17, not kept)
+
+Negative result. The real-time margin is still the 1.06x of the slowest
+sequence.
+
+- **Profile.** Callgrind (instruction counts, which are deterministic on a
+  shared machine) over the first 150 V1_01 frames, stereo, one thread:
+  - the landmark Householder QR (`LandmarkHouseholderF32::perform_with_scratch`)
+    is 12.6 % of all instructions, the largest estimator kernel;
+  - `memset` is 5.8 %;
+  - KLT tracking (`track_direction_from_seed_impl`) is 22 %.
+- **Lever.** Each landmark's QR runs over the whole window's state width,
+  although only the poses that observe the landmark are non-zero. Its storage
+  was also zeroed twice: `resize` after `clear`, then `fill`. Two changes:
+  - write every storage element once;
+  - run each Householder step only over the four-column blocks that hold a
+    value other than `+0.0`, with a full-width step when any operand is
+    non-finite.
+
+  This is exact: every update is per column, and an all-`+0.0` column stays
+  `+0.0` under it. A unit test compared it bit for bit with the full-width
+  path, and the V2_03 stereo and mono trajectories were byte-identical.
+- **Result.**
+  - Instructions: 48.39 G → 46.41 G (−4.1 %). The QR kernel's own cost fell
+    30 %.
+  - Wall time on V1_01, VIO alone, 4 cores, idle machine, 3 runs each:
+    57.3 → 57.2 s with `--pipeline`, and 137.7 → 136.8 s serial on one
+    thread. The run-to-run spread is ±4 s.
+  - The removed work (zero fills, FMAs on zero lanes) is cheap and
+    memory-bound, so it does not show in wall time. The change was reverted
+    rather than kept in the parity-locked QR.
+- **Still open.** Per the profile, the LM's per-trial bookkeeping (above) and
+  the KLT frontend are the remaining levers.
+
 ### VIO accuracy: frontend robustness on MH_04/MH_05 (2026-09-29)
 
 Per-frame frontend diagnostics (`--frontend-stats-csv`, new opt-in flag on

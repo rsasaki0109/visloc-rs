@@ -191,12 +191,44 @@ Limitations:
 * On an estimator reset the VIO's world frame starts over, so the mapper
   starts over too: the old map is discarded, `T_map_odom` returns to the
   identity, and the trajectory file covers the frames since the last reset.
-* Stereo only, like the node. The mapper has not been measured through the
-  node on recorded EuRoC data yet (the demo's results are on the same mapper
-  and settings); it is tested on synthetic data.
+* Stereo only, like the node. Measured on recorded EuRoC data without DDS
+  (`examples/euroc_mapper_replay.rs`, below), not yet through `ros2 bag play`.
 * Do not run it next to `visloc_map_localize_node` with the same `map_frame`:
   both publish `map -> odom` (and both name their output `map_pose`, with
   different types).
+
+#### On EuRoC, without DDS
+
+`examples/euroc_mapper_replay.rs` drives the node's own pieces on a EuRoC
+recording: `VioCore`'s two stages with `retain_marg_data`, `MapperSession`
+with its bounded, dropping queue, and `map_from_odom()` after each frame.
+Frames are paced at the recording's rate, as a live node receives them. It
+writes the live `map_pose` of every frame, the VIO poses and the shutdown
+trajectory (`mapper_trajectory_out`).
+
+```bash
+cargo run --release --manifest-path ros2/visloc-ros2/Cargo.toml --example euroc_mapper_replay -- \
+  --euroc-dir /data/V1_01_easy \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir target/ros2_mapper_v101
+```
+
+V1_01_easy, 2026-11-17, 4 cores, SE(3) ATE against the ground truth:
+
+| Output | ATE |
+| --- | ---: |
+| `odom` (VIO) | 0.0390 m |
+| live `map_pose` | 0.0385 m |
+| shutdown trajectory | **0.0354 m** |
+| demo `trajectory_online.tum`, same settings | 0.0354 m |
+
+409 packets were sent and none dropped, with 278 loop pairs and 3 BA merges
+during the run.
+- **The shutdown trajectory** matches the demo's.
+- **The live `map_pose`** is only slightly better than the VIO. It is
+  corrected with whatever the last merged BA said, by default every 100
+  keyframes, and the large corrections arrive in the final optimization.
 
 ## `visloc_localize_node`
 
