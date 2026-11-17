@@ -375,7 +375,7 @@ localization and `odom -> base_link` from the wheel calibration only.
   (`CDR_LE`) payloads and ROS 2's topic/type mangling (`rt/<topic>`,
   `sensor_msgs::msg::dds_::Image_`). That is what `rmw_fastrtps_cpp` (the
   default in Humble/Jazzy) and `rmw_cyclonedds_cpp` use. Both are tested
-  against ROS 2 Jazzy, see [below](#tested-against-ros-2-jazzy). `rmw_zenoh`
+  against ROS 2 Jazzy and Lyrical, see [below](#tested-against-ros-2-jazzy). `rmw_zenoh`
   is a different protocol and is not supported by these binaries.
 * **Topic names** are resolved like `rclcpp` does: a relative name goes
   under the node namespace (`odom` is `/odom`, or `/robot1/odom` with
@@ -388,7 +388,7 @@ localization and `odom -> base_link` from the wheel calibration only.
   are lost (volatile QoS). Start the nodes first and give a bag player a
   head start, e.g. `ros2 bag play --delay 3`.
 * **Message layouts** are hand-written serde mirrors of the ROS IDL
-  (`src/msgs.rs`), and they match the Humble through Kilted definitions. Unit
+  (`src/msgs.rs`), and they match the Humble through Lyrical definitions. Unit
   tests pin the CDR bytes against hand-assembled references (alignment,
   string NUL terminators, `uint8[]` vs fixed arrays).
 * **QoS**: subscriptions are best-effort / volatile, which matches both
@@ -443,7 +443,7 @@ python3 tools/euroc_to_rosbag2.py /data/MH_02_easy mh02_bag     # needs Pillow
 visloc_vio_node --calibration .../euroc_ds_calib.json --config .../euroc_config.json \
   --ros-args -r left/image_raw:=/cam0/image_raw -r right/image_raw:=/cam1/image_raw -r imu:=/imu0 &
 visloc_map_localize_node --map runs/mh01_map --ros-args -r image:=/cam0/image_raw &
-ros2 bag record -o out /odom /map_pose /tf &
+ros2 bag record -o out --topics /odom /map_pose /tf &
 ros2 bag play mh02_bag --delay 3
 python3 tools/bag_to_tum.py out /map_pose map_pose.tum
 ```
@@ -493,8 +493,49 @@ the VIO's one-frame queue dropped the bursts. An MH_05 run with the test
 suite compiling on the same cores dropped 194 frames; the run above dropped
 none.
 
+### ROS 2 Lyrical
+
+On Ubuntu 26.04 with ROS 2 Lyrical from `packages.ros.org`
+(`rmw_fastrtps_cpp` 9.4 / Fast DDS 3.6, and `rmw_cyclonedds_cpp` 4.1 /
+Cyclone DDS 11.0), on one host, the same checks pass with both RMWs:
+`ros2 node list` and `ros2 topic list -t` show both nodes and all their
+topics with the right types, `ros2 topic echo` decodes `odom`, `map_pose`
+and `/diagnostics`, `ros2 topic hz` sees 20 Hz `odom` and images, and
+`tf2_echo map imu_link` resolves. The nodes are the same binaries; nothing
+in them changed for Lyrical. MH_02 against the MH_01 map, at 1.0x with
+`--delay 3`:
+
+| `ros2 bag play` MH_02 at 1.0x | `map_pose` published | RMSE / max |
+|---|---|---|
+| Fast DDS | 99.9% of frames | 2.0 / 5.0 cm |
+| Cyclone DDS | 99.9% of frames | 2.0 / 5.0 cm |
+
+All eight queries with Fast DDS, as above (the maps were rebuilt for these
+runs):
+
+| query → map | VIO frames dropped | `map_pose` published | RMSE / max | first map pose |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 0 | 99.9% | 2.0 / 5.0 cm | 0.1 s |
+| MH_03 → MH_01 | 0 | 99.9% | 4.2 / 12.9 cm | 0.1 s |
+| MH_04 → MH_01 | 0 | 76.0% | 22.2 / 41.2 cm | 24.4 s |
+| MH_05 → MH_01 | 0 | 78.5% | 17.9 / 30.6 cm | 24.4 s |
+| V1_02 → V1_01 | 0 | 94.4% | 3.5 / 6.9 cm | 4.7 s |
+| V1_03 → V1_01 | 0 | 99.9% | 5.0 / 10.5 cm | 0.1 s |
+| V2_02 → V2_01 | 2 | 99.8% | 3.7 / 14.0 cm | 0.1 s |
+| V2_03 → V2_01 | 0 | 77.8% | 20.3 / 42.8 cm | 21.4 s |
+
+The results follow the Jazzy runs. The published share is within 2.7
+points and the RMSE within 0.7 cm on every query, except V2_03's RMSE:
+20.3 cm here, 27.1 cm on Jazzy. Two things changed in Lyrical's tools:
+
+- `ros2 bag record` takes topics only after `--topics`; the positional form
+  is an error. The command above uses `--topics`, which Jazzy accepts too.
+- `rosbag2_py`'s `read_next()` is deprecated. `tools/bag_to_tum.py` calls
+  `read_next_ext()` where it exists.
+
 Not covered: Humble, several hosts on a real network, and live sensors. RViz
-was run under Xvfb only ([launch file](#launch-file-urdf-and-rviz)).
+was run under Xvfb only, and only on Jazzy
+([launch file](#launch-file-urdf-and-rviz)).
 
 ## On a ground robot
 
@@ -726,8 +767,8 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 
 ## Limits (read before relying on this)
 
-* **Tested with ROS 2 Jazzy on one host only**
-  ([above](#tested-against-ros-2-jazzy)), RViz included (under Xvfb). It
+* **Tested with ROS 2 Jazzy and Lyrical on one host only**
+  ([above](#tested-against-ros-2-jazzy)), RViz included (under Xvfb, Jazzy only). It
   has not been tested with Humble, several hosts on a real network, or live
   sensors. Please
   report results.

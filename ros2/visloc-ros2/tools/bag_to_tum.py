@@ -27,9 +27,12 @@ def main():
         sys.exit(f"{topic} is not in {bag}: {sorted(types)}")
     message_type = get_message(types[topic])
     reader.set_filter(rosbag2_py.StorageFilter(topics=[topic]))
+    # Lyrical deprecates read_next() for read_next_ext(), which also returns
+    # the send time. The data is the second element of either.
+    read_next = getattr(reader, "read_next_ext", reader.read_next)
     lines = []
     while reader.has_next():
-        _, data, _ = reader.read_next()
+        data = read_next()[1]
         message = deserialize_message(data, message_type)
         # PoseWithCovarianceStamped and Odometry nest the pose one level deeper.
         pose = message.pose.pose if hasattr(message.pose, "pose") else message.pose

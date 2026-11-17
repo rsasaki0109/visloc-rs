@@ -6,6 +6,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **The ROS 2 nodes are tested against ROS 2 Lyrical** (Ubuntu 26.04), with
+  both Fast DDS 3.6 and Cyclone DDS 11.0, on one host. The binaries are
+  unchanged, and the message layouts match Lyrical's `.msg` files. All
+  eight EuRoC queries ran through `ros2 bag play` with Fast DDS, and the
+  results follow the Jazzy runs. MH_02 → MH_01 publishes `map_pose` on
+  99.9% of frames at 2.0 / 5.0 cm RMSE / max with either RMW
+  (ros2/visloc-ros2/README.md, "ROS 2 Lyrical").
+  - `tools/bag_to_tum.py` uses `read_next_ext()` where it exists, because
+    Lyrical deprecates `read_next()`. The README's recording command uses
+    `ros2 bag record --topics`, because Lyrical drops the positional form.
+
 - **`config.vio_init_accel_average_s`: an averaged initial tilt for the
   EuRoC reader (opt-in).**
   - **Why.** Upstream levels the first pose with the one accelerometer

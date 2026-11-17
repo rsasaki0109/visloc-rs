@@ -8,8 +8,9 @@
 //! wire, but every field, its width, its signedness, fixed-array lengths and
 //! sequence-vs-array distinctions must match `rosidl`'s generated types.
 //!
-//! The layouts match ROS 2 Humble, Iron, Jazzy and Kilted (none of these
-//! message definitions changed across those distributions).
+//! The layouts match ROS 2 Humble, Iron, Jazzy, Kilted and Lyrical (none of
+//! these message definitions changed across those distributions; Lyrical
+//! checked against its installed `.msg` files).
 //!
 //! Large byte buffers (`sensor_msgs/Image::data`) use [`serde_bytes_vec`] so
 //! the CDR serializer writes them as one `u32` length prefix plus a
