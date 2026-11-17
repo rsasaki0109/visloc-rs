@@ -108,6 +108,11 @@ A `v*` tag push runs `.github/workflows/release.yml`:
 | `release` | Creates the GitHub release from the tag's `CHANGELOG.md` section. |
 | `binaries` | Attaches prebuilt Linux, Windows and macOS command-line binaries. |
 
+To rewrite an existing release's notes, for example after its CHANGELOG
+section was cut down to highlights on `main`, run the workflow by hand with
+the tag, `notes_ref` set to `main` and **binaries** unticked. The release
+notes then come from `main`'s `CHANGELOG.md`, and nothing is rebuilt.
+
 ## Publishing to crates.io and PyPI
 
 Not done so far: no `visloc-*` crate is on crates.io and `visloc` is not on

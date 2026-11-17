@@ -4,7 +4,10 @@ name: release
 # binaries: `gsplat_photos` (photos to SfM, splats and a mesh), `visloc_mvs`
 # (dense multi-view stereo), `colmap_incremental_mapper` and `visloc_web`
 # (the browser UI, which runs the `gsplat_photos` next to it). A `v*` tag
-# push builds them; a manual run rebuilds an existing tag's release.
+# push builds them; a manual run rebuilds an existing tag's release. A
+# manual run with `binaries` unticked and `notes_ref: main` only rewrites
+# the release notes from main's CHANGELOG.md, e.g. after they were cut down
+# to highlights.
 #
 # Publishing the Rust crates to crates.io and the `visloc` Python wheels to
 # PyPI is opt-in: only a manual run with `publish` ticked does it, never a
@@ -19,6 +22,14 @@ on:
       tag:
         description: "Existing tag to build and attach binaries to (e.g. v0.3.0)"
         required: true
+      notes_ref:
+        description: "Branch or tag to read CHANGELOG.md from for the release notes (default: the tag itself)"
+        required: false
+        default: ""
+      binaries:
+        description: "Build and attach the binaries"
+        type: boolean
+        default: true
       publish:
         description: "Also publish the crates to crates.io and the wheels to PyPI (already published versions are skipped)"
         type: boolean
@@ -29,6 +40,7 @@ permissions:
 
 env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  NOTES_REF: ${{ github.event.inputs.notes_ref }}
   GH_TOKEN: ${{ github.token }}
 
 jobs:
@@ -46,12 +58,18 @@ jobs:
         shell: bash
         run: |
           version="${TAG#v}"
+          changelog=CHANGELOG.md
+          if [ -n "$NOTES_REF" ]; then
+            git fetch --depth=1 origin "$NOTES_REF"
+            git show FETCH_HEAD:CHANGELOG.md > notes-changelog.md
+            changelog=notes-changelog.md
+          fi
           # The section between "## <version>" and the next "## " heading.
           awk -v v="$version" '
             $0 ~ "^## " v "( |$)" { on = 1; next }
             on && /^## / { exit }
             on { print }
-          ' CHANGELOG.md > notes.md
+          ' "$changelog" > notes.md
           if [ ! -s notes.md ]; then echo "See CHANGELOG.md." > notes.md; fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
@@ -61,6 +79,7 @@ jobs:
 
   binaries:
     needs: release
+    if: github.event_name == 'push' || inputs.binaries
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
