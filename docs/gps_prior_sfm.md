@@ -297,18 +297,23 @@ colmap spatial_matcher --database_path db.db \
 
 Gravel-mine set, same flags as above, GPS priors at σ 1 / 2 m:
 
-| Candidate pairs | Candidates | Verified | Verification time | Registered | Shape RMSE |
+| Candidate pairs | Candidates | Verified | Verification time | Registered | Bias removed RMSE |
 |---|---:|---:|---:|---:|---:|
-| Exhaustive | 12,403 | 448 | 68.9 s | 54 | 0.63 m |
-| **Spatial, 50 neighbours / 100 m (default)** | 4,632 | 448 | 31.0 s | 54 | 0.63 m |
-| Spatial, 20 neighbours | 1,827 | 386 | 16.6 s | 47 | 2.04 m |
-| VLAD top-12 (the demo's default) | 1,257 | 356 | 13.8 s | 41 | 1.09 m |
+| Exhaustive | 12,403 | 1,280 | 96.1 s | 147 | 0.62 m |
+| **Spatial, 50 neighbours / 100 m (default)** | 4,632 | 1,279 | 40.8 s | 147 | 0.71 m |
+| Spatial, 20 neighbours | 1,827 | 1,118 | 23.6 s | 147 | 1.02 m |
+| VLAD top-12 (the demo's default) | 1,198 | 810 | 19.2 s | 140 | 0.59 m (on its 140) |
 
-- With the defaults, spatial pairs find every pair that exhaustive
-  matching verifies and give the identical model, from 37 % of the
-  candidates.
-- VLAD retrieval on these repetitive nadir textures misses pairs and
-  registers 13 fewer images.
+- **Spatial pairs keep what exhaustive matching finds.** With the defaults
+  they find 1,279 of the 1,280 pairs that exhaustive matching verifies,
+  from 37 % of the candidates, and register the same 147 images.
+  - The 0.62 against 0.71 m is run-to-run variation from that one pair
+    and the mapper's order, not a loss of matches.
+- **20 neighbours** loses 160 verified pairs and leaves a worse model.
+- **VLAD retrieval** is the cheapest, but drops 470 of the verified pairs
+  and 7 images.
+  - With the SIFT before its rotation fix, VLAD registered 41 images where
+    spatial pairs registered 54.
 - The candidate count grows linearly with the number of images, where
   exhaustive matching grows quadratically, so the saving grows with the
   block.
