@@ -131,6 +131,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **Stereo VO: the motion-scale rescue no longer locks in on a slowdown**
+  (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on by
+  default; `--no-motion-scale-rescue-release` restores the old behaviour).
+  - **The bug.** The rescue judged each step against its own rescued steps.
+    During a real, sustained slowdown, every slower step counted as
+    "collapsed" and was scaled back up to the old speed, for good.
+  - **The fix.** Once a whole history window (20 pairs) has been rescued in a
+    row, the streak is handed back to the raw step lengths and the current
+    step is kept.
+  - **KITTI raw, pure-Rust deep frontend:**
+    - 0020: VO 30.2 → 10.2 m, GNSS-fused 24.4 → 4.8 m;
+    - odometry 09: VO 122.3 → 18.5 m;
+    - 0027 and odometry 01's 260-frame highway slice, which the rescue was
+      tuned on, are byte-identical.
+  - `online_slam_stereo_vo_kitti_demo` also gains
+    `--motion-scale-rescue-max-inlier-ratio` (docs/gnss_fusion.md).
+
 - **A manual run of the release workflow takes its release notes from its
   branch's `CHANGELOG.md`** (normally `main`) instead of the tag's, so a
   rerun keeps later edits such as 0.4.0's highlights; `notes_ref` still

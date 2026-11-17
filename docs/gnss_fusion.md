@@ -315,7 +315,23 @@ What this shows:
   `--motion-scale-rescue-min-translation-ratio 0` turns off that collapse
   branch. It is used for all three drives above. On 0027 the default run
   fired no rescue at all, so its VO is unchanged; 0018 was run only with the
-  flag. The frontend default is not changed here.
+  flag.
+  - **Fixed in the frontend default (2026-11-17).** The rescue now releases
+    a streak once it has rescued a whole history window in a row
+    (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on
+    by default). At that point the history it judges against holds only its
+    own outputs.
+  - With the new default, 0020 rescues 21 pairs instead of 308: VO 30.2 →
+    10.2 m (9.8 m with the rescue off), fused 24.4 → 4.8 m.
+  - Odometry 09 (raw 0033) had the same lock-in, 1,312 pairs in a row: VO
+    122.3 → 18.5 m (length 2,449 → 1,722 m against 1,705 m), fused 81.5 →
+    4.7 m.
+  - Unchanged, byte for byte: 0027, and KITTI 01's 260-frame highway slice
+    that the rescue was tuned on (its longest streak is 17 pairs).
+  - Judging against the raw step lengths instead fixed 0020 too, but lost the
+    01 slice (5.88 → 10.34 m). There PnP is consistently short, and the
+    rescue has to hold the old scale.
+  - The table above keeps the flag, as measured.
 - **Levelling the VO with gravity (yaw-only alignment) does not help batch**
   (±0.04 m), only the sliding window.
 
