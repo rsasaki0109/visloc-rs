@@ -23,23 +23,26 @@ All notable changes to `visloc-rs` will be documented here.
     (incremental mapper). In the `colmap` shim, `feature_extractor` stores
     EXIF GPS and `pose_prior_mapper` / `mapper --Mapper.use_prior_position 1`
     use it. Both write `enu_origin.txt`.
-  - **ETH3D courtyard, simulated GPS** (σ 0.5/0.5/1 m, two 30 m jumps).
-    Camera centres against ground truth: median 0.48 m and RMSE 1.66 m.
-    Mapping without priors and aligning to the GPS afterwards gives median
-    1.66 m and RMSE 2.52 m.
-  - **Real onboard GNSS** (gravel-mine UAV set, 158 nadir images, low-cost
-    GNSS against a control-point-adjusted reference). Without priors the
-    block is bent (14 m shape RMSE). With the GNSS as priors at σ 1/2 m,
-    the shape error is 0.63 m and the bias-removed error 0.67 m; the GNSS
-    itself scatters 1.69 m. A too-large σ (5/10 m) leaves 8 m, so the CLIs
-    default to 1 m per axis, as COLMAP does.
+  - **Real onboard GNSS** (gravel-mine UAV set: 158 nadir images, low-cost
+    GNSS, a reference adjusted against surveyed control points).
+    - The GNSS scatters 1.71 m once its constant bias is removed.
+    - Mapping without priors and aligning afterwards gives 1.79 m, with one
+      camera 13 m off.
+    - With the GNSS as priors at σ 1/2 m, the bias-removed error is 0.71 m
+      (0.44 m at σ 0.5/1 m); at σ 5/10 m it is 1.43 m. So the CLIs default
+      to 1 m per axis, as COLMAP does.
+    - Cauchy loss (1.80 m) and outlier rejection (0.86 m) are worse here,
+      so plain least squares is the default.
+  - **ETH3D courtyard, simulated GPS** (σ 0.5/0.5/1 m, two 30 m jumps):
+    median camera error 0.52 m against 1.50 m for aligning afterwards. On
+    this small set the opt-ins have a lower RMSE but a worse median.
   - **GPS pair selection** (COLMAP `spatial_matcher`):
     `unordered_sfm_demo --pair-source spatial` and `colmap spatial_matcher`
     pair each image with its nearest fixes (50 neighbours within 100 m,
     horizontal; `visloc_io::gps_prior::spatial_pairs`). On the gravel set
-    they find all 448 pairs that exhaustive matching verifies, from 4,632
-    instead of 12,403 candidates, with verification at 31 s instead of 69 s
-    and the identical model. VLAD top-12 registers 41 images instead of 54.
+    they find 1,279 of the 1,280 pairs exhaustive matching verifies, from
+    4,632 instead of 12,403 candidates (verification 41 s instead of 96 s),
+    and register the same 147 images.
   - Details in docs/gps_prior_sfm.md.
 
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
