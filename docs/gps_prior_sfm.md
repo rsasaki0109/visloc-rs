@@ -84,6 +84,10 @@ cargo run --release --features image-io --example unordered_sfm_demo -- \
   --out-colmap sparse/
 ```
 
+The demo's built-in SIFT is the COLMAP-compatible one by default
+(`--sift-legacy` for the old extractor, whose integer-pixel keypoints give
+far weaker models: see the measurements below).
+
 | Flag | Meaning |
 |---|---|
 | `--gps-priors FILE` | priors from a file (instead of EXIF) |
@@ -217,56 +221,65 @@ dataset's calibration and scales them by 1/4 to 1218×812 pinhole JPEGs.
 `gravel_model_check.py` checks the calibration convention: it reprojects
 the dataset's own tie points at 0.29 px median.
 
-The mapper runs with `--sift-max-keypoints 8192 --verification-mode full
---match-ratio 0.9 --min-matches 15 --min-pnp-inliers 10`, candidate pairs
-from `--pair-source spatial` (or `--exhaustive` where marked), and the GNSS
-as `--gps-priors gps_priors.txt --gps-priors-format cartesian`.
-`scripts/gps_prior/eval_metric.py` scores it.
+The mapper runs with the default (COLMAP-compatible) SIFT and
+`--sift-max-keypoints 8192 --verification-mode full --min-matches 15
+--min-pnp-inliers 10`. Candidate pairs come from `--pair-source spatial`
+(or `--exhaustive` where marked), and the GNSS from `--gps-priors
+gps_priors.txt --gps-priors-format cartesian` at σ 1 / 2 m unless noted.
+`scripts/gps_prior/eval_metric.py` scores the result.
 
 Camera-centre error against the reference, in metres. "Bias removed" takes
-out the best translation, "shape" the best similarity. The priors runs
-register 147 of 158 images; the GNSS row is scored on those 147.
+out the best translation, "shape" the best similarity. Every run registers
+all 158 images.
 
 | Run | Absolute RMSE | Bias removed RMSE / median / max | Shape RMSE |
 |---|---:|---:|---:|
-| Onboard GNSS itself | 3.45 | 1.71 / 1.58 / 2.86 | – |
-| No priors (exhaustive, 142 images), Sim(3)-aligned to the GNSS afterwards | 3.51 | 1.79 / 1.06 / 13.04 | 1.78 |
-| GPS priors, σ 0.5 / 1 m | 3.03 | **0.44** / 0.35 / 1.69 | 0.41 |
-| GPS priors, σ 1 / 2 m | 3.08 | 0.71 / 0.45 / 4.28 | 0.69 |
-| GPS priors, σ 1 / 2 m, exhaustive pairs | 3.06 | 0.62 / 0.47 / 3.89 | 0.60 |
-| GPS priors, σ 1 / 2 m, Cauchy loss | 3.51 | 1.80 / 0.55 / 14.69 | 1.79 |
-| GPS priors, σ 1 / 2 m, alignment outliers dropped | 3.14 | 0.86 / 0.55 / 6.48 | 0.84 |
-| GPS priors, σ 2 / 4 m | 3.18 | 1.07 / 0.69 / 6.18 | 1.06 |
-| GPS priors, σ 5 / 10 m | 3.32 | 1.43 / 0.79 / 7.17 | 1.42 |
+| Onboard GNSS itself | 3.44 | 1.72 / 1.60 / 2.88 | – |
+| No priors (exhaustive), Sim(3)-aligned to the GNSS afterwards | 3.02 | 0.50 / 0.38 / 1.38 | 0.47 |
+| **GPS priors (default: Cauchy loss)** | 2.98 | **0.18** / 0.14 / 0.36 | **0.025** |
+| GPS priors, least squares | 2.98 | 0.18 / 0.15 / 0.35 | 0.025 |
+| GPS priors, σ 5 / 10 m | 2.98 | 0.18 / 0.15 / 0.35 | 0.025 |
 
-- **With priors at a realistic σ the shape is right** to 0.4–0.7 m, 2.4–3.9×
-  better than the GNSS's own scatter.
-  - The absolute error (about 3 m) is the GNSS's constant bias. Position
-    priors cannot see a bias: correcting it needs control points.
-  - Without priors, aligning afterwards leaves a camera 13 m off and a
-    bias-removed error no better than the GNSS itself.
-- **Plain least squares is the right default here.** The Cauchy loss lets
-  one camera drift 14.7 m from a fix that was right, and dropping outliers
-  is worse at every statistic.
-- **This set first exposed a SIFT bug.** The strips alternate heading by
-  about 165°, and the built-in SIFT was not rotation invariant (fixed: see
-  the CHANGELOG).
-  - Before the fix only 53–54 images registered: the westward strips, which
-    could not match the eastward ones.
-  - The prior-free model of those images was bent by 14 m (40 m at worst).
-    With σ 1 / 2 m priors their shape error was 0.63 m.
+- **The priors make the block's shape right to 2.5 cm.** Without them it is
+  0.47 m off, as monocular nadir blocks bend.
+- **The camera positions land 10× closer than the GNSS's own scatter**
+  (0.18 m against 1.72 m, bias removed).
+- **The absolute error (about 3 m) is the GNSS's constant bias.** Position
+  priors cannot see a bias; correcting it needs control points.
+- **The loss and σ hardly matter here.** The receiver has no jumps, and the
+  visual model is strong enough that a loose σ still straightens it.
+
+**With the legacy SIFT** (`--sift-legacy`, and `--match-ratio 0.9`) the same
+block behaves very differently.
+- The block exposed its rotation bug. The strips alternate heading by about
+  165°, and before the fix only the 53–54 images of the westward strips
+  registered; their prior-free model was bent by 14 m.
+- After the fix 147 images register, and the GPS priors reach a shape error
+  of 0.41–0.69 m (σ 0.5 / 1 m to 1 / 2 m).
+- That weaker model makes σ and the loss matter:
+
+| Legacy SIFT, σ | Least squares | Cauchy | Outliers dropped |
+|---|---:|---:|---:|
+| 0.5 / 1 m | 0.44 | | |
+| 1 / 2 m | 0.71 | 1.80 | 0.86 |
+| 2 / 4 m | 1.07 | | |
+| 5 / 10 m | 1.43 | | |
+
+(bias-removed RMSE in metres; no priors gives 1.79 m)
+
+**Matcher ratio.** Keep the default 0.8 with the COLMAP-compatible SIFT. At
+`--match-ratio 0.9` this repetitive gravel texture passed false matches:
+9,232 of 12,403 exhaustive pairs "verified", and the prior-free model came
+out 50 m off.
 
 ### Choosing σ
 
-A σ that is too large costs more than one that is too small.
-- At σ 0.5–1× the GNSS's real scatter the priors do best.
-- At 2–5× they still beat aligning afterwards, but give back most of the
-  gain (1.1 m, then 1.4 m). With the buggy SIFT, whose model was bent much
-  harder, 5× cost 8 m.
-
 Set σ to the receiver's real per-fix accuracy, or a little below it. The
 CLIs default to 1 m on every axis, as COLMAP's `pose_prior_mapper` does.
-A constant bias does not bend the model, so it is no reason to raise σ.
+- With a strong visual model σ barely matters.
+- With a weak one, a σ well above the real scatter gives back most of the
+  priors' gain (legacy-SIFT table above), while a smaller σ does not hurt.
+- A constant bias does not bend the model, so it is no reason to raise σ.
 
 Reproduce: download `mmc2.zip` (the text files) from the article's
 supplementary material and `Part3-RawImages.zip` (5.9 GB) from its Google
@@ -277,11 +290,11 @@ python3 scripts/gps_prior/gravel_prepare.py supp/ Part3-RawImages.zip gravel/ 4
 cargo run --release --features image-io --example unordered_sfm_demo -- \
   --feature-extractor sift --images-dir gravel/images --image-suffix .jpg \
   --width 1218 --height 812 --fx 1216.5643 --fy 1216.5643 --cx 609 --cy 406 \
-  --exhaustive --sift-max-keypoints 8192 --verification-mode full \
-  --match-ratio 0.9 --min-matches 15 --min-pnp-inliers 10 \
+  --pair-source spatial --sift-max-keypoints 8192 --verification-mode full \
+  --min-matches 15 --min-pnp-inliers 10 \
   --gps-priors gravel/gps_priors.txt --gps-priors-format cartesian \
   --gps-prior-std 1 --gps-prior-std-vertical 2 --out-colmap out_s1/
-python3 scripts/gps_prior/eval_metric.py gravel/truth.csv out_nopri:posthoc out_s1
+python3 scripts/gps_prior/eval_metric.py gravel/truth.csv out_s1
 ```
 
 ## GPS for pair selection (spatial matching)
@@ -299,28 +312,26 @@ colmap spatial_matcher --database_path db.db \
   [--SpatialMatching.ignore_z 1]
 ```
 
-Gravel-mine set, same flags as above, GPS priors at σ 1 / 2 m:
+Gravel-mine set, same flags as above (default SIFT), GPS priors at σ 1 / 2 m:
 
 | Candidate pairs | Candidates | Verified | Verification time | Registered | Bias removed RMSE |
 |---|---:|---:|---:|---:|---:|
-| Exhaustive | 12,403 | 1,280 | 96.1 s | 147 | 0.62 m |
-| **Spatial, 50 neighbours / 100 m (default)** | 4,632 | 1,279 | 40.8 s | 147 | 0.71 m |
-| Spatial, 20 neighbours | 1,827 | 1,118 | 23.6 s | 147 | 1.02 m |
-| VLAD top-12 (the demo's default) | 1,198 | 810 | 19.2 s | 140 | 0.59 m (on its 140) |
+| Exhaustive (no priors) | 12,403 | 2,781 | – | 158 | – |
+| **Spatial, 50 neighbours / 100 m (default)** | 4,632 | 2,748 | 386 s | 158 | 0.18 m |
+| VLAD top-12 (the demo's default) | 1,192 | 1,005 | 121 s | 158 | 0.18 m |
 
-- **Spatial pairs keep what exhaustive matching finds.** With the defaults
-  they find 1,279 of the 1,280 pairs that exhaustive matching verifies,
-  from 37 % of the candidates, and register the same 147 images.
-  - The 0.62 against 0.71 m is run-to-run variation from that one pair
-    and the mapper's order, not a loss of matches.
-- **20 neighbours** loses 162 verified pairs and leaves a worse model.
-- **VLAD retrieval** is the cheapest, but drops 470 of the verified pairs
-  and 7 images.
-  - With the SIFT before its rotation fix, VLAD registered 41 images where
-    spatial pairs registered 54.
-- The candidate count grows linearly with the number of images, where
-  exhaustive matching grows quadratically, so the saving grows with the
-  block.
+- **Spatial pairs keep what exhaustive matching finds.** They recover
+  2,748 of the 2,781 pairs it verifies, from 37 % of its candidates.
+- **On this block VLAD retrieval is as good and cheaper.** It verifies far
+  fewer pairs, but enough: the same 158 images and the same accuracy.
+  - With the legacy SIFT it was not (140 images against 147, and 41
+    against 54 before the rotation fix).
+  - Spatial pairs are the choice when retrieval is unreliable: weak or
+    repetitive texture, or images that look alike far apart.
+- The exhaustive run's time is left out: it ran alongside other jobs.
+  Candidates are a fair proxy for matching cost, and they grow linearly
+  with the number of images for spatial pairs, quadratically for
+  exhaustive matching.
 
 ## Limits
 

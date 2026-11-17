@@ -303,7 +303,20 @@
 //! `--import-matches-file` (or supplement file) adds COLMAP pair/index overlap
 //! columns to the CSV; `--import-verified-pairs-file` adds COLMAP verified
 //! inlier/configuration columns and may be combined with the raw import here.
-//! In `--feature-extractor sift` mode, `--sift-scale-adaptive-gradients`
+//! In `--feature-extractor sift` mode the built-in SIFT defaults to the
+//! VLFeat/COLMAP-compatible detector and descriptor, with `gsplat_photos`'
+//! settings: `--sift-vlfeat-compatible-detector
+//! --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations
+//! --sift-l1-root --sift-max-orientations 2 --sift-prefer-larger-scale`,
+//! magnification 3. `--sift-legacy` restores the historical extractor
+//! (integer-pixel keypoints). A flag only it supports
+//! (`--sift-affine`, `--sift-multi-anisotropy`,
+//! `--sift-scale-adaptive-gradients`, `--sift-standard-orientations`,
+//! `--sift-append-descriptor-magnification`, `--gpu-sift`) selects it too,
+//! with a note. An explicit `--sift-vlfeat-compatible-*` flag selects only
+//! what it names, as before. The remaining paragraph describes the
+//! individual switches.
+//! `--sift-scale-adaptive-gradients`
 //! enables the opt-in VLFeat-style scale-space gradient descriptor path;
 //! leaving it out preserves the historical direct-source gradients.
 //! `--sift-vlfeat-compatible-descriptor` instead selects the complete

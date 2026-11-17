@@ -13,36 +13,36 @@ All notable changes to `visloc-rs` will be documented here.
     and periodic BA first aligns the model to the priors with a robust,
     deterministic Sim(3). It then adds a covariance-weighted camera-centre
     prior in place of the anchor/scale-anchor gauge. The model comes out
-    metric in local ENU. As in COLMAP, every prior stays in the BA. A
-    Cauchy loss and outlier rejection are opt-in. Without priors, or with
-    fewer than three, nothing changes.
+    metric in local ENU.
+    - Every prior stays in the BA, under a Cauchy loss by default (COLMAP
+      uses least squares; `--gps-prior-least-squares` restores that).
+    - Without priors, or with fewer than three, nothing changes.
   - **Inputs.** `visloc_io::gps_prior` reads EXIF GPS and a
     `NAME LAT LON ALT [STD_H [STD_V]]` (or Cartesian) prior file and
     converts fixes to ENU (exact WGS84).
-  - **CLIs.** `unordered_sfm_demo --gps-priors FILE | --gps-priors-from-exif`
-    (incremental mapper). In the `colmap` shim, `feature_extractor` stores
-    EXIF GPS and `pose_prior_mapper` / `mapper --Mapper.use_prior_position 1`
-    use it. Both write `enu_origin.txt`.
+  - **CLIs.**
+    - `unordered_sfm_demo --gps-priors FILE | --gps-priors-from-exif`
+      (incremental mapper).
+    - In the `colmap` shim, `feature_extractor` stores EXIF GPS, and
+      `pose_prior_mapper` / `mapper --Mapper.use_prior_position 1` use it.
+    - Both write `enu_origin.txt`. σ defaults to 1 m per axis, as COLMAP.
   - **Real onboard GNSS** (gravel-mine UAV set: 158 nadir images, low-cost
-    GNSS, a reference adjusted against surveyed control points).
-    - The GNSS scatters 1.71 m once its constant bias is removed.
-    - Mapping without priors and aligning afterwards gives 1.79 m, with one
-      camera 13 m off.
-    - With the GNSS as priors at σ 1/2 m, the bias-removed error is 0.71 m
-      (0.44 m at σ 0.5/1 m); at σ 5/10 m it is 1.43 m. So the CLIs default
-      to 1 m per axis, as COLMAP does.
-    - Cauchy loss (1.80 m) and outlier rejection (0.86 m) are worse here,
-      so plain least squares is the default.
+    GNSS, a reference adjusted against surveyed control points; default
+    SIFT).
+    - The block's shape is right to 2.5 cm with priors, 0.47 m without.
+    - Camera positions land at 0.18 m once the GNSS's constant bias is
+      removed; the GNSS itself scatters 1.72 m.
+    - Least squares, Cauchy and σ 5/10 m are all equal there.
   - **ETH3D courtyard, simulated GPS** (σ 0.5/0.5/1 m, two 30 m jumps):
-    median camera error 0.52 m against 1.50 m for aligning afterwards. On
-    this small set the opt-ins have a lower RMSE but a worse median.
+    38/38 registered, RMSE 0.30 m with the Cauchy default, 1.21 m with
+    least squares.
   - **GPS pair selection** (COLMAP `spatial_matcher`):
     `unordered_sfm_demo --pair-source spatial` and `colmap spatial_matcher`
     pair each image with its nearest fixes (50 neighbours within 100 m,
-    horizontal; `visloc_io::gps_prior::spatial_pairs`). On the gravel set
-    they find 1,279 of the 1,280 pairs exhaustive matching verifies, from
-    4,632 instead of 12,403 candidates (verification 41 s instead of 96 s),
-    and register the same 147 images.
+    horizontal; `visloc_io::gps_prior::spatial_pairs`).
+    - On the gravel set they recover 2,748 of the 2,781 pairs exhaustive
+      matching verifies, from 37 % of the candidates.
+    - VLAD retrieval was as good and cheaper there with the default SIFT.
   - Details in docs/gps_prior_sfm.md.
 
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
@@ -149,6 +149,25 @@ All notable changes to `visloc-rs` will be documented here.
   software Vulkan device (docs/docker.md).
 
 ### Changed
+
+- **Built-in SIFT defaults to the COLMAP-compatible extractor**
+  (`unordered_sfm_demo --feature-extractor sift` and the `colmap` shim's
+  `feature_extractor`).
+  - The VLFeat/COLMAP-compatible detector (subpixel localization) and
+    descriptor, with `gsplat_photos`' settings (L1-root, magnification 3,
+    two orientations, larger scales first).
+  - The historical extractor reports integer-pixel keypoints. It stays
+    behind `--sift-legacy`, and is also used, with a note, when a flag
+    only it supports is given (`--sift-affine`, `--gpu-sift`, ...).
+  - **ETH3D courtyard** (38 photos): 38 registered instead of 23, and the
+    prior-free shape error is 0.088 m instead of 2.15 m.
+  - **Gravel-mine drone block:** 158 registered instead of 142–147, and
+    the shape error with GPS priors is 2.5 cm instead of 0.6 m.
+  - **The `colmap` shim** registers 37 of the 38 courtyard photos instead
+    of 12.
+  - The shim keeps the legacy extractor with `--SiftExtraction.use_gpu 1`.
+  - Feature extraction is slower: CPU only, with more keypoints matched.
+
 
 - **A manual run of the release workflow takes its release notes from its
   branch's `CHANGELOG.md`** (normally `main`) instead of the tag's, so a
