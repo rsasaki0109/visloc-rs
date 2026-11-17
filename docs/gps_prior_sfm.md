@@ -309,7 +309,7 @@ Gravel-mine set, same flags as above, GPS priors at σ 1 / 2 m:
   from 37 % of the candidates, and register the same 147 images.
   - The 0.62 against 0.71 m is run-to-run variation from that one pair
     and the mapper's order, not a loss of matches.
-- **20 neighbours** loses 160 verified pairs and leaves a worse model.
+- **20 neighbours** loses 162 verified pairs and leaves a worse model.
 - **VLAD retrieval** is the cheapest, but drops 470 of the verified pairs
   and 7 images.
   - With the SIFT before its rotation fix, VLAD registered 41 images where
