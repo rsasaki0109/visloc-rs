@@ -4,7 +4,36 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-17
+
+Breaking: `GpuMatcher::match_pairs` returns a `Result` (see Changed). Not
+published to crates.io or PyPI; the GitHub release carries the binaries.
+
 ### Added
+
+- **Package publishing, opt-in: the release workflow can publish the crates
+  to crates.io and the `visloc` Python package to PyPI**
+  (`.github/workflows/release.yml`). Only a manual run with `publish`
+  ticked does it; a `v*` tag push still creates just the GitHub release and
+  binaries. Nothing has been published yet.
+  - **crates.io.** The `crates` job checks the tag against the workspace
+    version, verify-builds every crate (`cargo package --workspace`), and
+    uploads the eighteen crates in dependency order with
+    `scripts/publish_crates.sh`. The script skips versions already on
+    crates.io, so a rerun resumes a partial publish, and it waits out
+    crates.io's rate limit on new crates (the first release takes about two
+    hours).
+  - **PyPI.** Wheels for CPython 3.10–3.14 on Linux x86_64 / aarch64
+    (manylinux), Windows x64 and macOS arm64, plus an sdist, built with
+    maturin, smoke-tested with the bindings' pytest suite, uploaded by
+    trusted publishing and attached to the GitHub release.
+  - Publishing needs a one-time setup: a `CARGO_REGISTRY_TOKEN` secret and a
+    PyPI pending publisher (docs/publishing.md, "Publishing to crates.io and
+    PyPI"). Without the token the `crates` job skips itself with a notice.
+  - `scripts/check_release_metadata.sh` now also checks that the Python
+    bindings carry the workspace version, and
+    `tests/test_ci_release_gate.py` that the publish order in the script,
+    `scripts/package_check.sh` and `docs/publishing.md` agree.
 
 - **The ROS 2 nodes are tested against ROS 2 Lyrical** (Ubuntu 26.04), with
   both Fast DDS 3.6 and Cyclone DDS 11.0, on one host. The binaries are
