@@ -14,10 +14,9 @@ rejected there.
 
 ## Current status (2026-10-27)
 
-- Latest release: **0.3.0** (tagged, with prebuilt binaries). 0.3.1 was cut
-  in the CHANGELOG but never tagged; main is at **0.4.0** (CHANGELOG cut,
-  2026-11-17). Releases are GitHub releases with binaries; crates.io / PyPI
-  publishing is opt-in and not done
+- Latest release: **0.4.0** (tagged 2026-11-17, a GitHub release with
+  prebuilt binaries; 0.3.1 was cut in the CHANGELOG but never tagged).
+  crates.io / PyPI publishing is opt-in and not done
   ([`docs/publishing.md`](docs/publishing.md)). See
   [`CHANGELOG.md`](CHANGELOG.md).
 - Moving to a local GPU machine: the handovers are
