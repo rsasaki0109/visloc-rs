@@ -32,6 +32,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
+# Mesa's Vulkan drivers warn on every start without a runtime directory.
+ENV XDG_RUNTIME_DIR=/tmp
 COPY --from=build /out/ /usr/local/bin/
 COPY LICENSE-MIT LICENSE-APACHE /usr/share/doc/visloc-rs/
 WORKDIR /data
