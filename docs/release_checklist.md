@@ -32,6 +32,8 @@
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
 - After pushing the `v*` tag, confirm the `release` workflow created the GitHub release and attached the Linux, Windows and macOS archives (or run it by hand with the tag).
+- After pushing the `v*` tag, confirm the `crates` job published every crate to crates.io and the `pypi` job published the `visloc` wheels and sdist (`docs/publishing.md`, "Automated Release"); rerun the workflow by hand with **publish** ticked to resume a partial publish.
+- Confirm `bindings/python/Cargo.toml` carries the workspace version (`scripts/check_release_metadata.sh`).
 - Confirm `docs/publishing.md` matches workspace dependencies and publish order.
 - Check package metadata, docs.rs metadata, and crate contents with `scripts/package_check.sh` when package details are changed independently of the full local gate.
 - For crates that depend on other `visloc-*` crates, run `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` in publish order after their internal dependencies are available from the target registry.

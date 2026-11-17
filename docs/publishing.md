@@ -87,12 +87,73 @@ works before the first crates.io release.
 
 ## Release Steps
 
-1. Confirm `CHANGELOG.md` is up to date.
-2. Confirm `README.md`, `docs/interfaces.md`, `docs/api_stability.md`, `docs/colmap_compatibility.md`, and `docs/migration.md` describe the current public API.
-3. Run `scripts/check.sh`.
-4. Tag the release only after the main branch CI passes.
-5. Publish with `cargo publish --workspace`, or crate by crate in the order listed above.
-6. When publishing crate by crate, wait until each internal crate is available from the registry before publishing the next dependent crate.
+1. Bump `version` in the root `Cargo.toml` (`[package]`, `[workspace.package]`
+   and every internal `visloc-*` dependency requirement) and in
+   `bindings/python/Cargo.toml`; `scripts/check_release_metadata.sh` fails
+   while they disagree.
+2. Confirm `CHANGELOG.md` is up to date, with a `## <version> - <date>` section.
+3. Confirm `README.md`, `docs/interfaces.md`, `docs/api_stability.md`, `docs/colmap_compatibility.md`, and `docs/migration.md` describe the current public API.
+4. Run `scripts/check.sh`.
+5. Tag the release only after the main branch CI passes, and push the tag
+   (`git tag v<version> && git push origin v<version>`). The `release`
+   workflow does the rest (next section).
+
+## Automated Release
+
+A `v*` tag push runs `.github/workflows/release.yml`:
+
+| Job | What it does |
+| --- | --- |
+| `release` | Creates the GitHub release from the tag's `CHANGELOG.md` section. |
+| `binaries` | Attaches prebuilt Linux, Windows and macOS command-line binaries. |
+| `crates` | Checks that the tag matches the workspace version, verify-builds every crate (`cargo package --workspace`), then uploads them in publish order with `scripts/publish_crates.sh`. |
+| `wheels`, `sdist` | Builds the `visloc` Python wheels (CPython 3.10–3.14 on Linux x86_64 / aarch64 manylinux, Windows x64 and macOS arm64) and the sdist with maturin, and smoke-tests a wheel with the bindings' pytest suite. |
+| `pypi` | Uploads the wheels and the sdist to PyPI and attaches them to the GitHub release. |
+
+`scripts/publish_crates.sh` skips every crate whose version is already on
+crates.io, so a failed or cancelled run is resumed by running the workflow by
+hand (Actions → release → Run workflow, with the tag and **publish** ticked).
+`scripts/publish_crates.sh --dry-run` lists what it would upload.
+
+**The first crates.io release takes about two hours.** crates.io lets an
+account create only a few new crates in a burst and then one every few
+minutes; the script waits for the time crates.io names after each HTTP 429.
+Later releases only update existing crates and finish in minutes.
+
+### One-time setup
+
+Until this is done the `crates` job skips itself with a notice, and the
+`pypi` job fails, so the GitHub release and binaries are unaffected.
+
+**crates.io.**
+
+1. Create an API token at <https://crates.io/settings/tokens> with the
+   `publish-new` and `publish-update` scopes. (crates.io's trusted
+   publishing cannot create a crate, so the first release needs a token.)
+2. Add it to the repository as the Actions secret `CARGO_REGISTRY_TOKEN`
+   (Settings → Secrets and variables → Actions).
+3. Optional, after the first release: configure trusted publishing on each
+   crate's crates.io settings page (repository `rsasaki0109/visloc-rs`,
+   workflow `release.yml`), set the repository variable
+   `CRATES_IO_TRUSTED_PUBLISHING` to `true`, and delete the
+   `CARGO_REGISTRY_TOKEN` secret. The workflow then exchanges a short-lived
+   token over OIDC (`rust-lang/crates-io-auth-action`) instead.
+
+**PyPI.** No token is stored; the `pypi` job uses trusted publishing.
+
+1. At <https://pypi.org/manage/account/publishing/> add a pending publisher:
+   project `visloc`, owner `rsasaki0109`, repository `visloc-rs`, workflow
+   `release.yml`, environment `pypi`.
+2. Optional: in the repository's Settings → Environments, give the `pypi`
+   environment required reviewers so every upload waits for an approval.
+
+### Publishing by hand
+
+`cargo publish --workspace` (cargo 1.90 or newer) publishes everything in
+dependency order, or publish crate by crate in the order listed above,
+waiting until each internal crate is available from the registry before
+publishing the next dependent crate. For the wheels, see
+`bindings/python/README.md` (`maturin build --release`).
 
 ## Notes
 

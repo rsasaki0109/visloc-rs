@@ -76,6 +76,13 @@ for package in $packages; do
     echo "Checking publish/package references: $package"
     grep_normalized "$package" docs/publishing.md
     grep_normalized "$package" scripts/package_check.sh
+    grep_normalized "^$package$" scripts/publish_crates.sh
 done
+
+# The release workflow publishes the Python wheels at the bindings' own
+# version; keep it on the workspace version.
+workspace_version="$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)"
+echo "Checking the Python bindings version: $workspace_version"
+grep_normalized "^version = \"$workspace_version\"$" bindings/python/Cargo.toml
 
 echo "Release metadata checks passed"
