@@ -151,35 +151,32 @@ frame, with no alignment after mapping.
 
 | Run | Registered | RMSE | Median | Max |
 |---|---:|---:|---:|---:|
-| No priors, then Sim(3)-aligned to the GPS (the jumps removed by hand) | 23 | 2.20 m | 1.50 m | 5.95 m |
-| **GPS priors in the BA (default)** | 25 | 3.15 m | **0.52 m** | 8.65 m |
-| GPS priors, Cauchy loss | 26 | 1.60 m | 1.19 m | 3.67 m |
-| GPS priors, alignment outliers dropped | 21 | **1.44 m** | 0.80 m | 4.54 m |
+| No priors, then Sim(3)-aligned to the GPS (the jumps removed by hand) | 38 | **0.26 m** | 0.23 m | 0.61 m |
+| **GPS priors in the BA (default: Cauchy loss)** | 38 | 0.30 m | **0.22 m** | 0.74 m |
+| GPS priors, least squares | 36 | 1.21 m | 0.92 m | 3.13 m |
+| GPS priors, alignment outliers dropped | 37 | 0.86 m | 0.55 m | 3.19 m |
+| GPS priors, least squares, `--sift-legacy` (the old defaults) | 25 | 3.15 m | 0.52 m | 8.65 m |
 
-- **Default.** 15 of the 25 cameras end closer to the truth than their own
-  GPS fix (1.1 m RMS).
-  - DSC_0296 (6.0 m) and one cluster, DSC_0314–0316 (7–9 m), stay
-    misplaced: the 800-pixel visual model puts them wrong, and the priors
-    do not pull them all the way back.
-  - The 30 m jump on DSC_0289 leaves its camera 0.33 m from the truth: the
-    visual terms outweigh one bad fix.
-- **The two opt-ins** weaken every prior that disagrees with the model.
-  - No camera ends as far off (at most 3.7 m and 4.5 m).
-  - Fewer cameras beat their fix: 11 of 26 and 11 of 21.
-- **This small set is fragile.** Which cameras register, and which of them
-  go wrong, change from run to run. With the SIFT before its rotation fix
-  (see the gravel section), the default had the best RMSE and both opt-ins
-  the worst. The default is chosen on real GNSS below.
+- **The visual model is very good.** Without priors its shape error after
+  the best similarity is 0.088 m (2.15 m with the legacy SIFT). So
+  aligning it afterwards to the GPS, with the two jumps removed by hand,
+  is hard to beat.
+- **The Cauchy default gets within 4 cm of that without being told about
+  the jumps.** DSC_0289 and DSC_0301, whose fixes are 30 m off, end 0.27 m
+  and 0.21 m from the truth.
+- **Least squares lets the two jumps bend the model** (1.21 m) and loses
+  two cameras. Dropping the alignment's outliers does better, but not well.
+- **With the legacy SIFT the model itself was the problem**: 25 of 38
+  cameras and a 7–9 m misplaced cluster.
 
 `colmap` shim on the same fixes (images upscaled 2× to the shim's ETH3D
 1600-pixel camera, `pose_prior_mapper --prior_position_std_x 0.5
---prior_position_std_y 0.5 --prior_position_std_z 1`): its plain matcher
-registers only 11–12 of 38. Against the ground truth that gives RMSE
-0.77 m with `exhaustive_matcher` and 0.45 m with `spatial_matcher`
-(10 neighbours). Those cameras span only a few metres, so 1 m GPS noise
-leaves the scale 16–22 % off even where the shape is right (0.04 m after
-the best similarity). **GPS fixes the scale only when the cameras spread
-much farther than σ.**
+--prior_position_std_y 0.5 --prior_position_std_z 1`):
+- It registers 37 of 38, against 11–12 with the legacy SIFT.
+- Against the ground truth that is RMSE 1.48 m, median 0.78 m.
+- The shim's simpler mapper and fixed camera are the limit.
+- `spatial_matcher` proposes all 703 pairs here (the scene is smaller than
+  100 m), so it gives the same model.
 
 Reproduce (needs numpy and Pillow, plus the 500 MB ETH3D archive for the
 ground truth):
