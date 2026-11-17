@@ -1654,6 +1654,23 @@ def cmd_solve(a):
     est_cams, n_seg = phys_est, max(a.ext_segments, 1)
     if a.ext_seg_seconds > 0:  # segments of about this length instead of a fixed count
         n_seg = max(int(np.ceil((kf_ns[-1] - kf_ns[0]) * 1e-9 / a.ext_seg_seconds)), 1)
+    fixed = None  # the calibration a solve before ended with (--init-states), held as it is with --fix-calib
+    if getattr(a, "init_states_file", None):
+        st = np.load(a.init_states_file)
+        a = argparse.Namespace(**vars(a))
+        a.init_states = {"kf_ns": st["kf_ns"], "vel": st["vel"], "bias": st["bias"], "r_ic": st["r_ic"],
+                         "foc": st["foc"], "n_seg": int(st["ext_segments"]),
+                         **({k: st["gm"][sl] for k, sl in (("gyro_m", slice(0, 9)), ("accel_m", slice(9, 18)),
+                                                           ("gyro_temp", slice(18, 24)))} if "gm" in st else {})}
+        if a.fix_calib:
+            fixed = a.init_states
+            if not np.array_equal(fixed["kf_ns"], kf_ns):
+                raise SystemExit("--fix-calib needs the states of a solve over the same keyframes")
+            # nothing of the calibration is estimated; the time segments are the states' own
+            phys_est, est_cams, n_seg = [], [], fixed["n_seg"]
+            a.est_focal = a.est_gyro_m = a.est_accel_m = a.est_gyro_bias_temp = a.est_gyro_scale_temp = False
+    elif getattr(a, "fix_calib", False):
+        raise SystemExit("--fix-calib needs --init-states")
     obs_kf, obs_cam = np.concatenate(obs_kf), np.concatenate(obs_cam)
     seg_of_kf = np.minimum(np.arange(len(kf_ns)) * n_seg // len(kf_ns), n_seg - 1)
     if n_seg > 1:
@@ -1748,6 +1765,9 @@ def cmd_solve(a):
             r_ic[c_ * n_seg:(c_ + 1) * n_seg] = init["r_ic"][last]
             if a.est_focal:
                 rp.foc[c_ * n_seg:(c_ + 1) * n_seg] = init["foc"][last]
+        if fixed is not None:  # every camera and time segment as the solve before ended
+            r_ic[:] = fixed["r_ic"]
+            rp.foc[:] = fixed["foc"]
         rp.set_focal(rp.foc)
     t_ic = np.array([c["t_ic"] for c in cams])
     # consecutive time segments of a camera rotate alike, within --ext-seg-sigma
@@ -2049,7 +2069,7 @@ def cmd_solve(a):
         # r_ic per physical camera and time segment (camera c, segment s at c * ext_segments + s)
         np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic,
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
-                 active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
+                 active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber, gm=gm)
     return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
             "gyro_m": gm[:9].copy(), "accel_m": gm[9:18].copy(), "gyro_temp": gm[18:24].copy()}
 
@@ -2539,6 +2559,12 @@ def main():
         s.add_argument("--gyro-scale-temp-sigma", type=float, default=3e-5, help="its prior (per degree)")
         s.add_argument("--save-states", action="store_true",
                        help="also write <out>_states.npz (keyframes, landmarks, observations) for loop-correct")
+        s.add_argument("--init-states", dest="init_states_file", default=None,
+                       help="<out>_states.npz of a solve before: start from its velocities, biases, camera "
+                            "rotations, focal lengths and IMU response")
+        s.add_argument("--fix-calib", action="store_true",
+                       help="with --init-states, hold that calibration as it is (cameras per time segment, IMU "
+                            "response) and estimate the trajectory only: SLAM Dunk's final refinement")
 
     solve_args(sub.add_parser("solve", help="batch VI bundle adjustment"))
     o = sub.add_parser("online", help="causal mode: solve windows of the most recent keyframes as the data arrives")

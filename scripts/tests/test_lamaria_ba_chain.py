@@ -171,6 +171,27 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(low[-3:], ["rematch", "rematch loops", "solve with the new matches"])
         self.assertEqual(chain.result("w", 4, rematch=True), Path("w/ba3.tum"))
 
+    def test_the_final_refinement_holds_the_last_solves_calibration(self):
+        for rematch, last, last_work in ((True, "ba3", "w/rematch"), (False, "ba2", "w")):
+            p = {name: [str(c) for c in cmd]
+                 for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4,
+                                                    rematch=rematch, final=True)}
+            self.assertEqual(list(p)[-1], "final refinement")
+            before = p[list(p)[-2]]
+            self.assertIn("--save-states", before)
+            self.assertEqual(value(before, "--out"), str(Path(f"w/{last}.tum")))
+            fin = p["final refinement"]
+            self.assertEqual(value(fin, "--work"), str(Path(last_work)))
+            self.assertEqual(value(fin, "--vio"), str(Path(f"w/{last}.tum")))
+            self.assertEqual(value(fin, "--out"), str(Path("w/ba4.tum")))
+            self.assertEqual(value(fin, "--init-states"), str(Path(f"w/{last}_states.npz")))
+            self.assertIn("--fix-calib", fin)
+            self.assertIn("--loops", fin)
+            self.assertEqual(chain.result("w", 2, rematch=rematch, final=True), Path("w/ba4.tum"))
+        self.assertNotIn("--save-states", plan(2)["pass solve with the revisits"])
+        with self.assertRaises(ValueError):
+            chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4, low_light_pass=False, final=True)
+
 
 FAKE_BA = textwrap.dedent('''
     import sys
