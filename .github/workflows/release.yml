@@ -184,6 +184,16 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
+      # Tags from before the Dockerfile existed (v0.4.0 and older) build
+      # their own sources with this run's Dockerfile.
+      - name: Take the Dockerfile from this run's commit if the tag has none
+        shell: bash
+        run: |
+          if [ ! -f Dockerfile ]; then
+            git fetch --depth=1 origin "$GITHUB_SHA"
+            git checkout FETCH_HEAD -- Dockerfile .dockerignore
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
