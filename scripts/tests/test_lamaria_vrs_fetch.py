@@ -15,6 +15,19 @@ import lamaria_vrs_fetch as fetch  # noqa: E402
 CAM, IMU, GPS = (1201, 1), (1202, 1), (281, 1)
 
 
+try:
+    import zstandard
+except ImportError:
+    zstandard = None
+
+
+def compress(data):
+    """One zstd frame, by the `zstd` command or the zstandard module."""
+    if shutil.which("zstd"):
+        return subprocess.run(["zstd", "-q", "-c"], input=data, capture_output=True, check=True).stdout
+    return zstandard.ZstdCompressor().compress(data)
+
+
 def records():
     """(record type, stream, size) in file order: configuration and state first, then interleaved data."""
     out = [(fetch.CONFIGURATION, s, 40) for s in (CAM, IMU, GPS)] + [(fetch.STATE, s, 20) for s in (CAM, IMU, GPS)]
@@ -28,7 +41,7 @@ def vrs_file(path):
     recs = records()
     disk = b"".join(struct.pack(fetch.DISK_RECORD, float(i), size, rt, sid[0], sid[1])
                     for i, (rt, sid, size) in enumerate(recs))
-    packed = subprocess.run(["zstd", "-q", "-c"], input=disk, capture_output=True, check=True).stdout
+    packed = compress(disk)
     streams = [CAM, IMU, GPS]
     body = struct.pack("<I", len(streams)) + b"".join(struct.pack("<iH", *s) for s in streams)
     body += struct.pack("<I", len(recs)) + packed
@@ -45,7 +58,7 @@ def vrs_file(path):
     return blob, first_user
 
 
-@unittest.skipUnless(shutil.which("zstd"), "needs the zstd command")
+@unittest.skipUnless(shutil.which("zstd") or zstandard, "needs the zstd command or the zstandard module")
 class FetchTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

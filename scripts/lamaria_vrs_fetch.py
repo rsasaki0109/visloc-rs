@@ -13,7 +13,7 @@ full size, which projectaria_tools then opens like the whole recording (lamaria_
 up to 31 GB, comes down to 6-35 MB.
 
 SRC can also be a local VRS file: the same records are copied, to check that the sparse copy reads like the whole.
-The index is zstd-compressed; the `zstd` command must be on PATH. See docs/lamaria_gps.md.
+The index is zstd-compressed: the `zstd` command on PATH reads it, or else the zstandard module. See docs/lamaria_gps.md.
 """
 import argparse
 import os
@@ -37,6 +37,15 @@ def first_user_offset(header):
     return struct.unpack(FILE_HEADER, header[:struct.calcsize(FILE_HEADER)])[7]
 
 
+def decompress(data):
+    """The zstd frame at the start of data: by the `zstd` command, or the zstandard module without it."""
+    import shutil
+    if shutil.which("zstd"):
+        return subprocess.run(["zstd", "-d", "-c"], input=data, capture_output=True).stdout
+    import zstandard
+    return zstandard.ZstdDecompressor().decompressobj().decompress(data)
+
+
 def parse_index(head):
     """The records the head's index lists, in file order: (offset, size, record type, (type id, instance id))."""
     first_user = first_user_offset(head)
@@ -50,7 +59,7 @@ def parse_index(head):
     n_records = struct.unpack("<I", body[pos:pos + 4])[0]
     # zstd writes the whole index, then exits with 1 on the bytes after its frame ("unsupported format"): check the
     # length instead.
-    raw = subprocess.run(["zstd", "-d", "-c"], input=body[pos + 4:], capture_output=True).stdout
+    raw = decompress(body[pos + 4:])
     size = struct.calcsize(DISK_RECORD)
     if len(raw) < size * n_records:
         raise ValueError(f"index decompressed to {len(raw)} bytes, {size * n_records} expected")
