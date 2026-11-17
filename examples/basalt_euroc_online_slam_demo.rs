@@ -121,6 +121,10 @@ struct Args {
     mapper_queue_capacity: usize,
     no_urgent_keyframes: bool,
     imu_seed_klt: bool,
+    /// `--mono`: replay cam0 + IMU only (monocular-inertial VIO,
+    /// `docs/mono_inertial_vio.md`). The mapper then has a one-camera rig
+    /// and builds its landmarks from temporal matches alone.
+    mono: bool,
     /// Restores the legacy diagnostic MargData LM path (per-trial landmark
     /// re-factorization + pre-solve diagnostic linearization).  Off by default:
     /// the compact path is byte-identical in trajectory and MargData bytes, so
@@ -297,7 +301,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::create_dir_all(&args.out_dir)?;
 
-    let dataset = EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)?;
+    let dataset = if args.mono {
+        EurocSensorDataset::open_monocular(&args.euroc_dir, &args.calibration, &args.config)?
+    } else {
+        EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)?
+    };
     // Urgent keyframe spacing is on by default in this demo: a keyframe may be
     // taken two frames after the last one when fewer than half of the tracks
     // are connected. On 11 EuRoC sequences it improved ATE on 7 sequences
@@ -729,7 +737,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let aggregate = aggregate.lock().expect("lock");
     let peak_rss_bytes = peak_working_set_bytes();
 
-    let summary = json!({
+    let mut summary = json!({
         "schema": "basalt.online_mapper.run.v1",
         "lean_marg_data": !args.retained_marg_diagnostics,
         "final_optimize_iterations_budget": args.num_opt_iter,
@@ -805,6 +813,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "propagated_frame_count": propagated_frame_count,
         "peak_working_set_bytes": peak_rss_bytes,
     });
+    // Only in `--mono`, so the stereo summary keeps its keys.
+    if args.mono {
+        summary["camera_mode"] = json!("mono_inertial");
+    }
 
     // `trajectory_online.tum` is the full-frame propagated trajectory (every
     // VIO frame, keyframe corrections applied) -- the file the evaluation
@@ -1159,6 +1171,7 @@ impl Args {
         let mut mapper_queue_capacity = DEFAULT_MAPPER_QUEUE_CAPACITY;
         let mut no_urgent_keyframes = false;
         let mut imu_seed_klt = false;
+        let mut mono = false;
         let mut retained_marg_diagnostics = false;
         let mut num_opt_iter = 10usize;
         let mut match_top_k = None;
@@ -1251,6 +1264,7 @@ impl Args {
                 }
                 "--no-urgent-keyframes" => no_urgent_keyframes = true,
                 "--imu-seed-klt" => imu_seed_klt = true,
+                "--mono" => mono = true,
                 "--pipeline-capacity" => {
                     pipeline_capacity = next(&mut arguments, &option)?
                         .to_string_lossy()
@@ -1436,6 +1450,7 @@ impl Args {
             mapper_queue_capacity,
             no_urgent_keyframes,
             imu_seed_klt,
+            mono,
             retained_marg_diagnostics,
             num_opt_iter,
             match_top_k,
@@ -1469,7 +1484,7 @@ impl Args {
          [--match-top-k N] [--frontend-stats-csv <path>] [--save-map DIR] \
          [--equalize-local-contrast] [--smooth-features SIGMA] [--detector-quality Q] \
          [--extra-descriptors] \
-         [--projection-rematch] [--local-mapping] [--imu-seed-klt] \
+         [--projection-rematch] [--local-mapping] [--imu-seed-klt] [--mono] \
          [--projection-host-window N] [--projection-radius PX] \
          [--loop-match-max-rot-error DEG] \
          [--loop-closure-factors] [--loop-closure-min-corr N] [--loop-closure-weight W] \
@@ -1633,6 +1648,16 @@ mod tests {
         let args = Args::parse(base.into_iter().chain(["--imu-seed-klt"]).map(Into::into))
             .expect("parses");
         assert!(args.imu_seed_klt);
+    }
+
+    #[test]
+    fn mono_defaults_off_and_can_be_enabled() {
+        let base = ["--euroc-dir", "dataset", "--calibration", "calib.json"];
+        let args = Args::parse(base.map(Into::into)).expect("parses");
+        assert!(!args.mono);
+        let args = Args::parse(base.into_iter().chain(["--mono"]).map(Into::into)).expect("parses");
+        assert!(args.mono);
+        assert!(Args::usage().contains("--mono"));
     }
 
     #[test]

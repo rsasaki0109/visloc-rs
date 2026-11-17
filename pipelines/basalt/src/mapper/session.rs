@@ -1101,6 +1101,19 @@ impl NfrMapper {
             .calibration
             .as_ref()
             .ok_or(NfrMapperStereoError::MissingCalibration)?;
+        // Monocular rig: no stereo pair exists, so the stage is a no-op and
+        // every landmark comes from temporal matches (`match_all`).
+        if calibration.cameras.len() < 2 {
+            return Ok(NfrMapperStereoReport {
+                input_timestamp_count: self.img_data.len(),
+                attempted_timestamp_count: 0,
+                missing_feature_timestamp_count: 0,
+                raw_match_count: 0,
+                essential_inlier_count: 0,
+                accepted_pair_count: 0,
+                total_pair_count: self.feature_matches.len(),
+            });
+        }
         let camera_0 = calibration
             .camera_to_imu(0)
             .ok_or(NfrMapperStereoError::MissingCamera { camera_id: 0 })?;
