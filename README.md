@@ -115,7 +115,8 @@ complete local quality gate (`fmt`, `clippy`, `test`, `doc`).
 **Prebuilt binaries:** each [release](https://github.com/rsasaki0109/visloc-rs/releases)
 attaches `gsplat_photos`, `visloc_mvs`, `colmap_incremental_mapper` and
 `visloc_web` for Linux x86_64, Windows x86_64 and macOS (Apple silicon), so
-the photo pipeline runs without a Rust toolchain.
+the photo pipeline runs without a Rust toolchain. The same tools come as a
+container image, `ghcr.io/rsasaki0109/visloc-rs` ([docs/docker.md](docs/docker.md)).
 
 ## Structure from Motion
 

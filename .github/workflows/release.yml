@@ -3,11 +3,15 @@ name: release
 # A version tag's release: the GitHub release with prebuilt command-line
 # binaries: `gsplat_photos` (photos to SfM, splats and a mesh), `visloc_mvs`
 # (dense multi-view stereo), `colmap_incremental_mapper` and `visloc_web`
-# (the browser UI, which runs the `gsplat_photos` next to it). A `v*` tag
-# push builds them; a manual run rebuilds an existing tag's release. A
-# manual run with `binaries` unticked and `notes_ref: main` only rewrites
-# the release notes from main's CHANGELOG.md, e.g. after they were cut down
-# to highlights.
+# (the browser UI, which runs the `gsplat_photos` next to it), and the same
+# tools as a container image on ghcr.io (`ghcr.io/rsasaki0109/visloc-rs`,
+# see docs/docker.md). A `v*` tag push builds them all.
+#
+# A manual run works on an existing tag. Its release notes come from the
+# CHANGELOG.md of the branch it runs from (main), so that later edits such
+# as cutting a section down to highlights reach the release; `notes_ref`
+# picks another branch or tag. `binaries` and `image` choose what is rebuilt;
+# with both unticked a manual run only rewrites the release notes.
 #
 # Publishing the Rust crates to crates.io and the `visloc` Python wheels to
 # PyPI is opt-in: only a manual run with `publish` ticked does it, never a
@@ -23,11 +27,15 @@ on:
         description: "Existing tag to build and attach binaries to (e.g. v0.3.0)"
         required: true
       notes_ref:
-        description: "Branch or tag to read CHANGELOG.md from for the release notes (default: the tag itself)"
+        description: "Branch or tag to read CHANGELOG.md from for the release notes (default: the branch this run uses)"
         required: false
         default: ""
       binaries:
         description: "Build and attach the binaries"
+        type: boolean
+        default: true
+      image:
+        description: "Build and push the container image to ghcr.io"
         type: boolean
         default: true
       publish:
@@ -40,7 +48,8 @@ permissions:
 
 env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
-  NOTES_REF: ${{ github.event.inputs.notes_ref }}
+  # A tag push reads the tag's CHANGELOG.md; a manual run reads its branch's.
+  NOTES_REF: ${{ github.event.inputs.notes_ref || (github.event_name == 'workflow_dispatch' && github.ref_name) || '' }}
   GH_TOKEN: ${{ github.token }}
 
 jobs:
@@ -161,6 +170,68 @@ jobs:
       - name: Upload to the release
         shell: bash
         run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  image:
+    name: Container image (ghcr.io)
+    if: github.event_name == 'push' || inputs.image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` follows the newest version tag only, so rebuilding an older
+      # tag's image does not move it back.
+      - name: Is this the newest version tag?
+        id: newest
+        shell: bash
+        run: |
+          newest="$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -n 1)"
+          echo "newest version tag: $newest"
+          if [ "$newest" = "$TAG" ]; then echo "latest=true"; else echo "latest=false"; fi >> "$GITHUB_OUTPUT"
+
+      # <version>, <major>.<minor> and (see above) latest. The image's
+      # org.opencontainers.image.source label links the package to this
+      # repository, so it shows under the repository's Packages.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=${{ steps.newest.outputs.latest }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
+          labels: |
+            org.opencontainers.image.title=visloc-rs
+            org.opencontainers.image.description=gsplat_photos, visloc_mvs, colmap_incremental_mapper and visloc_web from visloc-rs
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   crates:
     name: Publish to crates.io
