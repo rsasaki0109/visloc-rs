@@ -33,6 +33,13 @@ All notable changes to `visloc-rs` will be documented here.
     the shape error is 0.63 m and the bias-removed error 0.67 m; the GNSS
     itself scatters 1.69 m. A too-large σ (5/10 m) leaves 8 m, so the CLIs
     default to 1 m per axis, as COLMAP does.
+  - **GPS pair selection** (COLMAP `spatial_matcher`):
+    `unordered_sfm_demo --pair-source spatial` and `colmap spatial_matcher`
+    pair each image with its nearest fixes (50 neighbours within 100 m,
+    horizontal; `visloc_io::gps_prior::spatial_pairs`). On the gravel set
+    they find all 448 pairs that exhaustive matching verifies, from 4,632
+    instead of 12,403 candidates, with verification at 31 s instead of 69 s
+    and the identical model. VLAD top-12 registers 41 images instead of 54.
   - Details in docs/gps_prior_sfm.md.
 
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**

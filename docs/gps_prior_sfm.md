@@ -264,6 +264,39 @@ cargo run --release --features image-io --example unordered_sfm_demo -- \
 python3 scripts/gps_prior/eval_metric.py gravel/truth.csv out_nopri:posthoc out_s1
 ```
 
+## GPS for pair selection (spatial matching)
+
+With fixes available, candidate pairs can come from them instead of from
+image retrieval, as in COLMAP's `spatial_matcher`. Each image with a fix
+is paired with up to 50 other fixes within 100 m, by horizontal distance.
+Images without a fix get their VLAD top-k pairs.
+
+```bash
+unordered_sfm_demo ... --gps-priors-from-exif --pair-source spatial \
+  [--spatial-max-neighbors 50] [--spatial-max-distance 100] [--spatial-use-z]
+colmap spatial_matcher --database_path db.db \
+  [--SpatialMatching.max_num_neighbors 50] [--SpatialMatching.max_distance 100] \
+  [--SpatialMatching.ignore_z 1]
+```
+
+Gravel-mine set, same flags as above, GPS priors at σ 1 / 2 m:
+
+| Candidate pairs | Candidates | Verified | Verification time | Registered | Shape RMSE |
+|---|---:|---:|---:|---:|---:|
+| Exhaustive | 12,403 | 448 | 68.9 s | 54 | 0.63 m |
+| **Spatial, 50 neighbours / 100 m (default)** | 4,632 | 448 | 31.0 s | 54 | 0.63 m |
+| Spatial, 20 neighbours | 1,827 | 386 | 16.6 s | 47 | 2.04 m |
+| VLAD top-12 (the demo's default) | 1,257 | 356 | 13.8 s | 41 | 1.09 m |
+
+- With the defaults, spatial pairs find every pair that exhaustive
+  matching verifies and give the identical model, from 37 % of the
+  candidates.
+- VLAD retrieval on these repetitive nadir textures misses pairs and
+  registers 13 fewer images.
+- The candidate count grows linearly with the number of images, where
+  exhaustive matching grows quadratically, so the saving grows with the
+  block.
+
 ## Limits
 
 - Incremental mapper only. `unordered_sfm_demo` refuses the GPS flags with

@@ -247,6 +247,12 @@
 //! COLMAP's Cauchy loss on the priors, and `--gps-prior-reject-outliers`
 //! drops the alignment's outliers from the BA instead.
 //!
+//! `--pair-source spatial` (with GPS priors) proposes candidate pairs like
+//! COLMAP's `spatial_matcher`: each image with a fix is paired with up to
+//! `--spatial-max-neighbors` (default 50) other fixes within
+//! `--spatial-max-distance` (default 100 m), by horizontal distance unless
+//! `--spatial-use-z`; images without a fix get their VLAD top-k pairs.
+//!
 //! `--next-image-policy auto|count|visibility` controls the next-PnP ranking.
 //! The demo default is the conservative `auto` policy: it tries visibility
 //! first, compares the historical count ranking whenever visibility is
@@ -518,7 +524,9 @@ use visloc_rs::{
     NextImagePolicy, PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
 };
 
-use visloc_rs::io::gps_prior::{read_exif_gps, GpsPriorSet, PriorCoordinates, PriorFrame};
+use visloc_rs::io::gps_prior::{
+    read_exif_gps, spatial_pairs, GpsPriorSet, PriorCoordinates, PriorFrame,
+};
 use visloc_rs::slam::incremental_sfm::log_process_memory;
 use visloc_rs::slam::incremental_sfm::{estimate_position_prior_alignment, SfmPositionPriors};
 use visloc_rs::verified_pair_snapshot::{
@@ -763,6 +771,11 @@ struct Args {
     gps_prior_reject_outliers: bool,
     /// Cauchy loss scale on the normalised prior residual (`None`: least squares).
     gps_prior_loss_scale: Option<f64>,
+    /// `--pair-source spatial`: neighbours per image, their largest distance
+    /// (prior units), and whether the distance includes the vertical axis.
+    spatial_max_neighbors: usize,
+    spatial_max_distance: f64,
+    spatial_use_z: bool,
     /// Diagnostic-only: import observation membership from a COLMAP
     /// `points3D.txt`, while ignoring its XYZ/color/error and camera poses.
     /// The sibling `images.txt` supplies IMAGE_ID/name and point2D-row
@@ -2088,6 +2101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PairSource::TemporalPyramid => "temporal pyramid + VLAD fill",
                 PairSource::VocabTree => "vocab-tree",
                 PairSource::Transitive => "transitive (vocab-tree base)",
+                PairSource::Spatial => "GPS spatial + VLAD for images without a fix",
             }
         },
     );

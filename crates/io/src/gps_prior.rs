@@ -340,6 +340,56 @@ impl GpsPriorSet {
     }
 }
 
+/// Each position's nearest `max_neighbors` others within `max_distance`
+/// (horizontal when `ignore_z`), as sorted, unique `(i, j)` with `i < j`.
+/// The neighbour relation is not symmetric; a pair is kept when either side
+/// selects it, as in COLMAP's `spatial_matcher` (default 50 neighbours,
+/// 100 m, horizontal).
+pub fn spatial_pairs(
+    positions: &[Option<Point3<f64>>],
+    max_neighbors: usize,
+    max_distance: f64,
+    ignore_z: bool,
+) -> Vec<(usize, usize)> {
+    let located: Vec<(usize, Point3<f64>)> = positions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            p.filter(|p| p.coords.iter().all(|v| v.is_finite()))
+                .map(|p| (i, p))
+        })
+        .collect();
+    let distance2 = |a: &Point3<f64>, b: &Point3<f64>| {
+        let d = a - b;
+        if ignore_z {
+            d.x * d.x + d.y * d.y
+        } else {
+            d.norm_squared()
+        }
+    };
+    let max2 = max_distance * max_distance;
+    let mut pairs = Vec::new();
+    let mut near: Vec<(f64, usize)> = Vec::with_capacity(located.len());
+    for &(i, p) in &located {
+        near.clear();
+        near.extend(
+            located
+                .iter()
+                .filter(|&&(j, _)| j != i)
+                .map(|&(j, q)| (distance2(&p, &q), j))
+                .filter(|&(d2, _)| d2 <= max2),
+        );
+        let k = max_neighbors.min(near.len());
+        if k < near.len() {
+            near.select_nth_unstable_by(k, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        }
+        pairs.extend(near[..k].iter().map(|&(_, j)| (i.min(j), i.max(j))));
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
 /// The GPS fix in a JPEG's EXIF (`GPSLatitude`/`GPSLongitude` with their
 /// references, and `GPSAltitude`/`GPSAltitudeRef` when present), or `None`
 /// when the file has no EXIF GPS block or it is malformed.
@@ -653,5 +703,36 @@ c 35.0 139.001 10.0 2.0 4.0
         let x = priors[0].unwrap();
         assert!(x.position.coords.norm() < 1e-6);
         assert!(x.std_dev.z.is_infinite());
+    }
+}
+
+#[cfg(test)]
+mod spatial_pair_tests {
+    use super::spatial_pairs;
+    use nalgebra::Point3;
+
+    #[test]
+    fn spatial_pairs_take_nearest_within_distance_symmetrically() {
+        // A line of fixes 10 m apart, one far away, one without a fix; the
+        // middle one is high up, which only the 3D distance sees.
+        let p = |x: f64, z: f64| Some(Point3::new(x, 0.0, z));
+        let positions = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(20.0, 500.0),
+            p(30.0, 0.0),
+            p(1000.0, 0.0),
+            None,
+        ];
+        let horizontal = spatial_pairs(&positions, 1, 100.0, true);
+        // Nearest neighbour of each (ties by index): 0-1, 1-0, 2-1, 3-2.
+        assert_eq!(horizontal, vec![(0, 1), (1, 2), (2, 3)]);
+        let two = spatial_pairs(&positions, 2, 15.0, true);
+        assert_eq!(two, vec![(0, 1), (1, 2), (2, 3)]);
+        let wide = spatial_pairs(&positions, 10, 25.0, true);
+        assert_eq!(wide, vec![(0, 1), (0, 2), (1, 2), (1, 3), (2, 3)]);
+        let with_z = spatial_pairs(&positions, 10, 25.0, false);
+        assert_eq!(with_z, vec![(0, 1), (1, 3)]);
+        assert!(spatial_pairs(&[None, None], 5, 100.0, true).is_empty());
     }
 }

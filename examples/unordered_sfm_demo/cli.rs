@@ -66,6 +66,12 @@ pub(super) enum PairSource {
     /// base pass, then expands transitively for
     /// [`TRANSITIVE_ROUNDS`] rounds.
     Transitive,
+    /// COLMAP's `spatial_matcher`: each image with a GPS fix
+    /// (`--gps-priors` / `--gps-priors-from-exif`) is paired with its nearest
+    /// fixes (`--spatial-max-neighbors`, `--spatial-max-distance`,
+    /// horizontal distance unless `--spatial-use-z`); images without a fix
+    /// get their VLAD top-k pairs.
+    Spatial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,8 +104,9 @@ impl std::str::FromStr for PairSource {
             "temporal-pyramid" => Ok(Self::TemporalPyramid),
             "vocab-tree" => Ok(Self::VocabTree),
             "transitive" => Ok(Self::Transitive),
+            "spatial" => Ok(Self::Spatial),
             other => Err(format!(
-                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|temporal-pyramid|vocab-tree|transitive)"
+                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|temporal-pyramid|vocab-tree|transitive|spatial)"
             )),
         }
     }
@@ -529,6 +536,9 @@ where
     let mut gps_prior_std_vertical = 1.0f64;
     let mut gps_prior_max_error: Option<f64> = None;
     let mut gps_prior_reject_outliers = false;
+    let mut spatial_max_neighbors = 50usize;
+    let mut spatial_max_distance = 100.0f64;
+    let mut spatial_use_z = false;
     let mut gps_prior_loss_scale: Option<f64> = None;
     let mut diagnose_colmap_track_membership: Option<PathBuf> = None;
     let mut pose_guided_track_splitting = false;
@@ -627,6 +637,13 @@ where
                 gps_prior_max_error = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
             }
             "--gps-prior-reject-outliers" => gps_prior_reject_outliers = true,
+            "--spatial-max-neighbors" => {
+                spatial_max_neighbors = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--spatial-max-distance" => {
+                spatial_max_distance = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--spatial-use-z" => spatial_use_z = true,
             "--gps-prior-robust-loss" => {
                 gps_prior_loss_scale =
                     Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE)
@@ -1575,10 +1592,19 @@ where
             "--gps-priors / --gps-priors-from-exif currently require --mapper incremental".into(),
         );
     }
+    if pair_source == PairSource::Spatial && gps_priors_file.is_none() && !gps_priors_from_exif {
+        return Err("--pair-source spatial needs --gps-priors or --gps-priors-from-exif".into());
+    }
+    if pair_source == PairSource::Spatial && exhaustive {
+        return Err("--pair-source spatial cannot be combined with --exhaustive".into());
+    }
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if spatial_max_neighbors == 0 || !positive(spatial_max_distance) {
+        return Err("--spatial-max-neighbors / --spatial-max-distance must be positive".into());
+    }
     if gps_priors_file.is_some() && gps_priors_from_exif {
         return Err("--gps-priors and --gps-priors-from-exif are exclusive".into());
     }
-    let positive = |v: f64| v.is_finite() && v > 0.0;
     if !positive(gps_prior_std) || !positive(gps_prior_std_vertical) {
         return Err("--gps-prior-std / --gps-prior-std-vertical must be positive".into());
     }
@@ -2315,6 +2341,9 @@ where
         gps_prior_max_error,
         gps_prior_reject_outliers,
         gps_prior_loss_scale,
+        spatial_max_neighbors,
+        spatial_max_distance,
+        spatial_use_z,
         diagnose_colmap_track_membership,
     };
     validate_persistent_match_worker_args(&parsed)?;
