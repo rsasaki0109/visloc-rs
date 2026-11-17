@@ -107,11 +107,19 @@ A `v*` tag push runs `.github/workflows/release.yml`:
 | --- | --- |
 | `release` | Creates the GitHub release from the tag's `CHANGELOG.md` section. |
 | `binaries` | Attaches prebuilt Linux, Windows and macOS command-line binaries. |
+| `image` | Builds the `Dockerfile` and pushes `ghcr.io/rsasaki0109/visloc-rs:<version>` and `:<major>.<minor>`, plus `:latest` when the tag is the newest version tag ([docker.md](docker.md)). |
 
-To rewrite an existing release's notes, for example after its CHANGELOG
-section was cut down to highlights on `main`, run the workflow by hand with
-the tag, `notes_ref` set to `main` and **binaries** unticked. The release
-notes then come from `main`'s `CHANGELOG.md`, and nothing is rebuilt.
+A manual run (Actions → release → Run workflow) works on an existing tag.
+Its release notes come from the `CHANGELOG.md` of the branch it runs from,
+normally `main`, so later edits to a version's section (for example cutting
+it down to highlights) reach the release; `notes_ref` picks another branch
+or tag. **binaries** and **image** choose what is rebuilt: with both
+unticked, a manual run only rewrites the release notes.
+
+The first image push creates the `visloc-rs` package on ghcr.io as
+**private**. Make it public once, under the package's settings (Package
+settings → Danger Zone → Change visibility → Public), so that
+`docker pull` works without logging in.
 
 ## Publishing to crates.io and PyPI
 

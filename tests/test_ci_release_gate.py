@@ -88,7 +88,7 @@ class CiReleaseGateTests(unittest.TestCase):
         self.assertEqual(shell_package_list("scripts/publish_crates.sh"), documented)
         self.assertEqual(shell_package_list("scripts/package_check.sh"), documented)
 
-    def test_release_workflow_publishes_crates_and_wheels(self):
+    def test_release_workflow_publishes_packages(self):
         crates = release_job("crates")
         self.assertIn("cargo package --workspace", crates)
         self.assertIn("scripts/publish_crates.sh", crates)
@@ -99,6 +99,12 @@ class CiReleaseGateTests(unittest.TestCase):
         for os_name in ["ubuntu-latest", "windows-latest", "macos-latest"]:
             self.assertIn(os_name, wheels)
         self.assertIn("command: sdist", release_job("sdist"))
+
+        image = release_job("image")
+        self.assertIn("packages: write", image)
+        self.assertIn("ghcr.io/${{ github.repository }}", image)
+        self.assertIn("docker/build-push-action", image)
+        self.assertTrue((ROOT / "Dockerfile").is_file())
 
         pypi = release_job("pypi")
         self.assertIn("needs: [wheels, sdist]", pypi)

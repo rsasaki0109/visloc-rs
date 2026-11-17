@@ -4,6 +4,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **A container image: `ghcr.io/rsasaki0109/visloc-rs`.** `gsplat_photos`,
+  `visloc_mvs`, `colmap_incremental_mapper` and `visloc_web` on Debian 12,
+  built by the new `Dockerfile` and pushed by the release workflow's new
+  `image` job for each version tag (`:<version>`, `:<major>.<minor>`, and
+  `:latest` for the newest tag). The GPU paths use wgpu through Vulkan: with
+  `--gpus all` (NVIDIA Container Toolkit) on the GPU, otherwise on Mesa's
+  software Vulkan device (docs/docker.md).
+
+### Changed
+
+- **A manual run of the release workflow takes its release notes from its
+  branch's `CHANGELOG.md`** (normally `main`) instead of the tag's, so a
+  rerun keeps later edits such as 0.4.0's highlights; `notes_ref` still
+  picks another ref. A new `image` input chooses whether the image is
+  rebuilt.
+
 ## 0.4.0 - 2026-11-17
 
 ### Highlights
