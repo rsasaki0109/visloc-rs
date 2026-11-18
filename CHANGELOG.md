@@ -10,8 +10,10 @@ All notable changes to `visloc-rs` will be documented here.
   (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
   `basalt_euroc_online_slam_demo --save-map` writes, from the RGB images,
   their depth and a trajectory (the virtual-stereo VO), levelled by the
-  Kinect's accelerometer. `basalt_map_merge` merges fr1_room, fr1_desk2 and
-  fr1_desk at 7.4 cm RMSE against ground truth (docs/tum_rgbd_benchmark.md).
+  Kinect's accelerometer or, without one, the map's largest horizontal
+  plane. `basalt_map_merge` merges four parts of fr3_long_office_household,
+  each seeing one side of the desks, into the whole office at 13.1 cm RMSE
+  against ground truth (docs/tum_rgbd_benchmark.md).
 - **Map-merge GIFs** (`scripts/render_map_merge_gif.py`): separate SLAM maps
   growing in their own frames, then moved by the merge's transforms; with
   `--cloud`, RGB-D colour clouds (`scripts/rgbd_map_cloud.py`). EuRoC's five

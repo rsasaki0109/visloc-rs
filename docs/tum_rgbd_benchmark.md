@@ -102,67 +102,94 @@ stage are complementary, not independently additive.
 
 ## Several sessions in one map
 
-![Three TUM RGB-D sessions of one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd.gif)
+![Four sessions around one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd.gif)
 
-<sub>Data: [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) fr1_room, fr1_desk2 and fr1_desk (Sturm et al., IROS 2012), CC BY 4.0. Colours are the sequences' RGB images placed by their depth.</sub>
+<sub>Data: [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) fr3_long_office_household (Sturm et al., IROS 2012), CC BY 4.0. Colours are the RGB images placed by their depth.</sub>
 
-The fr1 sequences film one office. Each is mapped on its own, in its own
-frame, and `basalt_map_merge` merges the maps, as it merges the
-stereo-inertial SLAM's maps of EuRoC and OpenLORIS-Scene
-([basalt_map_localization.md](basalt_map_localization.md#merging-maps-of-several-flights)):
+fr3_long_office_household circles two desks in 87 s. Cut into four
+sessions of about 22 s, each sees one side of the desks: a session's map
+covers a quarter of the office, and only the merge makes the whole. No
+image is shared between sessions; neighbouring parts see some of the same
+places, opposite ones (1 and 3, 2 and 4) none. Each part is mapped on its
+own, in its own frame, and `basalt_map_merge` merges the maps, as it merges
+the stereo-inertial SLAM's maps of EuRoC and OpenLORIS-Scene
+([basalt_map_localization.md](basalt_map_localization.md#merging-maps-of-several-flights)).
+The parts come from one recording, not separate visits.
 
-1. **Trajectory.** The virtual-stereo VO above (`full_tv`, here with 1,024
-   SuperPoint keypoints on the CPU): ATE 5.33 cm on fr1_room, 4.67 cm on
-   fr1_desk2 and 2.27 cm on fr1_desk. Its frame is the first camera's.
+1. **Trajectory.** The virtual-stereo VO above (`full_tv`, 1,024 SuperPoint
+   keypoints on the CPU, every 2nd frame) on each part alone: ATE 1.9, 3.3,
+   1.5 and 1.5 cm for parts 1 to 4. Its frame is the part's first camera.
 2. **Map.** `examples/tum_rgbd_save_map.rs` turns the RGB images and depth
    into a map in the layout `basalt_euroc_online_slam_demo --save-map`
    writes: keyframes every 5 cm or 5°, the Basalt mapper's ORB on each
    (Shi-Tomasi corners, 256-bit descriptors), and a landmark at each
    corner's depth, tracked over the last 10 keyframes by projection and
    descriptor. Landmarks seen once are dropped.
-3. **Gravity.** The merge registers maps by a yaw and a translation, so each
-   map's world must have z up. The Kinect's accelerometer gives it: each
-   sample is turned into the camera frame (its x and y point the other way
-   from the optical frame's, which was read once off fr1_room's ground
-   truth), then into the world by the trajectory, and averaged over the
-   sequence. On fr1_room and fr1_desk, the ground truth's vertical is
-   1.8° and 3.1° from this up.
-4. **Merge.** `basalt_map_merge` as for the SLAM's maps. The colour clouds
-   of the GIF come from `scripts/rgbd_map_cloud.py --tum`.
+3. **Level.** The merge registers maps by a yaw and a translation, so each
+   map's world must have z up. Freiburg 3 records no accelerometer, so each
+   map is levelled by its largest horizontal plane (the floor or a desk
+   top; a RANSAC over the landmarks). The four parts come out 1.7–1.8° from
+   the ground truth's vertical. (On Freiburg 1 the Kinect's accelerometer
+   is used instead: averaged in the world over the sequence, 1.8° off on
+   fr1_room, where the plane gives 1.4°.)
+4. **Merge.** `basalt_map_merge`, adding each part next to one already in
+   the map: part 1, then 4, 3 and 2. The colour clouds of the GIF come from
+   `scripts/rgbd_map_cloud.py --tum`.
 
-| Added map (in order) | Its frame vs fr1_room's | Keyframes localized | Residual |
+| Added map (in order) | Its frame vs part 1's | Keyframes localized | Residual |
 |---|---|---|---|
-| fr1_desk2 | 71.6°, 248 cm | 20 of 209 | 8.6 cm |
-| fr1_desk | 72.1°, 227 cm | 17 of 171 | 4.0 cm |
+| part 4 (65–87 s) | −3.0°, 141 cm | 45 of 82 | 3.1 cm |
+| part 3 (43–65 s) | 127.6°, 440 cm | 5 of 112 (4 agree) | 0.6 cm |
+| part 2 (22–43 s) | −171.4°, 426 cm | 3 of 99 | 0.3 cm |
 
-The merged map holds 751 keyframe images and 53,063 landmarks. Aligned to
-the ground truth by fr1_room's keyframes alone, the keyframe centres are
-at 7.4 cm RMSE (24.5 cm max): fr1_room 5.4, fr1_desk2 10.2 and fr1_desk
-7.0 cm, against 5.4, 4.6 and 2.4 cm for each trajectory aligned on its own.
+Parts 1 and 3, and 2 and 4, do not register with each other in either
+direction: they share no view. Of the 24 orders, 8 register all four parts.
 
-Few keyframes localize: TUM's handheld Kinect blurs most images, and a
-keyframe offers only its tracked corners. fr1_360 (turning in place, VO
-ATE 9.95 cm) and fr1_plant (close to one plant) register in none of the
-other maps, in any order.
+The merged map holds 415 keyframe images and 31,328 landmarks. Aligned to
+the ground truth by part 1's keyframes alone, the keyframe centres are at
+13.1 cm RMSE (34.7 cm max): part 1 1.9, part 4 3.1, part 3 11.3 and part 2
+23.7 cm, against 1.9, 1.4, 1.5 and 3.3 cm for each part aligned on its own.
+The error grows along the chain. Each registration is rigid, from a few
+keyframes, and every map's level is off by about 1.7° in its own
+direction, which a yaw and a translation cannot absorb: 2° over the 4 m
+between part 1 and part 2 is 14 cm.
+
+The fr1 sequences of one office (fr1_room, fr1_desk2, fr1_desk) merge
+too, at 7.4 cm RMSE, but fr1_room alone covers what the other two see, so
+the merge adds little.
 
 ```bash
-D=/path/to/tum   # rgbd_dataset_freiburg1_{room,desk2,desk}
-for s in room desk2 desk; do
-  TUM_MAX_KEYPOINTS=1024 scripts/run_tum_rgbd_benchmark.sh --seq-dir $D/rgbd_dataset_freiburg1_$s \
-    --out-dir runs/tum_$s --device cpu
-  target/release/examples/tum_rgbd_save_map --seq-dir $D/rgbd_dataset_freiburg1_$s \
-    --trajectory runs/tum_$s/full_tv/est.tum --out runs/fr1_${s}_map \
-    --keyframe-m 0.05 --keyframe-deg 5 --match-radius-px 8 --track-keyframes 10
-  python3 scripts/rgbd_map_cloud.py --map runs/fr1_${s}_map \
-    --tum $D/rgbd_dataset_freiburg1_$s --out runs/fr1_${s}_cloud.npz --every 3 --max-depth 3
+F=/path/to/rgbd_dataset_freiburg3_long_office_household
+C="--fx 535.4 --fy 539.2 --cx 320.1 --cy 247.6"
+# part:start frame (every 2nd frame from there, 323 of them)
+for p in 1:0 2:646 3:1292 4:1938; do n=${p%%:*}; start=${p##*:}
+  python3 scripts/export_tum_rgbd_virtual_stereo.py --seq-dir $F --out-dir runs/lo$n/feat \
+    --device cpu --max-keypoints 1024 --baseline 0.1 $C --min-depth 0.3 \
+    --start-frame $start --frames 323 --frame-stride 2
+  frames=$(ls runs/lo$n/feat/frame_*_left_features.txt | wc -l)
+  target/release/examples/stereo_vo_external_deep_files --features-dir runs/lo$n/feat \
+    --frames $frames --out-dir runs/lo$n/vo $C --width 640 --height 480 --baseline 0.1 \
+    --min-depth 0.3 --relative-pose-mode pnp --online-ba --online-ba-window 30 \
+    --online-ba-trigger-every 10 --loop-closure --loop-min-frame-gap 50 \
+    --loop-min-path-length 2 --loop-min-similarity 0.2 --loop-two-view-ba
+  python3 scripts/kitti_poses_to_tum.py runs/lo$n/vo/vo_poses.txt \
+    runs/lo$n/feat/frame_timestamps.txt runs/lo$n/est.tum
+  target/release/examples/tum_rgbd_save_map --seq-dir $F --trajectory runs/lo$n/est.tum \
+    --out runs/lo${n}_map --keyframe-m 0.05 --keyframe-deg 5 --match-radius-px 8 \
+    --track-keyframes 10 $C --k1 0 --k2 0 --p1 0 --p2 0 --k3 0
+  python3 scripts/rgbd_map_cloud.py --map runs/lo${n}_map --tum $F \
+    --tum-camera 535.4 539.2 320.1 247.6 0 0 0 0 0 --out runs/lo${n}_cloud.npz \
+    --every 2 --max-depth 3
 done
-target/release/examples/basalt_map_merge --base runs/fr1_room_map \
-  --add runs/fr1_desk2_map --add runs/fr1_desk_map --out runs/fr1_merged
-python3 scripts/render_map_merge_gif.py --merged runs/fr1_merged \
-  $(for s in room desk2 desk; do echo --map runs/fr1_${s}_map --cloud runs/fr1_${s}_cloud.npz \
-    --label fr1_$s; done) \
+target/release/examples/basalt_map_merge --base runs/lo1_map --add runs/lo4_map \
+  --add runs/lo3_map --add runs/lo2_map --out runs/lo_merged
+python3 scripts/render_map_merge_gif.py --merged runs/lo_merged \
+  --map runs/lo1_map --cloud runs/lo1_cloud.npz --label "part 1" --note "0–22 s of the recording" \
+  --map runs/lo4_map --cloud runs/lo4_cloud.npz --label "part 4" --note "65–87 s" \
+  --map runs/lo3_map --cloud runs/lo3_cloud.npz --label "part 3" --note "43–65 s" \
+  --map runs/lo2_map --cloud runs/lo2_cloud.npz --label "part 2" --note "22–43 s" \
   --max-points 60000 --point-size 2 --unit session --place office --fill 0.6 \
-  --title "Multi-session mapping: three RGB-D sessions, one map" \
+  --title "Multi-session mapping: four sessions around one office, one map" \
   --out docs/assets/map_merge_tum_rgbd.gif
 ```
 

@@ -20,6 +20,11 @@
 //!   by the trajectory's rotation at its time, and averaged over the whole
 //!   sequence, where the motion's own accelerations cancel. The map's world
 //!   is the trajectory's, rotated so this mean points up.
+//!   Sequences without accelerometer samples (Freiburg 3) are levelled by
+//!   the map's largest horizontal plane instead (a floor or a desk top): a
+//!   RANSAC over the landmarks, among planes within 30 degrees of the
+//!   cameras' mean up, refitted to its inliers. On fr1_room it is 1.4
+//!   degrees from the ground truth's vertical, the accelerometer 1.8.
 //! - **Keyframes.** The first frame, then each frame that has moved
 //!   `--keyframe-m` or turned `--keyframe-deg` from the last keyframe.
 //! - **Features.** The Basalt mapper's ORB on each keyframe's grey image:
@@ -34,7 +39,8 @@
 //!   dropped, as the SLAM's map export drops single-view ones. A landmark's
 //!   descriptor is its observations' medoid.
 //!
-//! The camera is Freiburg 1's (FULL_OPENCV, `--fx` ... `--k3` to override).
+//! The camera is Freiburg 1's (FULL_OPENCV, `--fx` ... `--k3` to override;
+//! Freiburg 3's images are already undistorted, so pass zero coefficients).
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -206,6 +212,73 @@ fn interpolate(stamps: &[f64], poses: &[SE3], t: f64) -> Option<SE3> {
     ))
 }
 
+/// The rotation taking `up` to +z.
+fn levelling(up: &Vector3<f64>) -> UnitQuaternion<f64> {
+    Rotation3::rotation_between(up, &Vector3::z())
+        .map(|rotation| UnitQuaternion::from_rotation_matrix(&rotation))
+        .unwrap_or_else(UnitQuaternion::identity)
+}
+
+/// The normal (towards `camera_up`) and inlier count of the plane through
+/// most `points` within `tolerance` metres, among planes whose normal lies
+/// within `max_tilt` of `camera_up`: a RANSAC over point triples
+/// (deterministic), refitted to its inliers by least squares.
+fn horizontal_plane(
+    points: &[Vector3<f64>],
+    camera_up: &Vector3<f64>,
+    tolerance: f64,
+    max_tilt: f64,
+) -> Option<(Vector3<f64>, usize)> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % points.len() as u64) as usize
+    };
+    let inliers_of = |normal: &Vector3<f64>, offset: f64| {
+        points
+            .iter()
+            .filter(|point| (normal.dot(point) - offset).abs() < tolerance)
+            .collect::<Vec<_>>()
+    };
+    let mut best: Option<(Vector3<f64>, f64, usize)> = None;
+    for _ in 0..2000 {
+        let (a, b, c) = (points[next()], points[next()], points[next()]);
+        let Some(mut normal) = (b - a).cross(&(c - a)).try_normalize(1e-9) else {
+            continue;
+        };
+        if normal.dot(camera_up) < 0.0 {
+            normal = -normal;
+        }
+        if normal.angle(camera_up) > max_tilt {
+            continue;
+        }
+        let count = inliers_of(&normal, normal.dot(&a)).len();
+        if best.is_none_or(|(_, _, best_count)| count > best_count) {
+            best = Some((normal, normal.dot(&a), count));
+        }
+    }
+    let (normal, offset, _) = best?;
+    // Refit: the smallest principal axis of the inliers.
+    let inliers = inliers_of(&normal, offset);
+    let mean = inliers.iter().copied().sum::<Vector3<f64>>() / inliers.len() as f64;
+    let covariance = inliers
+        .iter()
+        .map(|point| (*point - mean) * (*point - mean).transpose())
+        .sum::<nalgebra::Matrix3<f64>>();
+    let eigen = covariance.symmetric_eigen();
+    let smallest = eigen.eigenvalues.imin();
+    let mut refitted = eigen.eigenvectors.column(smallest).into_owned();
+    if refitted.dot(camera_up) < 0.0 {
+        refitted = -refitted;
+    }
+    Some((refitted, inliers.len()))
+}
+
 fn hamming(a: &[u8; 32], b: &[u8; 32]) -> u32 {
     a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
@@ -258,7 +331,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Gravity: the accelerometer's mean specific force, in the world.
-    let accel = read_rows(&args.seq_dir.join("accelerometer.txt"), 4)?;
+    let accel_path = args.seq_dir.join("accelerometer.txt");
+    let accel = if accel_path.exists() {
+        read_rows(&accel_path, 4)?
+    } else {
+        Vec::new()
+    };
     let mut up = Vector3::zeros();
     let mut samples = 0;
     for row in &accel {
@@ -269,19 +347,20 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             samples += 1;
         }
     }
-    if samples == 0 {
-        return Err("no accelerometer sample within the trajectory".into());
-    }
-    let g = (up / samples as f64).norm();
-    let up = up.normalize();
-    let level = Rotation3::rotation_between(&up, &Vector3::z())
-        .map(|rotation| UnitQuaternion::from_rotation_matrix(&rotation))
-        .unwrap_or_else(UnitQuaternion::identity);
-    let aligned = SE3::new(level, Vector3::zeros());
-    println!(
-        "gravity: {samples} accelerometer samples, mean {g:.2} m/s^2, tilt {:.1} deg",
-        up.angle(&Vector3::z()).to_degrees()
-    );
+    // Without accelerometer samples (Freiburg 3 has none), the map is
+    // levelled after it is built, by its largest horizontal plane.
+    let by_accelerometer = samples > 0;
+    let aligned = if by_accelerometer {
+        let g = (up / samples as f64).norm();
+        let up = up.normalize();
+        println!(
+            "gravity: {samples} accelerometer samples, mean {g:.2} m/s^2, tilt {:.1} deg",
+            up.angle(&Vector3::z()).to_degrees()
+        );
+        SE3::new(levelling(&up), Vector3::zeros())
+    } else {
+        SE3::identity()
+    };
 
     let [fx, fy, cx, cy, k1, k2, p1, p2, k3] = args.intrinsics;
     let camera_id = localization_camera_id(0);
@@ -462,9 +541,49 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         map.landmarks.insert(id, landmark);
     }
 
+    let aligned = if by_accelerometer {
+        aligned
+    } else {
+        // The cameras' mean up (optical -y) picks which planes count as
+        // horizontal: within 30 degrees of it.
+        let camera_up = map
+            .keyframes
+            .values()
+            .filter_map(|keyframe| keyframe.frame.pose.as_ref())
+            .map(|pose| pose.camera_to_world().rotation * -Vector3::y())
+            .sum::<Vector3<f64>>()
+            .normalize();
+        let points = map
+            .landmarks
+            .values()
+            .map(|landmark| landmark.position.coords)
+            .collect::<Vec<_>>();
+        let (up, inliers) = horizontal_plane(&points, &camera_up, 0.015, 30f64.to_radians())
+            .ok_or("no horizontal plane found to level the map")?;
+        println!(
+            "level: plane of {inliers} of {} landmarks, {:.1} deg from the cameras' mean up",
+            points.len(),
+            up.angle(&camera_up).to_degrees()
+        );
+        let level = SE3::new(levelling(&up), Vector3::zeros());
+        for keyframe in map.keyframes.values_mut() {
+            if let Some(pose) = keyframe.frame.pose.as_mut() {
+                pose.world_to_camera = pose.world_to_camera.compose(&level.inverse());
+            }
+        }
+        for landmark in map.landmarks.values_mut() {
+            landmark.position = level.transform_point(&landmark.position);
+        }
+        level
+    };
+
     let mut summary = json!({
         "schema": map_files::MAP_SCHEMA,
-        "world_frame": "the trajectory's world, levelled by the accelerometer's gravity (z up)",
+        "world_frame": if by_accelerometer {
+            "the trajectory's world, levelled by the accelerometer's gravity (z up)"
+        } else {
+            "the trajectory's world, levelled by its largest horizontal plane (z up)"
+        },
         "feature_max_points": args.max_points,
         "cameras": [{
             "camera_id": camera_id,
