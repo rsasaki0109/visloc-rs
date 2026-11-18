@@ -167,7 +167,7 @@ registers in none of the six maps.
 | office1-6 | 9.4°, 354 cm | 202 of 372 | 2.2 cm | 5.6 cm |
 | office1-7 | −10.2°, 41 cm | 187 of 422 | 5.2 cm | 6.2 cm |
 
-`scripts/openloris_rgbd_cloud.py` places the D435i's colour images and
+`scripts/rgbd_map_cloud.py --openloris` places the D435i's colour images and
 aligned depth by a map's keyframe poses, and
 `scripts/render_map_merge_gif.py --cloud` animates the merge with those
 colour clouds:
@@ -178,8 +178,8 @@ target/release/examples/basalt_map_merge --base runs/o12e_map --add runs/o13e_ma
   --add runs/o14e_map --add runs/o11e_map --add runs/o16e_map --add runs/o17e_map \
   --min-inliers 10 --out runs/office_merged
 for k in 12 13 14 11 16 17; do
-  python3 scripts/openloris_rgbd_cloud.py --map runs/o${k}e_map \
-    --rgbd rgbd/office${k:0:1}-${k:1:1} --out runs/o${k}e_cloud.npz
+  python3 scripts/rgbd_map_cloud.py --map runs/o${k}e_map \
+    --openloris rgbd/office${k:0:1}-${k:1:1} --out runs/o${k}e_cloud.npz
 done
 python3 scripts/render_map_merge_gif.py --merged runs/office_merged \
   $(for k in 12 13 14 11 16 17; do echo --map runs/o${k}e_map --cloud runs/o${k}e_cloud.npz \

@@ -21,7 +21,7 @@ Inputs:
   --label NAME (repeated, optional)  one per --map; the map directory's
                         name otherwise
   --cloud FILE (repeated, optional)  one per --map: a colour point cloud in
-                        that map's frame (`openloris_rgbd_cloud.py`), drawn
+                        that map's frame (`rgbd_map_cloud.py`), drawn
                         in its own colours instead of the map's landmarks
 
 Example:
@@ -128,7 +128,7 @@ class Session:
         self.rgb = None
         if cloud is not None:
             # A colour cloud in the map's frame, timed from its first keyframe
-            # (openloris_rgbd_cloud.py).
+            # (rgbd_map_cloud.py).
             data = np.load(cloud)
             self.points = data["points"].astype(np.float64)
             self.rgb = data["colours"].astype(np.float64)
@@ -200,7 +200,7 @@ def main() -> int:
     parser.add_argument("--merged", type=Path, required=True)
     parser.add_argument("--label", action="append")
     parser.add_argument("--cloud", type=Path, action="append",
-                        help="per --map: a colour point cloud (.npz from openloris_rgbd_cloud.py) "
+                        help="per --map: a colour point cloud (.npz from rgbd_map_cloud.py) "
                              "drawn in its own colours instead of the map's landmarks")
     parser.add_argument("--note", action="append",
                         help="per --map: a panel note (default: its own frame and duration)")

@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Maps from TUM RGB-D sequences, merged across sessions**
+  (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
+  `basalt_euroc_online_slam_demo --save-map` writes, from the RGB images,
+  their depth and a trajectory (the virtual-stereo VO), levelled by the
+  Kinect's accelerometer. `basalt_map_merge` merges fr1_room, fr1_desk2 and
+  fr1_desk at 7.4 cm RMSE against ground truth (docs/tum_rgbd_benchmark.md).
+- **Map-merge GIFs** (`scripts/render_map_merge_gif.py`): separate SLAM maps
+  growing in their own frames, then moved by the merge's transforms; with
+  `--cloud`, RGB-D colour clouds (`scripts/rgbd_map_cloud.py`). EuRoC's five
+  Machine Hall flights in one map at 6.2 cm RMSE (README), OpenLORIS-Scene's
+  office over three days at 4.6 cm.
+
 - **`visloc_vio_node` with the online mapper, through `ros2 bag play` on ROS 2
   Jazzy** (EuRoC V1_01, 1.0x, Fast DDS):
   - stereo: shutdown trajectory 0.0355 m (live `map_pose` 0.0385 m), the

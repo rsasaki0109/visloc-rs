@@ -100,6 +100,72 @@ more revisits (89 vs 63 loops), and once those loops plus two-view BA are applie
 the combination is the best of all (14.0 mm). The frontend stage and the loop
 stage are complementary, not independently additive.
 
+## Several sessions in one map
+
+![Three TUM RGB-D sessions of one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd.gif)
+
+<sub>Data: [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) fr1_room, fr1_desk2 and fr1_desk (Sturm et al., IROS 2012), CC BY 4.0. Colours are the sequences' RGB images placed by their depth.</sub>
+
+The fr1 sequences film one office. Each is mapped on its own, in its own
+frame, and `basalt_map_merge` merges the maps, as it merges the
+stereo-inertial SLAM's maps of EuRoC and OpenLORIS-Scene
+([basalt_map_localization.md](basalt_map_localization.md#merging-maps-of-several-flights)):
+
+1. **Trajectory.** The virtual-stereo VO above (`full_tv`, here with 1,024
+   SuperPoint keypoints on the CPU): ATE 5.33 cm on fr1_room, 4.67 cm on
+   fr1_desk2 and 2.27 cm on fr1_desk. Its frame is the first camera's.
+2. **Map.** `examples/tum_rgbd_save_map.rs` turns the RGB images and depth
+   into a map in the layout `basalt_euroc_online_slam_demo --save-map`
+   writes: keyframes every 5 cm or 5°, the Basalt mapper's ORB on each
+   (Shi-Tomasi corners, 256-bit descriptors), and a landmark at each
+   corner's depth, tracked over the last 10 keyframes by projection and
+   descriptor. Landmarks seen once are dropped.
+3. **Gravity.** The merge registers maps by a yaw and a translation, so each
+   map's world must have z up. The Kinect's accelerometer gives it: each
+   sample is turned into the camera frame (its x and y point the other way
+   from the optical frame's, which was read once off fr1_room's ground
+   truth), then into the world by the trajectory, and averaged over the
+   sequence. On fr1_room and fr1_desk, the ground truth's vertical is
+   1.8° and 3.1° from this up.
+4. **Merge.** `basalt_map_merge` as for the SLAM's maps. The colour clouds
+   of the GIF come from `scripts/rgbd_map_cloud.py --tum`.
+
+| Added map (in order) | Its frame vs fr1_room's | Keyframes localized | Residual |
+|---|---|---|---|
+| fr1_desk2 | 71.6°, 248 cm | 20 of 209 | 8.6 cm |
+| fr1_desk | 72.1°, 227 cm | 17 of 171 | 4.0 cm |
+
+The merged map holds 751 keyframe images and 53,063 landmarks. Aligned to
+the ground truth by fr1_room's keyframes alone, the keyframe centres are
+at 7.4 cm RMSE (24.5 cm max): fr1_room 5.4, fr1_desk2 10.2 and fr1_desk
+7.0 cm, against 5.4, 4.6 and 2.4 cm for each trajectory aligned on its own.
+
+Few keyframes localize: TUM's handheld Kinect blurs most images, and a
+keyframe offers only its tracked corners. fr1_360 (turning in place, VO
+ATE 9.95 cm) and fr1_plant (close to one plant) register in none of the
+other maps, in any order.
+
+```bash
+D=/path/to/tum   # rgbd_dataset_freiburg1_{room,desk2,desk}
+for s in room desk2 desk; do
+  TUM_MAX_KEYPOINTS=1024 scripts/run_tum_rgbd_benchmark.sh --seq-dir $D/rgbd_dataset_freiburg1_$s \
+    --out-dir runs/tum_$s --device cpu
+  target/release/examples/tum_rgbd_save_map --seq-dir $D/rgbd_dataset_freiburg1_$s \
+    --trajectory runs/tum_$s/full_tv/est.tum --out runs/fr1_${s}_map \
+    --keyframe-m 0.05 --keyframe-deg 5 --match-radius-px 8 --track-keyframes 10
+  python3 scripts/rgbd_map_cloud.py --map runs/fr1_${s}_map \
+    --tum $D/rgbd_dataset_freiburg1_$s --out runs/fr1_${s}_cloud.npz --every 3 --max-depth 3
+done
+target/release/examples/basalt_map_merge --base runs/fr1_room_map \
+  --add runs/fr1_desk2_map --add runs/fr1_desk_map --out runs/fr1_merged
+python3 scripts/render_map_merge_gif.py --merged runs/fr1_merged \
+  $(for s in room desk2 desk; do echo --map runs/fr1_${s}_map --cloud runs/fr1_${s}_cloud.npz \
+    --label fr1_$s; done) \
+  --max-points 60000 --point-size 2 --unit session --place office --fill 0.6 \
+  --title "Multi-session mapping: three RGB-D sessions, one map" \
+  --out docs/assets/map_merge_tum_rgbd.gif
+```
+
 ## Reproduce
 
 Download a sequence (e.g. `rgbd_dataset_freiburg1_xyz`) from the

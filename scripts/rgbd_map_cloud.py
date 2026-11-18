@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""Colour point cloud of an OpenLORIS-Scene session, placed by its SLAM map.
+"""Colour point cloud of an RGB-D session, placed by its map's keyframes.
 
-For `render_map_merge_gif.py --cloud`: the D435i's colour images and the
-depth aligned to them, back-projected from the poses of a map's keyframes.
+For `render_map_merge_gif.py --cloud`: the session's colour images and the
+depth registered to them, back-projected from the poses of a map's keyframes.
 
-    python scripts/openloris_rgbd_cloud.py --map runs/o11_map \\
-        --rgbd data/rgbd/office1-1 --out runs/o11_cloud.npz
+    # OpenLORIS-Scene: a map of the T265 sequence (openloris_to_euroc.py)
+    python scripts/rgbd_map_cloud.py --map runs/o11_map \\
+        --openloris data/rgbd/office1-1 --out runs/o11_cloud.npz
+    # TUM RGB-D: a map from tum_rgbd_save_map
+    python scripts/rgbd_map_cloud.py --map runs/fr1_room_map \\
+        --tum rgbd_dataset_freiburg1_room --out runs/fr1_room_cloud.npz
 
-`--map` is a map saved by `basalt_euroc_online_slam_demo --save-map` from
-the sequence converted by `openloris_to_euroc.py`; its camera 0 is the T265's
-fisheye1. `--rgbd` is the sequence's extracted `color/`, `aligned_depth/`,
-`color.txt`, `aligned_depth.txt` and `trans_matrix.yaml`, `sensors.yaml`.
+- `--openloris DIR`: the sequence's extracted `color/`, `aligned_depth/`,
+  `color.txt`, `aligned_depth.txt`, `trans_matrix.yaml` and `sensors.yaml`.
+  The map's camera 0 is the T265's fisheye1, so a point goes world <-
+  fisheye1 (the keyframe's pose) <- base_link <- colour camera
+  (`trans_matrix.yaml`). Depth is in millimetres.
+- `--tum DIR`: the sequence (`rgb.txt`, `depth.txt`, `rgb/`, `depth/`). The
+  map's camera 0 is the RGB camera itself, with Freiburg 1's calibration
+  (undistorted with OpenCV). Depth is in 1/5000 m.
+
 For each keyframe (every `--every`-th camera-0 image) the colour image and
 depth taken within `--max-dt-ms` of it are back-projected (every
 `--stride`-th pixel, depths within `--min-depth`..`--max-depth`) into the
-map's world: world <- fisheye1 (the keyframe's pose) <- base_link <- colour
-camera (`trans_matrix.yaml`). Points are thinned to one per `--voxel` cube,
-keeping the first keyframe's colour.
+map's world. Points are thinned to one per `--voxel` cube, keeping the first
+keyframe's colour.
 
 Writes points (N x 3, the map's world), colours (N x 3, 0..1) and first_seen
 (N, the time in seconds from the map's first keyframe at which the voxel was
 first seen). Dataset images stay outside the repository and remain subject
-to the dataset's CC BY-ND 4.0 terms.
+to their dataset's terms (OpenLORIS-Scene: CC BY-ND 4.0; TUM RGB-D: CC BY
+4.0).
 """
 
 from __future__ import annotations
@@ -104,42 +113,65 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--map", type=Path, required=True)
-    parser.add_argument("--rgbd", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--openloris", type=Path, help="extracted OpenLORIS-Scene sequence")
+    source.add_argument("--tum", type=Path, help="TUM RGB-D sequence")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--every", type=int, default=2)
     parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--min-depth", type=float, default=0.3)
     parser.add_argument("--max-depth", type=float, default=4.0)
-    parser.add_argument("--depth-scale", type=float, default=0.001)
+    parser.add_argument("--depth-scale", type=float,
+                        help="metres per depth unit (default 0.001 OpenLORIS, 0.0002 TUM)")
     parser.add_argument("--voxel", type=float, default=0.02)
     parser.add_argument("--max-dt-ms", type=float, default=20.0)
     args = parser.parse_args()
 
-    frames = yaml_matrices(args.rgbd / "trans_matrix.yaml")
-    base_f1 = frames[("base_link", "t265_fisheye1_optical_frame")]
-    base_colour = frames[("base_link", "d400_color_optical_frame")]
-    f1_colour = np.linalg.inv(base_f1) @ base_colour
-    fx, fy, cx, cy = colour_intrinsics(args.rgbd / "sensors.yaml")
-    colour_t, colour_files = read_stamped(args.rgbd / "color.txt")
-    depth_t, depth_files = read_stamped(args.rgbd / "aligned_depth.txt")
+    if args.openloris is not None:
+        root = args.openloris
+        frames = yaml_matrices(root / "trans_matrix.yaml")
+        base_f1 = frames[("base_link", "t265_fisheye1_optical_frame")]
+        base_colour = frames[("base_link", "d400_color_optical_frame")]
+        cam0_colour = np.linalg.inv(base_f1) @ base_colour
+        fx, fy, cx, cy = colour_intrinsics(root / "sensors.yaml")
+        distortion = None
+        colour_t, colour_files = read_stamped(root / "color.txt")
+        depth_t, depth_files = read_stamped(root / "aligned_depth.txt")
+        depth_scale = args.depth_scale or 0.001
+    else:
+        root = args.tum
+        cam0_colour = np.eye(4)
+        # Freiburg 1's RGB camera (TUM RGB-D calibration page).
+        fx, fy, cx, cy = 517.3, 516.5, 318.6, 255.3
+        distortion = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633])
+        colour_t, colour_files = read_stamped(root / "rgb.txt")
+        depth_t, depth_files = read_stamped(root / "depth.txt")
+        depth_scale = args.depth_scale or 1 / 5000
 
     poses = keyframe_poses(args.map)
     t0 = poses[0][0]
     points, colours, seen = [], [], []
     used = 0
-    for time_s, world_f1 in poses[::args.every]:
+    for time_s, world_cam0 in poses[::args.every]:
         ci, di = nearest(colour_t, time_s), nearest(depth_t, time_s)
         if (abs(colour_t[ci] - time_s) > args.max_dt_ms * 1e-3
                 or abs(depth_t[di] - time_s) > args.max_dt_ms * 1e-3):
             continue
-        rgb = np.asarray(Image.open(args.rgbd / colour_files[ci]).convert("RGB"))
-        depth = np.asarray(Image.open(args.rgbd / depth_files[di])).astype(np.float64) * args.depth_scale
+        rgb = np.asarray(Image.open(root / colour_files[ci]).convert("RGB"))
+        depth = np.asarray(Image.open(root / depth_files[di])).astype(np.float64) * depth_scale
         v, u = np.mgrid[0:depth.shape[0]:args.stride, 0:depth.shape[1]:args.stride]
         d = depth[v, u]
         ok = (d > args.min_depth) & (d < args.max_depth)
         u, v, d = u[ok], v[ok], d[ok]
-        local = np.stack([(u - cx) / fx * d, (v - cy) / fy * d, d, np.ones_like(d)])
-        world = (world_f1 @ f1_colour @ local)[:3].T
+        if distortion is None:
+            x, y = (u - cx) / fx, (v - cy) / fy
+        else:
+            import cv2
+            pixels = np.stack([u, v], axis=1).astype(np.float64).reshape(-1, 1, 2)
+            camera = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+            x, y = cv2.undistortPoints(pixels, camera, distortion).reshape(-1, 2).T
+        local = np.stack([x * d, y * d, d, np.ones_like(d)])
+        world = (world_cam0 @ cam0_colour @ local)[:3].T
         points.append(world)
         colours.append(rgb[v, u] / 255.0)
         seen.append(np.full(len(d), time_s - t0))
