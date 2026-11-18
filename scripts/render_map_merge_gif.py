@@ -202,6 +202,8 @@ def main() -> int:
     parser.add_argument("--cloud", type=Path, action="append",
                         help="per --map: a colour point cloud (.npz from openloris_rgbd_cloud.py) "
                              "drawn in its own colours instead of the map's landmarks")
+    parser.add_argument("--note", action="append",
+                        help="per --map: a panel note (default: its own frame and duration)")
     parser.add_argument("--max-points", type=int, default=0,
                         help="draw at most this many points per session (0: all)")
     parser.add_argument("--point-size", type=float, default=1.0,
@@ -241,6 +243,9 @@ def main() -> int:
         "translation": [0, 0, 0], "quaternion_wxyz": [1, 0, 0, 0]}}]
     if len(session_json) != len(args.map):
         parser.error(f"{args.merged} holds {len(session_json)} sessions, not {len(args.map)}")
+    notes = args.note or [None] * len(args.map)
+    if len(notes) != len(args.map):
+        parser.error("give one --note per --map")
     clouds = args.cloud or [None] * len(args.map)
     if len(clouds) != len(args.map):
         parser.error("give one --cloud per --map")
@@ -368,7 +373,8 @@ def main() -> int:
                         fontsize=8.5 - 1.5 * queued["mix"], fontweight="bold", va="top",
                         alpha=alpha, zorder=5)
                 ax.text(cx + pw / 2 - 8, cy + ph / 2 - 7,
-                        f"its own frame · {s.duration:.0f} s {args.unit}", color=DIM, fontsize=7,
+                        notes[i] or f"its own frame · {s.duration:.0f} s {args.unit}",
+                        color=DIM, fontsize=7,
                         va="top", ha="right", alpha=alpha if queued["mix"] < 0.5 else 0.0, zorder=5)
         # The map so far under the session being added.
         order = sorted(range(n), key=lambda i: (states[i].get("active", False), i))
