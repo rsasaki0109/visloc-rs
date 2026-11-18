@@ -922,7 +922,8 @@ python3 scripts/render_map_merge_gif.py --merged runs/kitti_merged \
   --label "2011-09-30 #27" --note "0.7 km" \
   --map runs/2011_09_30_drive_0028_dmap --cloud runs/2011_09_30_drive_0028_cloud.npz \
   --label "2011-09-30 #28" --note "first 0.6 km" \
-  --max-points 600000 --point-size 0.45 --unit drive --place district --fill 0.66 \
+  --max-points 600000 --point-size 0.45 --saturation 1.8 --gamma 1.3 \
+  --unit drive --place district --fill 0.66 \
   --elevation 70 --orbit-frames 30 --zoom 8 --zoom-frames 80 \
   --title "Multi-session mapping: three drives on two days, one map" \
   --fps 12.5 --out docs/assets/map_merge_kitti.gif   # then re-encoded at 10 fps, 128 colours
