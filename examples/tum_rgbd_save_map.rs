@@ -25,6 +25,9 @@
 //!   RANSAC over the landmarks, among planes within 30 degrees of the
 //!   cameras' mean up, refitted to its inliers. On fr1_room it is 1.4
 //!   degrees from the ground truth's vertical, the accelerometer 1.8.
+//!   `--keep-world` skips the levelling, for a trajectory whose world is
+//!   already z up (a visual-inertial SLAM's, e.g. KITTI raw through
+//!   `scripts/euroc_stereo_to_rgbd.py`).
 //! - **Keyframes.** The first frame, then each frame that has moved
 //!   `--keyframe-m` or turned `--keyframe-deg` from the last keyframe.
 //! - **Features.** The Basalt mapper's ORB on each keyframe's grey image:
@@ -77,6 +80,7 @@ struct Args {
     match_radius_px: f64,
     max_hamming: u32,
     min_observations: usize,
+    keep_world: bool,
 }
 
 impl Args {
@@ -84,7 +88,7 @@ impl Args {
         "usage: tum_rgbd_save_map --seq-dir DIR --trajectory FILE --out DIR \
          [--keyframe-m M] [--keyframe-deg D] [--max-points N] [--min-depth M] \
          [--max-depth M] [--depth-scale S] [--track-keyframes N] [--match-radius-px P] \
-         [--max-hamming N] [--min-observations N] [--fx F --fy F --cx C --cy C \
+         [--max-hamming N] [--min-observations N] [--keep-world] [--fx F --fy F --cx C --cy C \
          --k1 K --k2 K --p1 P --p2 P --k3 K]"
             .into()
     }
@@ -112,6 +116,7 @@ impl Args {
             match_radius_px: 4.0,
             max_hamming: 60,
             min_observations: 2,
+            keep_world: false,
         };
         let mut arguments = std::env::args().skip(1);
         while let Some(option) = arguments.next() {
@@ -147,6 +152,7 @@ impl Args {
                 "--match-radius-px" => args.match_radius_px = number(&option, value()?)?,
                 "--max-hamming" => args.max_hamming = number(&option, value()?)?,
                 "--min-observations" => args.min_observations = number(&option, value()?)?,
+                "--keep-world" => args.keep_world = true,
                 name if intrinsic(name).is_some() => {
                     intrinsics[intrinsic(name).unwrap()] = number(&option, value()?)?;
                 }
@@ -349,7 +355,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Without accelerometer samples (Freiburg 3 has none), the map is
     // levelled after it is built, by its largest horizontal plane.
-    let by_accelerometer = samples > 0;
+    let by_accelerometer = samples > 0 && !args.keep_world;
     let aligned = if by_accelerometer {
         let g = (up / samples as f64).norm();
         let up = up.normalize();
@@ -541,7 +547,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         map.landmarks.insert(id, landmark);
     }
 
-    let aligned = if by_accelerometer {
+    let aligned = if by_accelerometer || args.keep_world {
         aligned
     } else {
         // The cameras' mean up (optical -y) picks which planes count as
@@ -579,7 +585,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut summary = json!({
         "schema": map_files::MAP_SCHEMA,
-        "world_frame": if by_accelerometer {
+        "world_frame": if args.keep_world {
+            "the trajectory's world, already z up (a visual-inertial trajectory)"
+        } else if by_accelerometer {
             "the trajectory's world, levelled by the accelerometer's gravity (z up)"
         } else {
             "the trajectory's world, levelled by its largest horizontal plane (z up)"

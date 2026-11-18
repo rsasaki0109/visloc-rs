@@ -9,6 +9,8 @@
   stay on the server.
 - From the `_extract` zip: the 100 Hz OXTS, which is the IMU.
 - The date's calibration and the drive's tracklets, in full (they are small).
+- With `--colour-frames FILE`, only the colour cameras image_02 and image_03
+  (rectified) of the frames listed, for colouring a map (rgbd_map_cloud.py).
 
 The output keeps KITTI's raw layout:
 `<out>/<date>/{calib_*.txt, <drive>_sync/{image_00,image_01,oxts,tracklet_labels.xml}, <drive>_extract/oxts}`.
@@ -84,9 +86,27 @@ def main() -> int:
     parser.add_argument(
         "--skip-extract-oxts", action="store_true", help="do not fetch the 100 Hz OXTS from the _extract zip"
     )
+    parser.add_argument(
+        "--colour-frames",
+        type=Path,
+        help="instead of the grey cameras and the OXTS, fetch the colour cameras image_02 and image_03 "
+        "(rectified) for the sync frame indices listed in this file, one per line",
+    )
     args = parser.parse_args()
     date = args.drive[:10]
     url = f"{BASE_URL}/{args.drive}/{args.drive}"
+
+    if args.colour_frames is not None:
+        wanted = {int(line) for line in args.colour_frames.read_text().split()}
+
+        def colour(parts):
+            if len(parts) < 5 or parts[2] not in ("image_02", "image_03") or parts[3] != "data":
+                return len(parts) > 3 and parts[2] in ("image_02", "image_03") and parts[3] == "timestamps.txt"
+            return parts[4].endswith(".png") and int(parts[4][:-4]) in wanted
+
+        n = fetch_members(f"{url}_sync.zip", colour, args.out, args.timeout)
+        print(f"sync image_02, image_03: {n} files", file=sys.stderr)
+        return 0
 
     n = fetch_zip(f"{BASE_URL}/{date}_calib.zip", args.out, args.timeout)
     print(f"calibration: {n} files", file=sys.stderr)

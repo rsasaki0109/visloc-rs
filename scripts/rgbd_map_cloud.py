@@ -16,6 +16,11 @@ depth registered to them, back-projected from the poses of a map's keyframes.
   The map's camera 0 is the T265's fisheye1, so a point goes world <-
   fisheye1 (the keyframe's pose) <- base_link <- colour camera
   (`trans_matrix.yaml`). Depth is in millimetres.
+- `--kitti DIR --kitti-frames FILE`: a KITTI raw drive's `_sync` directory
+  with the colour cameras' rectified image_02 and image_03 of the keyframes
+  (`fetch_kitti_raw_drive.py --colour-frames`), and the `frames.csv` of
+  `kitti_raw_to_euroc.py`. The map's camera 0 is image_00; depth comes from
+  the colour pair by OpenCV's SGBM, and image_02 gives the colours.
 - `--tum DIR`: the sequence (`rgb.txt`, `depth.txt`, `rgb/`, `depth/`). The
   map's camera 0 is the RGB camera itself, with `--tum-camera`'s calibration
   (Freiburg 1's by default; undistorted with OpenCV). Depth is in 1/5000 m.
@@ -109,6 +114,23 @@ def keyframe_poses(map_dir: Path):
     return out
 
 
+def stereo_depth(left: np.ndarray, right: np.ndarray, fx: float, baseline: float) -> np.ndarray:
+    """Metric depth of the left image from a rectified pair (OpenCV SGBM),
+    0 where the disparity is invalid or fails the left-right check."""
+    import cv2
+
+    grey = [cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) for image in (left, right)]
+    matcher = cv2.StereoSGBM_create(minDisparity=0, numDisparities=128, blockSize=5,
+                                    P1=8 * 25, P2=32 * 25, uniquenessRatio=10,
+                                    speckleWindowSize=100, speckleRange=2, disp12MaxDiff=1,
+                                    mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+    disparity = matcher.compute(grey[0], grey[1]).astype(np.float64) / 16.0
+    depth = np.zeros_like(disparity)
+    valid = disparity > 1.0
+    depth[valid] = fx * baseline / disparity[valid]
+    return depth
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -116,6 +138,12 @@ def main() -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--openloris", type=Path, help="extracted OpenLORIS-Scene sequence")
     source.add_argument("--tum", type=Path, help="TUM RGB-D sequence")
+    source.add_argument("--kitti", type=Path,
+                        help="KITTI raw drive's _sync directory with image_02/ and image_03/ "
+                             "(fetch_kitti_raw_drive.py --colour-frames)")
+    parser.add_argument("--kitti-frames", type=Path,
+                        help="with --kitti: the frames.csv of kitti_raw_to_euroc.py, which maps "
+                             "the map's timestamps to sync frame indices")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--every", type=int, default=2)
     parser.add_argument("--stride", type=int, default=4)
@@ -142,6 +170,32 @@ def main() -> int:
         colour_t, colour_files = read_stamped(root / "color.txt")
         depth_t, depth_files = read_stamped(root / "aligned_depth.txt")
         depth_scale = args.depth_scale or 0.001
+    elif args.kitti is not None:
+        root = args.kitti
+        calib = {}
+        for line in (root.parent / "calib_cam_to_cam.txt").read_text().splitlines():
+            key, _, value = line.partition(":")
+            try:
+                calib[key] = np.array([float(v) for v in value.split()])
+            except ValueError:
+                pass
+        p2 = calib["P_rect_02"].reshape(3, 4)
+        p3 = calib["P_rect_03"].reshape(3, 4)
+        fx, fy, cx, cy = p2[0, 0], p2[1, 1], p2[0, 2], p2[1, 2]
+        distortion = None
+        # Rectified cameras share their rotation; camera 2 sits P[0,3]/fx
+        # along x from camera 0 (X2 = X0 + t), camera 3 likewise.
+        cam0_colour = np.eye(4)
+        cam0_colour[0, 3] = -p2[0, 3] / fx
+        stereo_baseline = (p2[0, 3] - p3[0, 3]) / fx
+        frame_of = {}
+        for line in args.kitti_frames.read_text().splitlines()[1:]:
+            frame, stamp = line.split(",")
+            frame_of[int(stamp)] = int(frame)
+        stamps_ns = sorted(frame_of)
+        colour_t = depth_t = np.array(stamps_ns) * 1e-9
+        colour_files = depth_files = [f"{frame_of[stamp]:010d}.png" for stamp in stamps_ns]
+        depth_scale = 1.0
     else:
         root = args.tum
         cam0_colour = np.eye(4)
@@ -161,8 +215,17 @@ def main() -> int:
         if (abs(colour_t[ci] - time_s) > args.max_dt_ms * 1e-3
                 or abs(depth_t[di] - time_s) > args.max_dt_ms * 1e-3):
             continue
-        rgb = np.asarray(Image.open(root / colour_files[ci]).convert("RGB"))
-        depth = np.asarray(Image.open(root / depth_files[di])).astype(np.float64) * depth_scale
+        if args.kitti is not None:
+            left_path = root / "image_02" / "data" / colour_files[ci]
+            right_path = root / "image_03" / "data" / colour_files[ci]
+            if not (left_path.exists() and right_path.exists()):
+                continue
+            rgb = np.asarray(Image.open(left_path).convert("RGB"))
+            depth = stereo_depth(rgb, np.asarray(Image.open(right_path).convert("RGB")),
+                                 fx, stereo_baseline)
+        else:
+            rgb = np.asarray(Image.open(root / colour_files[ci]).convert("RGB"))
+            depth = np.asarray(Image.open(root / depth_files[di])).astype(np.float64) * depth_scale
         v, u = np.mgrid[0:depth.shape[0]:args.stride, 0:depth.shape[1]:args.stride]
         d = depth[v, u]
         ok = (d > args.min_depth) & (d < args.max_depth)

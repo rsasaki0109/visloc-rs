@@ -154,6 +154,8 @@ class Session:
         self.registration = session_json.get("registration")
         self.centre = np.median(self.path, axis=0)
         self.keyframes = len(self.path)
+        own = json.loads((map_dir / "map.json").read_text())
+        self.map_images, self.map_landmarks = int(own["images"]), int(own["landmarks"])
 
     def placed(self, values: np.ndarray, merged: float) -> np.ndarray:
         """`values` (own frame) moved `merged` (0..1) of the way into the base frame:
@@ -456,7 +458,7 @@ def main() -> int:
         states[i]["active"] = True
         if i == 0:
             caption = f"{s.label} is the base: its world frame becomes the merged map's frame"
-            status = f"{s.keyframes * 2:,} keyframe images, {len(s.points):,} landmarks"
+            status = f"{s.map_images:,} keyframe images, {s.map_landmarks:,} landmarks"
             for f in range(args.slide_frames):
                 states[i].update(slide=(f + 1) / args.slide_frames, align=1.0,
                                  panel=1 - smooth((f + 1) / args.slide_frames))

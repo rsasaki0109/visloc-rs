@@ -6,6 +6,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`merge_maps` merges maps of another calibration of the rig**
+  (another day's): a camera that differs from the base map's under the same
+  id is added under a new id (`MergedMap::camera_ids`), instead of failing
+  with `CameraMismatch`. `basalt_map_merge` records such a session's
+  `t_imu_cam` in `map.json`. `scripts/euroc_stereo_to_rgbd.py` turns a
+  rectified stereo sequence and its SLAM trajectory into the RGB-D layout of
+  `tum_rgbd_save_map` (`--keep-world` keeps a visual-inertial world), and
+  `fetch_kitti_raw_drive.py --colour-frames` fetches the colour cameras of
+  chosen frames.
+
 - **Maps from TUM RGB-D sequences, merged across sessions**
   (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
   `basalt_euroc_online_slam_demo --save-map` writes, from the RGB images,
