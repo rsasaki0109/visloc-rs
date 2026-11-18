@@ -234,7 +234,7 @@ pub(super) fn sfm_oracle_metrics(
     if !translation.iter().all(|value| value.is_finite()) {
         return None;
     }
-    let align_rotation = UnitQuaternion::from_matrix(&rotation);
+    let align_rotation = visloc_core::geometry::rotation_from_matrix(&rotation);
 
     let mut center_errors = vec![None; poses.len()];
     let mut rotation_errors = vec![None; poses.len()];

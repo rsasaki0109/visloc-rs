@@ -310,6 +310,7 @@ fn fit_labels(gs: &mut CudaGsplat, geometry: LabelGeometry) -> (Vec<f64>, f64) {
             lr_semantic: 5e-2,
             semantic_geometry: geometry as u32,
             moments_bf16: 0,
+            filter3d: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -417,6 +418,7 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool, bf16_until: u32) -> Vec<f64> {
             lr_semantic: 0.0,
             semantic_geometry: 0,
             moments_bf16: (step < bf16_until) as u32,
+            filter3d: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -491,6 +493,7 @@ fn fit_normals(gs: &mut CudaGsplat, lens: Lens) -> Vec<f64> {
             lr_semantic: 0.0,
             semantic_geometry: 0,
             moments_bf16: 0,
+            filter3d: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -541,4 +544,157 @@ fn training_steps_fit_a_rendered_target() {
             mean_loss.last().unwrap()
         );
     }
+}
+
+/// Mip-Splatting's 3D filter: applying it puts `0.5 ln(s^2 + f)` and the
+/// opacity times `prod sqrt(s^2 / (s^2 + f))` in the scene, `f = scale (z /
+/// fx)^2`, and taking it off restores the raw values; a step through it
+/// differentiates the raw log-scales and opacity logits, as the finite
+/// differences of the filtered render's L1 loss say.
+#[test]
+fn filter3d_matches_its_formula_and_chains_its_gradient() {
+    let Some(mut gs) = gsplat() else { return };
+    let (w, h) = (64u32, 48u32);
+    let scene = random_scene(30, 5, 0);
+    let v = view(w, h, 0.05);
+    let cam = GscCamera::from_view(&v);
+    // Large, so the filter matters next to the splats' own scales.
+    let var_scale = 50.0f32;
+    let packed = PackedScene::from_scene(&scene);
+    let (gt, _) = target(w, h, false);
+    gs.set_images(w, h, &pack_rgba8(&gt, None)).expect("images");
+    gs.set_scene(&packed).expect("upload");
+    assert!(
+        gs.set_filter3d_applied(true).is_err(),
+        "applied before computed"
+    );
+    gs.compute_filter3d(&[cam], var_scale).expect("filter");
+    gs.set_filter3d_applied(true).expect("apply");
+    let filtered = gs.scene().expect("download");
+    gs.set_filter3d_applied(false).expect("restore");
+    let restored = gs.scene().expect("download");
+    assert_eq!(restored.transforms, packed.transforms);
+    assert_eq!(restored.opacity, packed.opacity);
+
+    let fx = v.camera.fx;
+    let rates: Vec<Option<f32>> = scene
+        .gaussians
+        .iter()
+        .map(|g| {
+            let p = v.rotation * g.mean + v.translation;
+            let (u, y) = (
+                fx * p.x / p.z + v.camera.cx,
+                v.camera.fy * p.y / p.z + v.camera.cy,
+            );
+            let (wf, hf) = (w as f32, h as f32);
+            (p.z > 0.2 && u >= -0.15 * wf && u <= 1.15 * wf && y >= -0.15 * hf && y <= 1.15 * hf)
+                .then_some(p.z / fx)
+        })
+        .collect();
+    let max_rate = rates.iter().flatten().fold(0.0f32, |a, &r| a.max(r));
+    let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+    for (i, g) in scene.gaussians.iter().enumerate() {
+        let r = rates[i].unwrap_or(max_rate);
+        let f = var_scale * r * r;
+        let mut coef = 1.0f32;
+        for k in 0..3 {
+            let s2 = (2.0 * g.scale_log[k]).exp();
+            coef *= (s2 / (s2 + f)).sqrt();
+            let want = 0.5 * (s2 + f).ln();
+            let got = filtered.transforms[i * 10 + 7 + k];
+            assert!(
+                (got - want).abs() < 1e-4,
+                "gaussian {i} log-scale {k}: {got} vs {want}"
+            );
+        }
+        let want = sigmoid(g.opacity_logit) * coef;
+        let got = sigmoid(filtered.opacity[i]);
+        assert!(
+            (got - want).abs() < 1e-5,
+            "gaussian {i} opacity: {got} vs {want}"
+        );
+    }
+
+    // The filtered render's mean L1 at raw parameters `p`.
+    let loss_at = |gs: &mut CudaGsplat, p: &PackedScene| -> f64 {
+        gs.set_scene(p).expect("upload");
+        gs.compute_filter3d(&[cam], var_scale).expect("filter");
+        gs.set_filter3d_applied(true).expect("apply");
+        gs.render(&v, [0.0; 3], 0).expect("render");
+        gs.loss_grad(0, 0.0).expect("loss");
+        gs.set_filter3d_applied(false).expect("restore");
+        gs.take_loss().expect("loss").l1
+    };
+    // One Adam step with eps far above the gradients moves each parameter
+    // by -lr g / (|g| + eps): the raw gradient, read back.
+    let (lr, eps) = (1.0f32, 1.0f32);
+    gs.set_scene(&packed).expect("upload");
+    gs.compute_filter3d(&[cam], var_scale).expect("filter");
+    gs.train_step(&StepParams {
+        camera: cam,
+        image: 0,
+        sh_active_degree: 0,
+        background: [0.0; 3],
+        ssim_weight: 0.0,
+        lr: [0.0, 0.0, lr, lr, 0.0, 0.0],
+        beta1: 0.9,
+        beta2: 0.999,
+        eps,
+        bc1: 0.1,
+        bc2: 0.001,
+        scale_aux_coef: 0.0,
+        opacity_aux_coef: 0.0,
+        accumulate_stats: 0,
+        noise_seed: 0,
+        noise_scale: 0.0,
+        noise_max: 0.0,
+        sparse_sh_adam: 0,
+        depth_weight: 0.0,
+        normal_weight: 0.0,
+        semantic_weight: 0.0,
+        lr_semantic: 0.0,
+        semantic_geometry: 0,
+        moments_bf16: 0,
+        filter3d: 1,
+    })
+    .expect("step");
+    gs.take_loss().expect("reset");
+    let stepped = gs.scene().expect("download");
+    let grad = |before: f32, after: f32| -> f64 {
+        let q = ((before - after) / lr) as f64;
+        eps as f64 * q / (1.0 - q.abs())
+    };
+    let (mut dot, mut nn, mut ff) = (0.0f64, 0.0f64, 0.0f64);
+    let step = 5e-3f32;
+    for i in 0..scene.len() {
+        for slot in 0..4 {
+            let (analytic, fd) = {
+                let mut plus = packed.clone();
+                let mut minus = packed.clone();
+                let (a, b) = if slot < 3 {
+                    let e = i * 10 + 7 + slot;
+                    plus.transforms[e] += step;
+                    minus.transforms[e] -= step;
+                    (packed.transforms[e], stepped.transforms[e])
+                } else {
+                    plus.opacity[i] += step;
+                    minus.opacity[i] -= step;
+                    (packed.opacity[i], stepped.opacity[i])
+                };
+                let fd = (loss_at(&mut gs, &plus) - loss_at(&mut gs, &minus)) / (2.0 * step as f64);
+                (grad(a, b), fd)
+            };
+            dot += analytic * fd;
+            nn += analytic * analytic;
+            ff += fd * fd;
+        }
+    }
+    let cos = dot / (nn.sqrt() * ff.sqrt()).max(1e-30);
+    let ratio = nn.sqrt() / ff.sqrt().max(1e-30);
+    eprintln!("filter3d gradient vs finite differences: cosine {cos:.4}, norm ratio {ratio:.3}");
+    assert!(ff > 0.0, "the loss does not move");
+    assert!(
+        cos > 0.97 && (0.85..1.15).contains(&ratio),
+        "cosine {cos:.4}, norm ratio {ratio:.3}"
+    );
 }

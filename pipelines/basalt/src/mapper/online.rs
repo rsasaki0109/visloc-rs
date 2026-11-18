@@ -45,7 +45,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 use thiserror::Error;
 use visloc_core::geometry::SE3;
@@ -2404,7 +2404,7 @@ fn temporal_result_se3(result: &crate::mapper::features::TemporalRansacResult) -
         result.refined_model_rotation[2][2],
     ]);
     SE3::new(
-        UnitQuaternion::from_matrix(&rotation),
+        visloc_core::geometry::rotation_from_matrix(&rotation),
         Vector3::new(
             result.refined_model_translation[0],
             result.refined_model_translation[1],
@@ -2443,7 +2443,7 @@ fn fit_se3(source: &[Vector3<f64>], target: &[Vector3<f64>]) -> Option<SE3> {
         d[(2, 2)] = -1.0;
     }
     let rotation = v_t.transpose() * d * u.transpose();
-    let rotation = UnitQuaternion::from_matrix(&rotation);
+    let rotation = visloc_core::geometry::rotation_from_matrix(&rotation);
     let translation = mean_target - rotation.transform_vector(&mean_source);
     Some(SE3::new(rotation, translation))
 }

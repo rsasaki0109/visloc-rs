@@ -7,9 +7,9 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--init trained.ply] [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
-//!   [--sparse-sh-adam] [--bf16-moments] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
+//!   [--sparse-sh-adam] [--bf16-moments] [--filter3d 0.2] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
-//!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] \
+//!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] [--eval-zoom <dir>] \
 //!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.01] \
 //!     [--semantic-logits-only | --semantic-shape]]
 //! ```
@@ -33,6 +33,12 @@
 //! loss (`gsplat_photos_cuda --mask-black`'s masked regions) and of the eval
 //! PSNR; SSIM takes the image's values there. `--save-eval` writes the final
 //! renders of the held-out views to `<dir>/<image name>.png`.
+//! `--filter3d` trains through Mip-Splatting's 3D smoothing filter with that
+//! variance scale (Mip-Splatting's 0.2); the evaluations and the output
+//! carry it. `--eval-zoom` (repeatable) also evaluates the final splat on
+//! the held-out views' images in `<dir>` (e.g. `images_2` after training on
+//! `images_4`), the intrinsics scaled to their size: rendering finer or
+//! coarser than the training images.
 //! `--labels` trains a logit per class and gaussian against the training
 //! views' labels (`scripts/sam3_labels.py`'s `<dir>/<image name>.png` and
 //! `classes.txt`): `--semantic-weight` x the mean cross-entropy over the
@@ -68,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut profile = false;
     let mut sparse_sh_adam = false;
     let mut bf16_moments = false;
+    let mut filter3d: Option<f32> = None;
     let mut holdout = 8usize;
     let mut mesh_out: Option<PathBuf> = None;
     let mut planar = false;
@@ -75,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut depth_weight = 0.1f32;
     let mut depth_weight_final: Option<f32> = None;
     let mut save_eval: Option<PathBuf> = None;
+    let mut eval_zoom: Vec<PathBuf> = Vec::new();
     let mut labels: Option<PathBuf> = None;
     let mut semantic = SemanticTraining::default();
     while let Some(a) = args.next() {
@@ -99,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--sparse-sh-adam" => sparse_sh_adam = true,
             // Adam moments in bf16, rounded stochastically.
             "--bf16-moments" => bf16_moments = true,
+            // Mip-Splatting's 3D smoothing filter, with its variance scale.
+            "--filter3d" => filter3d = Some(next()?.parse()?),
             "--holdout" => holdout = next()?.parse()?,
             "--mesh" => mesh_out = Some(PathBuf::from(next()?)),
             "--planar-depth" => planar = true,
@@ -109,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--normal-start" => cfg.normal_start = next()?.parse()?,
             "--alpha-mask" => cfg.alpha_mask = true,
             "--save-eval" => save_eval = Some(PathBuf::from(next()?)),
+            "--eval-zoom" => eval_zoom.push(PathBuf::from(next()?)),
             "--labels" => labels = Some(PathBuf::from(next()?)),
             "--semantic-weight" => semantic.weight = next()?.parse()?,
             "--semantic-lr" => semantic.lr = next()?.parse()?,
@@ -155,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut trainer = CudaTrainer::new(gs, &dataset, &init, cfg.clone())?;
     trainer.set_sparse_sh_adam(sparse_sh_adam);
     trainer.set_bf16_moments(bf16_moments);
+    trainer.set_filter3d(filter3d);
     if let Some(dir) = &depth_prior {
         let found = trainer.load_depth_priors(dir, depth_weight)?;
         trainer.set_depth_weight_final(depth_weight_final);
@@ -319,6 +331,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => save_ply(&trainer.scene()?, &out)?,
     }
     println!("wrote {}", out.display());
+    for dir in &eval_zoom {
+        let (mut p, mut s, mut size) = (0.0, 0.0, (0, 0));
+        for v in &dataset.eval {
+            let name = Path::new(&v.name)
+                .file_name()
+                .ok_or("eval view without a name")?;
+            let img = image::open(dir.join(name))?.to_rgb8();
+            let (w, h) = img.dimensions();
+            let gt: Vec<[f32; 3]> = img
+                .pixels()
+                .map(|q| q.0.map(|c| c as f32 / 255.0))
+                .collect();
+            let mut view = v.camera;
+            let cam = &mut view.camera;
+            let (kx, ky) = (w as f32 / cam.width as f32, h as f32 / cam.height as f32);
+            (cam.width, cam.height) = (w, h);
+            (cam.fx, cam.cx) = (cam.fx * kx, cam.cx * kx);
+            (cam.fy, cam.cy) = (cam.fy * ky, cam.cy * ky);
+            let img = trainer.render(&view)?;
+            p += psnr_masked(&img, &gt, None);
+            s += ssim(&img, &gt, w as usize, h as usize);
+            size = (w, h);
+        }
+        let k = dataset.eval.len().max(1) as f64;
+        println!(
+            "zoom eval {} ({}x{}): psnr {:.3}  ssim {:.4}",
+            dir.display(),
+            size.0,
+            size.1,
+            p / k,
+            s / k
+        );
+    }
     if let Some(dir) = &save_eval {
         std::fs::create_dir_all(dir)?;
         for v in &dataset.eval {

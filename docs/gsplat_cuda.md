@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 14).
+  version (currently 18).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -30,7 +30,7 @@ The packaging follows the DPVO CUDA kernels:
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam and bf16 moments | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
-| Mip-NeRF 360 bonsai, room, garden at `images_4`, 30k steps, 2.5M cap | Done; 32.97 / 33.00 / 27.62 dB over two runs, within 0.05 dB of brush's 33.02 / 32.95 / 27.62 ([Mip-NeRF 360](#mip-nerf-360)); all nine scenes at the 3DGS paper's resolutions 27.86 dB on average, the paper's 27.21 ([against the paper](#against-the-3dgs-paper)); 3DGS-MCMC's growth tried and not adopted ([tried](#tried-and-not-adopted-3dgs-mcmcs-growth)) |
+| Mip-NeRF 360 bonsai, room, garden at `images_4`, 30k steps, 2.5M cap | Done; 32.97 / 33.00 / 27.62 dB over two runs, within 0.05 dB of brush's 33.02 / 32.95 / 27.62 ([Mip-NeRF 360](#mip-nerf-360)); all nine scenes at the 3DGS paper's resolutions 27.86 dB on average, the paper's 27.21 ([against the paper](#against-the-3dgs-paper)); 3DGS-MCMC's growth tried and not adopted ([tried](#tried-and-not-adopted-3dgs-mcmcs-growth)); Mip-Splatting's 3D filter (`--filter3d 0.2`, opt-in) level at the training resolution (27.89 dB) and +0.8 to +1.4 dB rendering at 2x ([3D filter](#mip-splattings-3d-filter-opt-in)) |
 | Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
@@ -307,6 +307,72 @@ per setting:
   during these runs, so their times are rough.
 - **Not adopted.** It loses outdoors, and the one indoor gain costs
   three times the gaussians. The code stays on a local branch.
+
+### Mip-Splatting's 3D filter (opt-in)
+
+`gsplat_train_cuda --filter3d 0.2` (`CudaTrainer::set_filter3d`) trains
+through Mip-Splatting's 3D smoothing filter (Yu et al. 2024):
+- **The filter.** Each gaussian's covariance gains the variance
+  `0.2 (z / fx)^2`, where `z / fx` is the finest pixel footprint a
+  training camera gives it. The cameras counted are those it lies in front
+  of and projects within 1.15x of. Its opacity is scaled so its integral
+  stays the same.
+- **Recomputed** every 100 steps and after each refine, as in
+  Mip-Splatting.
+- **In the step.** The step swaps the filtered log-scales and opacity
+  logits into the scene, renders and differentiates them, then puts the
+  raw ones back and chains the gradients to them (ABI 18). Adam, the
+  refine and brush's aux losses see the raw parameters.
+- **Output.** The evaluations, meshes and the written splat carry the
+  filter, so the PLY renders as trained in any viewer.
+- **Not implemented.** Mip-Splatting's 2D mip filter, which replaces the
+  0.3 px dilation, is left out.
+
+**At the training resolution** (the protocol above, one run with the
+filter):
+
+| Scene | Without, two-run mean | With the 3D filter | Δ PSNR | Gaussians with | Training time without / with |
+|---|---|---|---|---|---|
+| bicycle | 25.44 / 0.789 | 25.61 / 0.792 | +0.17 | 2.50M | 747 / 747 s |
+| flowers | 21.81 / 0.634 | 21.91 / 0.640 | +0.10 | 2.50M | 749 / 790 s |
+| garden | 27.62 / 0.867 | 27.65 / 0.868 | +0.03 | 2.35M | 765 / 765 s |
+| stump | 27.13 / 0.800 | 27.08 / 0.804 | -0.05 | 2.11M | 654 / 617 s |
+| treehill | 22.94 / 0.654 | 22.96 / 0.659 | +0.02 | 2.24M | 728 / 687 s |
+| room | 32.42 / 0.928 | 32.30 / 0.927 | -0.12 | 0.98M | 588 / 599 s |
+| counter | 29.19 / 0.911 | 29.25 / 0.912 | +0.06 | 0.76M | 554 / 566 s |
+| kitchen | 31.72 / 0.928 | 31.71 / 0.928 | -0.01 | 0.62M | 478 / 498 s |
+| bonsai | 32.51 / 0.946 | 32.51 / 0.946 | 0.00 | 1.08M | 586 / 603 s |
+| mean of nine | 27.86 | 27.89 | +0.02 | | 5847 / 5872 s |
+
+- **Quality.** Level: every scene is within 0.17 dB, and the two runs
+  without the filter differ by up to 0.18 dB. SSIM is level or slightly
+  higher on eight of the nine scenes.
+- **Population.** Garden and treehill end with 0.15-0.19M fewer gaussians.
+- **Time.** Training is 0.4% longer over the nine scenes.
+
+**At other resolutions.** These are what the filter is for. bonsai and
+room were trained on `images_4` as in the first table, one run each. The
+splat was then also scored on the held-out views' `images_2` (2x the
+training resolution, zooming in) and `images_8` (0.5x, zooming out):
+`--eval-zoom <dir>`, with the intrinsics scaled to the images.
+
+| Scene | Filter | `images_4` (trained) | `images_2` (2x) | `images_8` (0.5x) | Training time |
+|---|---|---|---|---|---|
+| bonsai | off | 32.94 / 0.959 | 28.60 / 0.912 | 25.77 / 0.911 | 324 s |
+| bonsai | 3D filter | 32.72 / 0.959 | **29.98 / 0.929** | **26.15 / 0.921** | 350 s |
+| room | off | 32.94 / 0.950 | 29.84 / 0.903 | 28.12 / 0.926 | 279 s |
+| room | 3D filter | 33.11 / 0.950 | **30.59 / 0.911** | **28.49 / 0.931** | 295 s |
+
+- **Zooming in, +0.76 to +1.38 dB.** Without the filter, splats thinner
+  than a training pixel show as high-frequency artifacts at 2x. The filter
+  keeps every splat at least about a training pixel wide.
+- **Zooming out, +0.36 to +0.38 dB.** The 2D mip filter, which Mip-Splatting
+  adds for zooming out, would come on top.
+- **Time.** 5-8% longer at this size: the swaps and the filter's update
+  are per gaussian, and the steps are short.
+- **Kept opt-in.** It costs nothing at the training resolution, and it
+  helps wherever the splat is viewed at another one. The default is
+  unchanged so earlier results reproduce.
 
 ## Optimizations
 
