@@ -842,7 +842,7 @@ own frame and moved by the merge's transform (`map.json`'s
 
 ![Three KITTI raw drives of one district, on two days, each mapped in its own frame, merged into one map, then a close-up of a street where two of them meet](assets/map_merge_kitti.gif)
 
-<sub>Data: [KITTI raw](https://www.cvlibs.net/datasets/kitti/raw_data.php) 2011_10_03_drive_0027, 2011_09_30_drive_0027 and 2011_09_30_drive_0028 (Geiger et al., IJRR 2013), CC BY-NC-SA 3.0. This GIF is under the same licence. Colours are the left colour camera's images placed by stereo depth.</sub>
+<sub>Data: [KITTI raw](https://www.cvlibs.net/datasets/kitti/raw_data.php) 2011_10_03_drive_0027, 2011_09_30_drive_0027 and 2011_09_30_drive_0028 (Geiger et al., IJRR 2013), CC BY-NC-SA 3.0. This GIF is under the same licence. Colours are the left colour camera's images placed by stereo depth, without blown-out pixels, brightened and saturated for display (`--gamma 1.3 --saturation 1.8`).</sub>
 
 Three drives through one residential district of Karlsruhe, on 30 September
 and 3 October 2011. Each covers its own part, and they share a few streets:
@@ -914,7 +914,7 @@ target/release/examples/basalt_map_merge --base runs/2011_10_03_drive_0027_dmap 
 python3 scripts/fetch_kitti_raw_drive.py --drive $d --out raw --colour-frames KEYFRAME_FRAMES.txt
 python3 scripts/rgbd_map_cloud.py --map runs/${d}_dmap --kitti raw/${d:0:10}/${d}_sync \
   --kitti-frames euroc/$d/frames.csv --out runs/${d}_cloud.npz --every 1 --stride 3 \
-  --min-depth 3 --max-depth 25 --voxel 0.15 --max-dt-ms 5
+  --min-depth 3 --max-depth 25 --voxel 0.15 --max-dt-ms 5 --drop-overexposed 0.92
 python3 scripts/render_map_merge_gif.py --merged runs/kitti_merged \
   --map runs/2011_10_03_drive_0027_dmap --cloud runs/2011_10_03_drive_0027_cloud.npz \
   --label "2011-10-03 #27" --note "3.7 km" \

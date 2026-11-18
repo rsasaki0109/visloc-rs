@@ -208,6 +208,10 @@ def main() -> int:
                         help="per --map: a panel note (default: its own frame and duration)")
     parser.add_argument("--max-points", type=int, default=0,
                         help="draw at most this many points per session (0: all)")
+    parser.add_argument("--saturation", type=float, default=1.0,
+                        help="scale the clouds' colour saturation by this when drawing")
+    parser.add_argument("--gamma", type=float, default=1.0,
+                        help="brighten the clouds' colours when drawing: c ** (1 / gamma)")
     parser.add_argument("--point-size", type=float, default=1.0,
                         help="scale of the drawn points")
     parser.add_argument("--unit", default="flight",
@@ -264,6 +268,12 @@ def main() -> int:
     sessions = [Session(d, label, COLOURS[i % len(COLOURS)], session_json[i], cloud,
                         args.max_points)
                 for i, (d, label, cloud) in enumerate(zip(args.map, labels, clouds))]
+    if args.saturation != 1.0 or args.gamma != 1.0:
+        for s in sessions:
+            if s.rgb is not None:
+                rgb = s.rgb ** (1.0 / args.gamma)
+                grey = rgb.mean(axis=1, keepdims=True)
+                s.rgb = np.clip(grey + (rgb - grey) * args.saturation, 0.0, 1.0)
     for s in sessions:
         print(f"{s.label}: {s.keyframes} keyframes, {len(s.points)} landmarks, "
               f"{s.duration:.0f} s, yaw {np.degrees(s.yaw):+.1f} deg")
@@ -411,7 +421,7 @@ def main() -> int:
                         * args.point_size * fit["zoom"] ** 0.7)
                 fade = swap if slide <= 0 else 1.0
                 ax.scatter(xy[:, 0], xy[:, 1], s=size, c=colour,
-                           alpha=(0.6 if not st.get("active") else 0.75) * fade,
+                           alpha=((0.6 if not st.get("active") else 0.75) if s.rgb is None else 0.85) * fade,
                            linewidths=0, zorder=1 + i * 0.01 + (1 if st.get("active") else 0))
             k = np.searchsorted(s.path_t, st["t"], side="right")
             if k >= 2:

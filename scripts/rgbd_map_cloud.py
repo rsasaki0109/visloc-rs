@@ -153,6 +153,9 @@ def main() -> int:
                         help="metres per depth unit (default 0.001 OpenLORIS, 0.0002 TUM)")
     parser.add_argument("--voxel", type=float, default=0.02)
     parser.add_argument("--max-dt-ms", type=float, default=20.0)
+    parser.add_argument("--drop-overexposed", type=float, metavar="LEVEL",
+                        help="drop pixels whose red, green and blue are all above LEVEL (0..1): "
+                             "blown-out walls and sky that carry no colour")
     parser.add_argument("--tum-camera", nargs=9, type=float, metavar="V",
                         default=[517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633],
                         help="TUM RGB camera: fx fy cx cy k1 k2 p1 p2 k3 (default Freiburg 1; "
@@ -230,6 +233,9 @@ def main() -> int:
         d = depth[v, u]
         ok = (d > args.min_depth) & (d < args.max_depth)
         u, v, d = u[ok], v[ok], d[ok]
+        if args.drop_overexposed is not None:
+            keep = ~np.all(rgb[v, u] > args.drop_overexposed * 255, axis=1)
+            u, v, d = u[keep], v[keep], d[keep]
         if distortion is None:
             x, y = (u - cx) / fx, (v - cy) / fy
         else:
