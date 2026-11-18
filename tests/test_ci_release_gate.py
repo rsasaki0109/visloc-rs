@@ -18,6 +18,11 @@ def ci_job(name: str) -> str:
     return match.group(0)
 
 
+def workspace_ci_jobs() -> str:
+    """The workspace checks, split across three parallel CI jobs."""
+    return "".join(ci_job(name) for name in ["rust", "rust-slam", "rust-extras"])
+
+
 def shell_package_list(path: str) -> list[str]:
     match = re.search(r'(?ms)^packages="\n(.*?)^"', read(path))
     if match is None:
@@ -35,11 +40,13 @@ def release_job(name: str) -> str:
 
 class CiReleaseGateTests(unittest.TestCase):
     def test_rust_ci_job_covers_release_gate_scripts(self):
-        rust = ci_job("rust")
+        rust = workspace_ci_jobs()
         for needle in [
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets -- -D warnings",
             "cargo test --workspace --all-targets",
+            # `rust` excludes visloc-slam; `rust-slam` must test it.
+            "cargo test -p visloc-slam --all-targets",
             "cargo test --test api_stability -- --nocapture",
             "python3 -m unittest discover -s tests -p 'test_*.py'",
             "scripts/benchmark_registry.py validate",
@@ -56,8 +63,13 @@ class CiReleaseGateTests(unittest.TestCase):
         ]:
             self.assertIn(needle, rust)
 
+    def test_rust_ci_tests_exclude_only_what_rust_slam_covers(self):
+        excluded = re.findall(r"--exclude (\S+)", ci_job("rust"))
+        self.assertEqual(excluded, ["visloc-slam"])
+        self.assertIn("cargo test -p visloc-slam --all-targets", ci_job("rust-slam"))
+
     def test_ci_keeps_dnf_and_artifact_visibility_gates(self):
-        rust = ci_job("rust")
+        rust = workspace_ci_jobs()
         for artifact in [
             "gnss-demo-outputs",
             "timestamped-gnss-image-demo-outputs",
