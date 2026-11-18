@@ -863,9 +863,17 @@ drive on its own (grey cameras and the 100 Hz OXTS through
 | 2011_09_30_drive_0027 (odometry 07) | 692 m | 0.46 m |
 | 2011_09_30_drive_0028 (odometry 08), first 700 frames | 508 m | 0.48 m |
 
-Only the first 700 frames of drive 0028 are used: between its frames 600
-and 1,000 the VIO fails, and its error jumps from 0.4 m to 41 m. Those 700
-frames hold the street it shares with 2011_10_03_drive_0027.
+Only the first 700 frames of drive 0028 are used: they hold the street it
+shares with 2011_10_03_drive_0027 (its frames 69–535), and the rest of its
+4.1 km meets no other drive, so the merge cannot check or correct it. Over
+the whole drive the SLAM is 7.7 m off (0.2% of the path, without a loop);
+aligned 500 frames at a time it is 0.4–0.9 m off, 3.1 m for frames
+1,100–1,600. Its reference is not clean either: at frames 896–900, 963–976,
+1,006–1,017 and 1,045–1,070 the OXTS positions imply speeds more than 2 m/s
+from the OXTS's own velocity, GPS position jumps. (An earlier version of
+this page read the error against the reference aligned on the first 550
+frames only, 41 m by frame 950, as a VIO failure. It is not: it is that
+drift, extrapolated, plus those jumps.)
 
 Two things the earlier merges did not need:
 
