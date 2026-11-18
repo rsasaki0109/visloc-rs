@@ -219,12 +219,42 @@ Limitations:
 * On an estimator reset the VIO's world frame starts over, so the mapper
   starts over too: the old map is discarded, `T_map_odom` returns to the
   identity, and the trajectory file covers the frames since the last reset.
-* Stereo and mono (`mono:=true`). Measured on recorded EuRoC data without
-  DDS (`examples/euroc_mapper_replay.rs`, below), not yet through
-  `ros2 bag play`.
+* Stereo and mono (`mono:=true`). Measured through `ros2 bag play` on ROS 2
+  Jazzy and without DDS (`examples/euroc_mapper_replay.rs`), both below.
 * Do not run it next to `visloc_map_localize_node` with the same `map_frame`:
   both publish `map -> odom` (and both name their output `map_pose`, with
   different types).
+
+#### On EuRoC, through `ros2 bag play`
+
+The node was run on ROS 2 Jazzy (Ubuntu 24.04, `packages.ros.org`, the
+default `rmw_fastrtps_cpp`). EuRoC V1_01_easy was converted with
+`tools/euroc_to_rosbag2.py` and played at 1.0x with `--delay 3`.
+`ros2 bag record` captured `/odom /map_pose /map_path /tf`, and the node was
+stopped with SIGINT after playback. The run was 2026-11-18, on 4 cores, with
+the online benchmark's calibration and config
+(`configs/basalt/variants/official_euroc_ds/`). SE(3) ATE against the ground
+truth:
+
+| V1_01, `mapper:=true` | `odom` | live `map_pose` | shutdown trajectory | Same run without DDS |
+| --- | ---: | ---: | ---: | ---: |
+| stereo | 0.0390 m | 0.0385 m | **0.0355 m** | 0.0390 / 0.0385 / 0.0354 m |
+| mono (`mono:=true`) | 0.074 m | 0.065 m | **0.034 m** | demo `--mono`, upstream init: 0.034 m |
+
+- **Every frame was processed.** Both runs processed all 2,912 frames with
+  none dropped, and lost no mapper packet. Stereo sent 409 packets (276 loop
+  pairs, 3 BA merges) and mono 466 (174 loop pairs, 4 merges).
+- **`/tf` carried both transforms on every frame.** It has `map -> odom` and
+  `odom -> imu_link` 2,912 times each.
+- **Shutdown.** The final optimization took 15.7 s (stereo) and 24.6 s
+  (mono) after SIGINT, and both runs wrote their trajectory file.
+- **Mono uses the one-sample initial tilt.** `config.vio_init_accel_average_s`
+  is a EuRoC-reader option, and the node does not read it. Mono's mean
+  frontend / estimator time was 4.1 / 6.8 ms per frame.
+- **Python version.** Jazzy's Python packages are built for Python 3.12. On a
+  machine whose `/usr/bin/python3` is another version, run the tools as
+  `python3.12 /opt/ros/jazzy/bin/ros2 ...` and
+  `python3.12 tools/euroc_to_rosbag2.py ...`.
 
 #### On EuRoC, without DDS
 

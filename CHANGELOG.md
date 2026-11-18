@@ -6,6 +6,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`visloc_vio_node` with the online mapper, through `ros2 bag play` on ROS 2
+  Jazzy** (EuRoC V1_01, 1.0x, Fast DDS):
+  - stereo: shutdown trajectory 0.0355 m (live `map_pose` 0.0385 m), the
+    same as the DDS-free replay;
+  - mono: 0.034 m;
+  - all 2,912 frames processed in both runs, no mapper packet dropped, and
+    `map -> odom` on `/tf` for every frame (ros2/visloc-ros2/README.md).
+
 - **`visloc_vio_node` runs monocular-inertial VIO (opt-in, `mono:=true`).**
   - The calibration is cut to one camera (`mono_camera`, default 0), and only
     `left/image_raw` is subscribed. Every image is a frame once IMU data
@@ -128,6 +136,23 @@ All notable changes to `visloc-rs` will be documented here.
   `:latest` for the newest tag). The GPU paths use wgpu through Vulkan: with
   `--gpus all` (NVIDIA Container Toolkit) on the GPU, otherwise on Mesa's
   software Vulkan device (docs/docker.md).
+
+### Fixed
+
+- **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
+  2011_10_03_0042 the stereo VO stopped for good at pair ~326.
+  - **Cause.** `kabsch_n` converted its rotation with nalgebra's
+    `UnitQuaternion::from_matrix`, an iterative projection with no iteration
+    limit. On a ~180° rotation from a bad RANSAC sample it cycles forever.
+  - **Fix.** The same projection, capped at 1,000 iterations, falls back to
+    the matrix itself, which is already a rotation. Every converging case
+    gives the same bits as before.
+  - **Result.** The whole drive now runs (1,170 frames in 423 s), and its
+    first 260 poses are byte-identical. Its accuracy over the full highway
+    drive is poor (263 m ATE against OXTS); only the first 260 frames were
+    ever tuned.
+  - The same unbounded `from_matrix` call remains in P3P, PnP, two-view and
+    the Basalt mapper; no hang has been seen there.
 
 ### Changed
 
