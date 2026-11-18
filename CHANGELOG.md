@@ -6,6 +6,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **CUDA trainer: Mip-Splatting's 3D smoothing filter (opt-in,
+  `gsplat_train_cuda --filter3d 0.2`, `CudaTrainer::set_filter3d`).**
+  - **How.** Each gaussian's covariance gains `0.2 (z / fx)^2`, the finest
+    footprint a training camera gives it. Its opacity is scaled so its
+    integral stays the same. The filter is recomputed every 100 steps and
+    after each refine.
+  - **The step.** It renders and differentiates the filtered parameters,
+    then chains the gradients to the raw ones (ABI 18).
+  - **Output.** Renders, meshes and the written splat carry the filter.
+  - **Evaluation at other resolutions.** `--eval-zoom <dir>` scores the
+    held-out views on images at another resolution.
+  - **Mip-NeRF 360, nine scenes, at the training resolution.** Level:
+    27.89 dB on average against 27.86, with 0.4% more training time.
+  - **Trained on `images_4`, rendered at 2x** (`images_2`): bonsai
+    +1.38 dB and room +0.76 dB. At 0.5x (`images_8`) both gain
+    +0.36-0.38 dB (docs/gsplat_cuda.md, "Mip-Splatting's 3D filter").
+
 - **`visloc_vio_node` with the online mapper, through `ros2 bag play` on ROS 2
   Jazzy** (EuRoC V1_01, 1.0x, Fast DDS):
   - stereo: shutdown trajectory 0.0355 m (live `map_pose` 0.0385 m), the

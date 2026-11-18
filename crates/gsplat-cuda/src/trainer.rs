@@ -11,7 +11,8 @@
 //! depth-normal loss (`normal_weight`) runs from `normal_start` on, as in
 //! the wgpu trainer. With labels ([`CudaTrainer::set_labels`]) every step
 //! also trains a logit per class and gaussian against the view's labels
-//! (CUDA only). Not supported yet: the Inria densification rule and
+//! (CUDA only). With [`CudaTrainer::set_filter3d`] the steps
+//! render through Mip-Splatting's 3D smoothing filter. Not supported yet: the Inria densification rule and
 //! per-image appearance.
 
 use std::fmt;
@@ -28,6 +29,10 @@ use visloc_gsplat_train::dataset::{
 use visloc_gsplat_train::densify::{BrushRefineConfig, DensifyReport, Group, Population};
 
 use crate::{CudaGsplat, GscCamera, GsplatCudaError, LabelGeometry, StepParams};
+
+/// Steps between recomputations of the 3D filter
+/// ([`CudaTrainer::set_filter3d`]), as Mip-Splatting.
+pub const FILTER3D_EVERY: usize = 100;
 
 #[derive(Debug)]
 pub enum CudaTrainError {
@@ -114,6 +119,11 @@ pub struct CudaTrainer {
     // The semantic logits' classes and training, once labels are set.
     semantic: Option<(usize, SemanticTraining)>,
     last_semantic_loss: f32,
+    // Mip-Splatting's 3D filter: its variance scale, if on, the training
+    // cameras it is computed over, and whether the scene changed since.
+    filter3d: Option<f32>,
+    filter_cameras: Vec<GscCamera>,
+    filter_dirty: bool,
 }
 
 impl fmt::Debug for CudaTrainer {
@@ -204,6 +214,9 @@ impl CudaTrainer {
             last_normal_loss: 0.0,
             semantic: None,
             last_semantic_loss: 0.0,
+            filter3d: None,
+            filter_cameras: Vec::new(),
+            filter_dirty: true,
         })
     }
 
@@ -219,6 +232,49 @@ impl CudaTrainer {
     /// instead of 28, and the moments take half the memory.
     pub fn set_bf16_moments(&mut self, on: bool) {
         self.bf16_moments = on;
+    }
+
+    /// Train through Mip-Splatting's 3D smoothing filter (`None`: off, the
+    /// default): every gaussian's covariance gains the variance
+    /// `var_scale (z / fx)^2` of the finest footprint a training camera
+    /// gives it (Mip-Splatting's 0.2), and its opacity the factor that keeps
+    /// its integral, recomputed every [`FILTER3D_EVERY`] steps and after each
+    /// refine. Renders and [`scene`](Self::scene) then show the filtered
+    /// gaussians.
+    pub fn set_filter3d(&mut self, var_scale: Option<f32>) {
+        self.filter3d = var_scale;
+        self.filter_cameras = self
+            .views
+            .iter()
+            .map(|v| GscCamera::from_view(&v.camera))
+            .collect();
+        self.filter_dirty = true;
+    }
+
+    // Recompute the 3D filter if it is on and `due`, or the scene changed.
+    fn update_filter3d(&mut self, due: bool) -> Result<(), CudaTrainError> {
+        if let Some(scale) = self.filter3d {
+            if due || self.filter_dirty {
+                self.gs.compute_filter3d(&self.filter_cameras, scale)?;
+                self.filter_dirty = false;
+            }
+        }
+        Ok(())
+    }
+
+    // Run `f` with the 3D filter applied to the scene, if it is on.
+    fn with_filter3d<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, CudaTrainError>,
+    ) -> Result<T, CudaTrainError> {
+        if self.filter3d.is_none() {
+            return f(self);
+        }
+        self.update_filter3d(false)?;
+        self.gs.set_filter3d_applied(true)?;
+        let out = f(self);
+        self.gs.set_filter3d_applied(false)?;
+        out
     }
 
     pub fn steps_done(&self) -> usize {
@@ -286,6 +342,7 @@ impl CudaTrainer {
             Some(b) => (lr_mean * b.mean_noise_weight, 0.25 * self.bound_size),
             None => (0.0, 0.0),
         };
+        self.update_filter3d(self.step.is_multiple_of(FILTER3D_EVERY))?;
         let params = StepParams {
             camera: GscCamera::from_view(&self.views[vi].camera),
             image: vi as u32,
@@ -323,6 +380,7 @@ impl CudaTrainer {
             lr_semantic: self.semantic.map_or(0.0, |(_, s)| s.lr),
             semantic_geometry: self.semantic.map_or(0, |(_, s)| s.geometry as u32),
             moments_bf16: self.bf16_moments as u32,
+            filter3d: self.filter3d.is_some() as u32,
         };
         self.gs.train_step(&params)?;
         self.step += 1;
@@ -431,6 +489,7 @@ impl CudaTrainer {
             .collect();
         let seed = (self.cfg.seed as u32) ^ (self.step as u32).wrapping_mul(0x9E37_79B9);
         let n_after = self.gs.apply_actions(&actions, seed)?;
+        self.filter_dirty = true;
         self.bound_size = size;
         self.last_refine = Some(DensifyReport {
             cloned: grown,
@@ -560,7 +619,8 @@ impl CudaTrainer {
 
     /// Render a view with the current SH degree (row-major RGB).
     pub fn render(&mut self, view: &CameraView) -> Result<Vec<[f32; 3]>, CudaTrainError> {
-        let frame = self.gs.render(view, self.cfg.background, self.active_sh)?;
+        let frame =
+            self.with_filter3d(|t| Ok(t.gs.render(view, t.cfg.background, t.active_sh)?))?;
         Ok(frame
             .rgb
             .chunks_exact(3)
@@ -577,19 +637,22 @@ impl CudaTrainer {
         support: &[[f32; 3]],
         opts: &visloc_gsplat_train::mesh::MeshOptions,
     ) -> Result<(visloc_gsplat_train::mesh::Mesh, String), CudaTrainError> {
-        Ok(crate::mesh::extract_mesh(
-            &mut self.gs,
-            self.active_sh,
-            crate::mesh::MeshDepth::median(planar),
-            views,
-            support,
-            opts,
-        )?)
+        self.with_filter3d(|t| {
+            Ok(crate::mesh::extract_mesh(
+                &mut t.gs,
+                t.active_sh,
+                crate::mesh::MeshDepth::median(planar),
+                views,
+                support,
+                opts,
+            )?)
+        })
     }
 
-    /// Download the current gaussians as a [`Scene`].
-    pub fn scene(&self) -> Result<Scene, CudaTrainError> {
-        let packed = self.gs.scene()?;
+    /// Download the current gaussians as a [`Scene`] (with the 3D filter
+    /// baked in, if on: the filter is a gaussian's own shape and opacity).
+    pub fn scene(&mut self) -> Result<Scene, CudaTrainError> {
+        let packed = self.with_filter3d(|t| Ok(t.gs.scene()?))?;
         let group = |stride: usize, values: Vec<f32>| Group {
             stride,
             values,

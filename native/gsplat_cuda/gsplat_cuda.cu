@@ -51,6 +51,14 @@
 // rounded stochastically, as Adam's second moment changes by 0.1% a step
 // (beta2 0.999), under half a bf16 step (0.2%), and round to nearest would
 // leave it where it is.
+//
+// Since ABI 18 a step can render through Mip-Splatting's 3D smoothing filter
+// (filter3d, compute_filter3d): each gaussian's covariance gains the
+// variance of the finest footprint a training camera gives it, its opacity
+// the factor that keeps its integral. The step swaps the filtered log-scales
+// and opacity logits into the scene, renders and differentiates them, then
+// swaps the raw ones back and chains the gradients to them, so the
+// optimizer, the refine and the aux losses see the raw parameters.
 
 #include <cuda_runtime.h>
 
@@ -92,7 +100,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 17;
+constexpr uint32_t kAbiVersion = 18;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -2187,6 +2195,108 @@ __global__ void noise_kernel(int n, uint32_t seed, float scale, float max_noise,
     for (int k = 0; k < 3; ++k) t[k] += clampf(d[k] * w, -max_noise, max_noise);
 }
 
+// Mip-Splatting's 3D smoothing filter (Yu et al. 2024): per gaussian, the
+// finest image footprint any training camera gives it, r = z / fx at the
+// camera with the smallest such ratio among those it lies in front of
+// (z > 0.2) and projects within 1.15x of; -1 if none. The largest r found
+// goes to `max_bits` (float bits, as positive floats order as integers).
+__global__ void filter3d_rate_kernel(int n, const GscCamera* __restrict__ cams, int ncam,
+                                     const float* __restrict__ transforms, float* __restrict__ out,
+                                     unsigned int* __restrict__ max_bits) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* t = transforms + size_t(i) * 10;
+    float best = INFINITY;
+    for (int c = 0; c < ncam; ++c) {
+        const GscCamera& cam = cams[c];
+        const float* W = cam.rot;
+        const float pz = W[6] * t[0] + W[7] * t[1] + W[8] * t[2] + cam.t[2];
+        if (pz <= 0.2f) continue;
+        const float px = W[0] * t[0] + W[1] * t[1] + W[2] * t[2] + cam.t[0];
+        const float py = W[3] * t[0] + W[4] * t[1] + W[5] * t[2] + cam.t[1];
+        const float u = cam.fx * px / pz + cam.cx, v = cam.fy * py / pz + cam.cy;
+        const float w = float(cam.width), h = float(cam.height);
+        if (u < -0.15f * w || u > 1.15f * w || v < -0.15f * h || v > 1.15f * h) continue;
+        best = fminf(best, pz / cam.fx);
+    }
+    if (best < INFINITY) {
+        out[i] = best;
+        atomicMax(max_bits, __float_as_uint(best));
+    } else {
+        out[i] = -1.f;
+    }
+}
+
+// The filter's variance var_scale r^2, a gaussian no camera sees taking the
+// largest r (as Mip-Splatting does).
+__global__ void filter3d_fill_kernel(int n, float var_scale, const unsigned int* __restrict__ max_bits,
+                                     float* __restrict__ var) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float r = var[i] < 0.f ? __uint_as_float(*max_bits) : var[i];
+    var[i] = var_scale * r * r;
+}
+
+// The filtered log-scales 0.5 ln(s^2 + f) and opacity logit (opacity times
+// coef = prod sqrt(s^2 / (s^2 + f)), which keeps the gaussian's integral)
+// in place of the raw ones, which go to `raw`.
+__global__ void filter3d_apply_kernel(int n, const float* __restrict__ var, float* __restrict__ transforms,
+                                      float* __restrict__ opacity, float4* __restrict__ raw) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float* t = transforms + size_t(i) * 10;
+    const float o = opacity[i];
+    raw[i] = make_float4(t[7], t[8], t[9], o);
+    const float f = var[i];
+    float log_coef = 0.f;
+#pragma unroll
+    for (int k = 0; k < 3; ++k) {
+        const float filtered = 0.5f * logf(expf(2.f * t[7 + k]) + f);
+        log_coef += t[7 + k] - filtered;
+        t[7 + k] = filtered;
+    }
+    // logit(sig coef) = o + ln coef + ln(1 - sig) - ln(1 - sig coef), with
+    // 1 - sig coef = (1 - sig) + sig (1 - coef) kept exact for coef near 1.
+    const float sig = 1.f / (1.f + expf(-o));
+    const float one_m_sig = 1.f / (1.f + expf(o));
+    const float one_m_eff = one_m_sig - sig * expm1f(log_coef);
+    opacity[i] = o + log_coef + logf(one_m_sig) - logf(one_m_eff);
+}
+
+// Put the raw log-scales and opacity logits back, and take the gradients
+// (nullable) with respect to the filtered ones to the raw ones:
+// d ls'/d ls = s^2 / (s^2 + f), d o'/d o = (1 - sig) / (1 - eff),
+// d o'/d ls = f / (s^2 + f) / (1 - eff).
+__global__ void filter3d_restore_kernel(int n, const float* __restrict__ var, float* __restrict__ transforms,
+                                        float* __restrict__ opacity, const float4* __restrict__ raw,
+                                        float* __restrict__ g_transforms, float* __restrict__ g_opacity) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 r = raw[i];
+    float* t = transforms + size_t(i) * 10;
+    t[7] = r.x;
+    t[8] = r.y;
+    t[9] = r.z;
+    opacity[i] = r.w;
+    if (!g_transforms) return;
+    const float f = var[i];
+    const float ls[3] = {r.x, r.y, r.z};
+    float s2[3], log_coef = 0.f;
+#pragma unroll
+    for (int k = 0; k < 3; ++k) {
+        s2[k] = expf(2.f * ls[k]);
+        log_coef += ls[k] - 0.5f * logf(s2[k] + f);
+    }
+    const float sig = 1.f / (1.f + expf(-r.w));
+    const float one_m_sig = 1.f / (1.f + expf(r.w));
+    const float one_m_eff = one_m_sig - sig * expm1f(log_coef);
+    const float go = g_opacity[i];
+    float* g = g_transforms + size_t(i) * 10;
+#pragma unroll
+    for (int k = 0; k < 3; ++k) g[7 + k] = g[7 + k] * s2[k] / (s2[k] + f) + go * f / ((s2[k] + f) * one_m_eff);
+    g_opacity[i] = go * one_m_sig / one_m_eff;
+}
+
 __global__ void action_counts_kernel(int n, const uint32_t* __restrict__ actions, uint32_t* __restrict__ counts) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -2346,6 +2456,13 @@ struct Ctx {
     Buf sem, sem_m1, sem_m2, sem_prob, sem_grad, sem_labels, acc_sem, d_sem, acc_lab, d_lab;
     int sem_k = 0, sem_images = 0;
     std::vector<uint32_t> sem_counts;
+    // Mip-Splatting's 3D filter: per gaussian its variance (for `filter_n`
+    // gaussians; -1: none, or the scene changed since), the raw log-scales
+    // and opacity logits while the filtered ones stand in the scene
+    // (`filter_applied`), and scratch for the cameras and the largest rate.
+    Buf filter_var, filter_raw, filter_cams, filter_max;
+    int filter_n = -1;
+    bool filter_applied = false;
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -2921,6 +3038,42 @@ int run_sem_forward(Ctx* ctx) {
 
 }  // namespace
 
+// Put the 3D-filtered log-scales and opacity logits in the scene (`apply`),
+// or the raw ones back, then with `chain` taking the last backward's
+// gradients to the raw parameters.
+int filter3d_swap(Ctx* ctx, bool apply, bool chain) {
+    const int n = ctx->n;
+    if (apply) {
+        if (ctx->filter_n != n || ctx->filter_applied) {
+            ctx->error = "filter3d: compute_filter3d since the scene changed, and not applied twice";
+            return -1;
+        }
+        float4* raw;
+        GSC_TRY(ensure(ctx, ctx->filter_raw, size_t(n), &raw));
+        if (n > 0) {
+            filter3d_apply_kernel<<<blocks_for(n), 256>>>(n, static_cast<const float*>(ctx->filter_var.ptr), ctx->p(0),
+                                                          ctx->p(1), raw);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+        ctx->filter_applied = true;
+    } else {
+        if (!ctx->filter_applied) {
+            ctx->error = "filter3d: not applied";
+            return -1;
+        }
+        if (n > 0) {
+            filter3d_restore_kernel<<<blocks_for(n), 256>>>(
+                n, static_cast<const float*>(ctx->filter_var.ptr), ctx->p(0), ctx->p(1),
+                static_cast<const float4*>(ctx->filter_raw.ptr), chain ? static_cast<float*>(ctx->grads[0].ptr) : nullptr,
+                chain ? static_cast<float*>(ctx->grads[1].ptr) : nullptr);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+        ctx->filter_applied = false;
+    }
+    ctx->have_forward = false;
+    return 0;
+}
+
 extern "C" {
 
 // One optimisation step (see visloc_gsplat_cuda_train_step). Mirrored by
@@ -2947,6 +3100,7 @@ struct GscStepParams {
     float lr_semantic;         // learning rate of the logits
     uint32_t semantic_geometry; // the labels also move: 0 only the logits, 1 opacities and centres, 2 shapes too
     uint32_t moments_bf16;      // keep the Adam moments in bf16 (converted when this changes)
+    uint32_t filter3d;          // render through the 3D filter (compute_filter3d; 0 = off)
 };
 
 #if defined(_WIN32)
@@ -2990,7 +3144,8 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum,      &ctx->labels,     &ctx->votes,
                    &ctx->sem,         &ctx->sem_m1,    &ctx->sem_m2,   &ctx->sem_grad,   &ctx->sem_labels,
-                   &ctx->acc_sem,     &ctx->d_sem, &ctx->sem_prob, &ctx->acc_lab, &ctx->d_lab};
+                   &ctx->acc_sem,     &ctx->d_sem, &ctx->sem_prob, &ctx->acc_lab, &ctx->d_lab,
+                   &ctx->filter_var,  &ctx->filter_raw, &ctx->filter_cams, &ctx->filter_max};
     for (Buf* b : bufs) free_buf(*b);
     for (int s = 0; s < kNumStages; ++s) {
         if (ctx->ev_start[s]) cudaEventDestroy(ctx->ev_start[s]);
@@ -3019,6 +3174,8 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
     ctx->n = n;
     ctx->sh_degree = sh_degree;
     ctx->have_forward = false;
+    ctx->filter_n = -1;
+    ctx->filter_applied = false;
     ctx->vote_k = 0;
     const float* src[3] = {transforms, opacity, sh};
     for (int k = 0; k < 3; ++k) {
@@ -3488,7 +3645,13 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
         ctx->error = "train_step: a semantic weight needs labels per uploaded image (set_labels)";
         return -1;
     }
+    const bool filter_on = p->filter3d != 0;
+    if (filter_on && (ctx->filter_n != ctx->n || ctx->filter_applied)) {
+        ctx->error = "train_step: the 3D filter needs compute_filter3d since the scene changed, and not applied";
+        return -1;
+    }
     clear_stages(ctx);
+    if (filter_on) GSC_TRY(filter3d_swap(ctx, true, false));
     SemBackward sem;
     if (sem_on) {
         sem.labels_ce = true;
@@ -3510,6 +3673,8 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     GSC_TRY(run_loss(ctx, p->image, p->ssim_weight, depth_on ? p->depth_weight : 0.f,
                      normal_on ? p->normal_weight : 0.f, sem_on ? p->semantic_weight : 0.f));
     GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, normal_on ? 2 : (depth_on ? 1 : 0), sem));
+    // Back to the raw parameters, the gradients with them.
+    if (filter_on) GSC_TRY(filter3d_swap(ctx, false, true));
 
     const int n = ctx->n;
     const uint32_t* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
@@ -3578,6 +3743,52 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     return 0;
 }
 
+// Mip-Splatting's 3D filter for the current scene: per gaussian the
+// variance var_scale (z / fx)^2 at the finest of the `count` cameras that see
+// it (filter3d_rate_kernel), for train_step's `filter3d` and filter3d_apply.
+// Needed again whenever the scene changes (set_scene, apply_actions); not
+// while the filter is applied.
+GSC_EXPORT int visloc_gsplat_cuda_compute_filter3d(void* handle, int count, const GscCamera* cams, float var_scale) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (count <= 0 || !cams || !(var_scale >= 0.f)) {
+        ctx->error = "compute_filter3d: cameras and a variance scale >= 0 are required";
+        return -1;
+    }
+    if (ctx->filter_applied) {
+        ctx->error = "compute_filter3d: the filter is applied (filter3d_apply 0 first)";
+        return -1;
+    }
+    const int n = ctx->n;
+    GscCamera* d_cams;
+    unsigned int* d_max;
+    float* var;
+    GSC_TRY(ensure(ctx, ctx->filter_cams, size_t(count), &d_cams));
+    GSC_TRY(ensure_zero(ctx, ctx->filter_max, 1, &d_max));
+    GSC_TRY(ensure(ctx, ctx->filter_var, size_t(n), &var));
+    GSC_CHECK(ctx, cudaMemcpy(d_cams, cams, size_t(count) * sizeof(GscCamera), cudaMemcpyHostToDevice));
+    if (n > 0) {
+        filter3d_rate_kernel<<<blocks_for(n), 256>>>(n, d_cams, count, ctx->p(0), var, d_max);
+        GSC_CHECK(ctx, cudaGetLastError());
+        filter3d_fill_kernel<<<blocks_for(n), 256>>>(n, var_scale, d_max, var);
+        GSC_CHECK(ctx, cudaGetLastError());
+    }
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    ctx->filter_n = n;
+    return 0;
+}
+
+// Put the 3D-filtered log-scales and opacity logits in the scene (`on` 1),
+// so render, get_scene and the rest see the filtered gaussians, or the raw
+// ones back (0).
+GSC_EXPORT int visloc_gsplat_cuda_filter3d_apply(void* handle, int on) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    GSC_TRY(filter3d_swap(ctx, on != 0, false));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
 // The training loss of the last render against uploaded image `image`
 // (what train_step computes): `d_image` (nullable) receives its gradient,
 // width * height * 3 floats. The loss sums go to take_loss as a step's do.
@@ -3632,6 +3843,10 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
     const int n = ctx->n;
     if (n > 0 && !actions) {
         ctx->error = "apply_actions: actions are required";
+        return -1;
+    }
+    if (ctx->filter_applied) {
+        ctx->error = "apply_actions: the 3D filter is applied (filter3d_apply 0 first)";
         return -1;
     }
     for (int i = 0; i < n; ++i) {
@@ -3713,6 +3928,7 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
     }
     ctx->n = int(total);
     ctx->have_forward = false;
+    ctx->filter_n = -1;
     ctx->vote_k = 0;
     float *w, *s;
     GSC_TRY(ensure_zero(ctx, ctx->weight_max, total, &w));
