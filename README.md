@@ -22,6 +22,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/map_merge_kitti.gif" alt="Three KITTI raw drives through one residential district, recorded on two days, each mapped by its own stereo-inertial SLAM session in its own frame, then merged one at a time into one map of the district, and a drive at street level along a street two of them share, past parked cars and houses." width="720"><br>
+  <sub>Multi-session mapping: three <a href="https://www.cvlibs.net/datasets/kitti/raw_data.php">KITTI raw</a> drives (4.9 km, 30 Sep and 3 Oct 2011), each mapped on its own, merged by <code>basalt_map_merge</code> into one district map: <b>1.1 m RMSE</b> against the OXTS ground truth over all three, about the base drive's own SLAM error. Each covers its own part of the district and they share a few streets, so only the merge makes the whole. Colours from the colour cameras, brightened for display. Data CC BY-NC-SA 3.0, and so is this GIF. <a href="docs/basalt_map_localization.md#across-days-three-kitti-raw-drives">Details</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,583 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, streets and parked cars included, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,583 camera poses &rarr; 4.7M-gaussian splat &rarr; 5.9M-triangle mesh in 2.5 h, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
