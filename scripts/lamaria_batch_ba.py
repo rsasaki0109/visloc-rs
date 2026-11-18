@@ -968,6 +968,32 @@ def segment_prior(r_ic, pairs, slot, n_ext, w):
     return cost, h, b
 
 
+def stereo_translation_prior(t_ref, translations, baseline, walk_sigma, baseline_sigma, linearize=False):
+    """Random walk on the stereo offset and a factory baseline-length prior, in metres."""
+    offsets = translations - t_ref
+    walk = np.diff(offsets, axis=0) / walk_sigma
+    lengths = np.linalg.norm(offsets, axis=1)
+    length_error = (lengths - baseline) / baseline_sigma
+    cost = 0.5 * (np.sum(walk ** 2) + length_error @ length_error)
+    if not linearize:
+        return cost
+
+    n = len(translations)
+    direction = offsets / np.where(lengths > 0, lengths, 1.0)[:, None] / baseline_sigma
+    h = np.zeros((n, 3, n, 3))
+    i = np.arange(n)
+    h[i, :, i, :] = direction[:, :, None] * direction[:, None, :]
+    b = -direction * length_error[:, None]
+    w = np.eye(3) / walk_sigma ** 2
+    h[i[:-1], :, i[:-1], :] += w
+    h[i[1:], :, i[1:], :] += w
+    h[i[:-1], :, i[1:], :] -= w
+    h[i[1:], :, i[:-1], :] -= w
+    b[:-1] += walk / walk_sigma
+    b[1:] -= walk / walk_sigma
+    return h.reshape(n * 3, n * 3), b.ravel()
+
+
 def focal_prior(foc, pairs, slot, n_par, n_ext, w_pair, w_abs, w_mean=0.0, groups=()):
     """Cost, Hessian and right-hand side of the priors on the focal length scales s (the last parameter of
     each estimated camera's slot): s ~ N(0, 1 / w_abs), s_b - s_a ~ N(0, 1 / w_pair) for each pair, and the
@@ -1064,17 +1090,17 @@ def _schur_add(m_o, h_xl, h_xx, g_x, g_l, kf, slot, lm, lm_start, band, nb, ab, 
 _schur_add_jit = njit(nogil=True)(_schur_add) if njit is not None else None
 
 
-def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est, active, sigma, huber,
+def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_trans, est_foc, active, sigma, huber,
                 h_xx, h_xl, g_x, h_ll_o, h_ll, g_l, o0=0, o1=-1):
     """Reprojection.linearize and its normal equations in one pass (plain loops, for numba).
 
     Each active observation in front of its camera adds its Huber-weighted blocks H_xx (n x n), H_xl (n x 3),
     g_x (n) and H_ll (3 x 3) at its own index, and H_ll and g_l to its landmark; the arrays start at zero.
-    n = 9 (pose, camera rotation) or 10 (and the camera's focal length scale), from the shape of h_xx.
+    The columns are pose, camera rotation, optional camera translation, then optional focal scale.
     Observations o0 to o1 (default: all).
     """
     nx = h_xx.shape[1]
-    jpi, jr, jx, jl = np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, 10)), np.zeros((2, 3))
+    jpi, jr, jx, jl = np.zeros((2, 3)), np.zeros((2, 3)), np.zeros((2, nx)), np.zeros((2, 3))
     p_i, p_c, d = np.zeros(3), np.zeros(3), np.zeros(3)
     for o in range(o0, kf.shape[0] if o1 < 0 else o1):
         k, c, l = kf[o], cam[o], lm[o]
@@ -1104,13 +1130,17 @@ def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est, active, 
             jx[r, 2] = jr[r, 0] * p_i[1] - jr[r, 1] * p_i[0]
             for b in range(3):
                 jx[r, 3 + b] = -jr[r, b]
-            if est[c]:
+            if est_rot[c]:
                 jx[r, 6] = jpi[r, 1] * p_c[2] - jpi[r, 2] * p_c[1]
                 jx[r, 7] = jpi[r, 2] * p_c[0] - jpi[r, 0] * p_c[2]
                 jx[r, 8] = jpi[r, 0] * p_c[1] - jpi[r, 1] * p_c[0]
-                jx[r, 9] = kcam[c, r] * p_c[r] / zs / sg  # f <- f exp(s)
             else:
-                jx[r, 6] = jx[r, 7] = jx[r, 8] = jx[r, 9] = 0.0
+                jx[r, 6] = jx[r, 7] = jx[r, 8] = 0.0
+            if nx >= 12:
+                for b in range(3):
+                    jx[r, 9 + b] = -jr[r, b] if est_trans[c] else 0.0
+            if nx == 10 or nx == 13:
+                jx[r, nx - 1] = kcam[c, r] * p_c[r] / zs / sg if est_foc[c] else 0.0
             for b in range(3):
                 jl[r, b] = jr[r, 0] * r_wi[k, b, 0] + jr[r, 1] * r_wi[k, b, 1] + jr[r, 2] * r_wi[k, b, 2]
         for i in range(nx):
@@ -1170,11 +1200,11 @@ _landmark_m_jit = njit(nogil=True)(_landmark_m) if njit is not None else None
 _reproj_cost_jit = njit(nogil=True)(_reproj_cost) if njit is not None else None
 
 
-def _normal_eqs_chunks(bounds, r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est, active, sigma, huber,
+def _normal_eqs_chunks(bounds, r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_trans, est_foc, active, sigma, huber,
                        h_xx, h_xl, g_x, h_ll_o, h_ll, g_l):
     """_normal_eqs on chunks of whole landmarks in parallel (bounds: the first observation of each chunk)."""
     for ch in prange(bounds.shape[0] - 1):
-        _normal_eqs_jit(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est, active, sigma, huber,
+        _normal_eqs_jit(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_trans, est_foc, active, sigma, huber,
                         h_xx, h_xl, g_x, h_ll_o, h_ll, g_l, bounds[ch], bounds[ch + 1])
 
 
@@ -1198,13 +1228,13 @@ _reproj_cost_par = njit(nogil=True, parallel=True)(_reproj_cost_chunks) if njit 
 class Reprojection:
     """All reprojection observations, sorted by landmark, with the fixed Schur pair structure.
 
-    Unknowns per observation: the keyframe pose (6, GTSAM Pose3 retract: R <- R Exp(w),
-    t <- t + R v), the camera's extrinsic rotation (3, R_imu_cam <- R_imu_cam Exp(phi); zero
-    columns for a camera that is not estimated) and the landmark (3, world).
+    Each observation connects the keyframe pose (GTSAM Pose3 retract), the camera's rotation
+    (right perturbation), optional translation (additive in the IMU frame), optional log focal
+    scale and the landmark (world frame). Fixed camera parameters have zero columns.
     """
 
     def __init__(self, obs_kf, obs_cam, obs_lm, obs_z, n_lm, cams, est_cams, sigma, huber, band, chunk=400_000,
-                 numpy_pairs=None, est_focal=False):
+                 numpy_pairs=None, est_focal=False, fixed_rotations=(), translation_cams=()):
         order = np.lexsort((obs_kf, obs_lm))
         self.kf, self.cam, self.lm, self.z = obs_kf[order], obs_cam[order], obs_lm[order], obs_z[order]
         self.n_lm, self.huber, self.chunk = n_lm, huber, chunk
@@ -1215,14 +1245,17 @@ class Reprojection:
             setattr(self, name, np.array([c["K"][i, j] for c in cams])[self.cam])
         self.kcam = np.array([[c["K"][0, 0], c["K"][1, 1], c["K"][0, 2], c["K"][1, 2]] for c in cams])
         self.kcam0 = self.kcam.copy()
-        self.est = np.array([c in est_cams for c in range(len(cams))])
         self.ext_slot = np.full(len(cams), -1)
         for i, c in enumerate(est_cams):
             self.ext_slot[c] = i
         self.n_ext = len(est_cams)
-        # parameters per estimated camera: its rotation, and with est_focal its focal length scale s
-        # (f = f_calib exp(s))
-        self.n_par = 4 if est_focal else 3
+        # A camera slot contains rotation, optional translation and optional log focal scale.
+        camera_ids = np.arange(len(cams))
+        estimated = self.ext_slot >= 0
+        self.est_rot = estimated & ~np.isin(camera_ids, fixed_rotations)
+        self.est_trans = np.isin(camera_ids, translation_cams)
+        self.est_foc = estimated & est_focal
+        self.n_par = 3 + 3 * bool(len(translation_cams)) + est_focal
         self.foc = np.zeros(len(cams))
         self.band = band
         counts = np.bincount(self.lm, minlength=n_lm)
@@ -1322,10 +1355,12 @@ class Reprojection:
         jx[:, :, 0:3] = jr @ skew(p_i)          # pose rotation
         jx[:, :, 3:6] = -jr                     # pose translation
         jx[:, :, 6:9] = jpi @ skew(p_c)         # extrinsic rotation
-        if self.n_par == 4:                     # focal length scale
-            jx[:, 0, 9] = self.fx * p_c[:, 0] / zs / self.sigma
-            jx[:, 1, 9] = self.fy * p_c[:, 1] / zs / self.sigma
-        jx[~self.est[self.cam], :, 6:] = 0.0
+        jx[~self.est_rot[self.cam], :, 6:9] = 0.0
+        if self.n_par >= 6:
+            jx[:, :, 9:12] = -jr * self.est_trans[self.cam, None, None]
+        if self.n_par in (4, 7):
+            jx[:, 0, -1] = self.fx * p_c[:, 0] / zs / self.sigma * self.est_foc[self.cam]
+            jx[:, 1, -1] = self.fy * p_c[:, 1] / zs / self.sigma * self.est_foc[self.cam]
         jl = jr @ np.transpose(rw, (0, 2, 1))   # landmark
         _, w, _ = self._robust(res, valid)
         return res, jx, jl, w
@@ -1337,7 +1372,8 @@ class Reprojection:
         h_ll_o, h_ll, g_l = np.zeros((n_o, 3, 3)), np.zeros((self.n_lm, 3, 3)), np.zeros((self.n_lm, 3))
         if _normal_eqs_par is not None:
             _normal_eqs_par(self.chunks, r_wi, t_wi, r_ic, t_ic, pts, self.kf, self.cam, self.lm, self.z, self.kcam,
-                            self.est, self.active, self.sigma, self.huber, h_xx, h_xl, g_x, h_ll_o, h_ll, g_l)
+                            self.est_rot, self.est_trans, self.est_foc, self.active, self.sigma, self.huber,
+                            h_xx, h_xl, g_x, h_ll_o, h_ll, g_l)
             return h_xx, h_xl, g_x, h_ll_o, h_ll, g_l
         res, jx, jl, w = self.linearize(r_wi, t_wi, r_ic, t_ic, pts)
         wjx, wjl = jx * w[:, None, None], jl * w[:, None, None]
@@ -1650,7 +1686,15 @@ def cmd_solve(a):
     pts = pts[used].copy()
     print(f"tracks {len(tracks)} (dropped {conflicts} with conflicts), landmarks {len(pts)}, "
           f"{time.time() - t0:.0f} s", flush=True)
-    phys_est = [int(ch) for ch in a.est_extrinsic]
+    chosen_cams = phys_est = [int(ch) for ch in a.est_extrinsic]
+    reference = getattr(a, "stereo_reference", None)
+    if reference is not None:
+        if 1 - reference not in phys_est:
+            raise SystemExit("--stereo-reference requires the other camera in --est-extrinsic")
+        if not all(np.isfinite(v) and v > 0 for v in (a.stereo_walk_sigma, a.stereo_baseline_sigma)):
+            raise SystemExit("stereo prior sigmas must be finite and positive")
+        if not a.est_focal:
+            phys_est = [1 - reference]
     est_cams, n_seg = phys_est, max(a.ext_segments, 1)
     if a.ext_seg_seconds > 0:  # segments of about this length instead of a fixed count
         n_seg = max(int(np.ceil((kf_ns[-1] - kf_ns[0]) * 1e-9 / a.ext_seg_seconds)), 1)
@@ -1660,6 +1704,7 @@ def cmd_solve(a):
         a = argparse.Namespace(**vars(a))
         a.init_states = {"kf_ns": st["kf_ns"], "vel": st["vel"], "bias": st["bias"], "r_ic": st["r_ic"],
                          "foc": st["foc"], "n_seg": int(st["ext_segments"]),
+                         "t_ic": st["t_ic"] if "t_ic" in st else None,
                          **({k: st["gm"][sl] for k, sl in (("gyro_m", slice(0, 9)), ("accel_m", slice(9, 18)),
                                                            ("gyro_temp", slice(18, 24)))} if "gm" in st else {})}
         if a.fix_calib:
@@ -1679,8 +1724,12 @@ def cmd_solve(a):
         cams = [cams[c] for c in range(2) for _ in range(n_seg)]
         est_cams = [c * n_seg + s for c in phys_est for s in range(n_seg)]
         print(f"  {n_seg} time segments per camera rotation", flush=True)
+    ref_cams = [] if reference is None else list(range(reference * n_seg, (reference + 1) * n_seg))
+    trans_cams = [] if reference is None or fixed is not None else list(
+        range((1 - reference) * n_seg, (2 - reference) * n_seg))
     rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
-                      obs_sigma, a.huber, a.band, est_focal=a.est_focal)
+                      obs_sigma, a.huber, a.band, est_focal=a.est_focal,
+                      fixed_rotations=ref_cams, translation_cams=trans_cams)
     omega = [float(v) for v in a.omega_coriolis.split(",")] if a.omega_coriolis else None
     imu_data = np.loadtxt(a.imu, delimiter=",", comments="#")
     init_st = getattr(a, "init_states", None)
@@ -1758,24 +1807,35 @@ def cmd_solve(a):
     print(f"  reduced system: {nb} banded dims (bandwidth {u}) + {ne} border dims, {time.time() - t0:.0f} s",
           flush=True)
     r_ic = np.array([c["R_ic"] for c in cams])
+    t_factory = np.array([c["t_ic"] for c in cams])
+    t_ic = t_factory.copy()
+    baseline = np.linalg.norm(t_factory[n_seg] - t_factory[0])
+    if trans_cams and (not np.isfinite(baseline) or baseline <= 0):
+        raise SystemExit("--stereo-reference needs a nonzero factory stereo baseline")
     init = getattr(a, "init_states", None)
     if init is not None:  # the estimated cameras start where the solve before ended (its last time segment)
         for c_ in phys_est:
             last = c_ * init["n_seg"] + init["n_seg"] - 1
-            r_ic[c_ * n_seg:(c_ + 1) * n_seg] = init["r_ic"][last]
+            segment = slice(c_ * n_seg, (c_ + 1) * n_seg)
+            if c_ != reference:
+                r_ic[segment] = init["r_ic"][last]
+            if reference is not None and c_ != reference and init.get("t_ic") is not None:
+                t_ic[segment] = init["t_ic"][last]
             if a.est_focal:
                 rp.foc[c_ * n_seg:(c_ + 1) * n_seg] = init["foc"][last]
         if fixed is not None:  # every camera and time segment as the solve before ended
             r_ic[:] = fixed["r_ic"]
             rp.foc[:] = fixed["foc"]
+            if fixed["t_ic"] is not None:
+                t_ic[:] = fixed["t_ic"]
         rp.set_focal(rp.foc)
-    t_ic = np.array([c["t_ic"] for c in cams])
     # consecutive time segments of a camera rotate alike, within --ext-seg-sigma
     seg_pairs = [(c * n_seg + s, c * n_seg + s + 1) for c in phys_est for s in range(n_seg - 1)]
     seg_w = 1.0 / np.radians(a.ext_seg_sigma) ** 2
-    if a.ext_seg_sigma_cams:  # per physical camera: e.g. one rotation that drifts, the other nearly constant
-        sig = dict(zip(phys_est, (float(v) for v in a.ext_seg_sigma_cams.split(","))))
-        seg_w = np.array([1.0 / np.radians(sig[ca // n_seg]) ** 2 for ca, _ in seg_pairs])
+    rot_pairs = [(ca, cb) for ca, cb in seg_pairs if ca // n_seg != reference]
+    if a.ext_seg_sigma_cams:
+        sig = dict(zip(chosen_cams, (float(v) for v in a.ext_seg_sigma_cams.split(","))))
+        seg_w = np.array([1.0 / np.radians(sig[ca // n_seg]) ** 2 for ca, _ in rot_pairs])
     # the rotation's three parameters within each camera's slot of the border
     rot_idx = (np.arange(rp.n_ext)[:, None] * npar + np.arange(3)[None, :]).ravel()
     foc_pair_w = 1.0 / a.focal_seg_sigma ** 2
@@ -1786,10 +1846,18 @@ def cmd_solve(a):
              1.0 / a.focal_mean_sigma ** 2 if a.focal_mean_sigma > 0 else 0.0,
              [[c * n_seg + s for s in range(n_seg)] for c in phys_est])
 
-    def seg_cost(ric, foc=None):  # the priors on the camera parameters
-        c_ = segment_prior(ric, seg_pairs, rp.ext_slot, rp.n_ext, seg_w)[0]
+    # With a fixed reference, isotropic walks on the body-frame translations and on relative
+    # stereo translations are equivalent. Put the prior on the length of the stereo offset.
+    trans_idx = (rp.ext_slot[trans_cams][:, None] * npar + np.arange(3, 6)).ravel()
+    trans_prior_args = (baseline, getattr(a, "stereo_walk_sigma", 0.0005),
+                        getattr(a, "stereo_baseline_sigma", 0.0005))
+
+    def seg_cost(ric, tic):
+        c_ = segment_prior(ric, rot_pairs, rp.ext_slot, rp.n_ext, seg_w)[0]
         if a.est_focal:
-            c_ += focal_prior(rp.foc if foc is None else foc, seg_pairs, rp.ext_slot, npar, rp.n_ext, *foc_w)[0]
+            c_ += focal_prior(rp.foc, seg_pairs, rp.ext_slot, npar, rp.n_ext, *foc_w)[0]
+        if trans_cams:
+            c_ += stereo_translation_prior(tic[ref_cams[0]], tic[trans_cams], *trans_prior_args)
         return c_
 
     def poses(vals):
@@ -1797,7 +1865,7 @@ def cmd_solve(a):
                 np.array([vals.atPose3(X(k)).translation() for k in range(n)]))
 
     r_wi, t_wi = poses(values)
-    cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) + gyro_cost(values, gm)
+    cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic, t_ic) + gyro_cost(values, gm)
     print(f"initial cost {cost:.6g}", flush=True)
     passes = 0
     lam = a.lambda0
@@ -1810,7 +1878,7 @@ def cmd_solve(a):
             gm_pass = gm.copy()
             jm = gyro_jac(values, gm)
             passes += 1
-            cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) + gyro_cost(values, gm)
+            cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic, t_ic) + gyro_cost(values, gm)
             print(f"  IMU preintegrated again with M, cost {cost:.6g}", flush=True)
         if a.outlier_px > 0:
             # drop observations that moved far off, then landmarks left with a single observation;
@@ -1821,11 +1889,14 @@ def cmd_solve(a):
                 rp.active &= ~bad
                 lone = rp.active & (np.bincount(rp.lm[rp.active], minlength=rp.n_lm)[rp.lm] < 2)
                 rp.active &= ~lone
-                cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic) \
+                cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic, t_ic) \
                     + gyro_cost(values, gm)
                 print(f"  outliers: {bad.sum()} observations over {thr} px (+{lone.sum()} left alone), "
                       f"{rp.active.sum()} active, cost {cost:.6g}", flush=True)
         h_xx, h_xl, g_x, h_ll_o, h_ll, g_l = rp.normal_equations(r_wi, t_wi, r_ic, t_ic, pts)
+        if trans_cams:
+            h_t, b_t = stereo_translation_prior(t_ic[ref_cams[0]], t_ic[trans_cams], *trans_prior_args,
+                                                linearize=True)
         # IMU and prior factors, linearized by GTSAM: ||A dx - b||^2
         ab_imu, rhs_imu = np.zeros((u + 1, nb)), np.zeros(nb)
         lin = graph.linearize(values)
@@ -1895,14 +1966,17 @@ def cmd_solve(a):
             else:  # numba: one pass over the landmarks
                 _schur_add_jit(m_o, h_xl, h_xx, g_x, g_l, rp.kf, slot, rp.lm, rp.lm_start, rp.band, nb, ab, border,
                                corner, rhs)
-            if ne and seg_pairs:
-                _, h_s, b_s = segment_prior(r_ic, seg_pairs, rp.ext_slot, rp.n_ext, seg_w)
+            if ne and rot_pairs:
+                _, h_s, b_s = segment_prior(r_ic, rot_pairs, rp.ext_slot, rp.n_ext, seg_w)
                 corner[np.ix_(rot_idx, rot_idx)] += h_s
                 rhs[nb + rot_idx] += b_s
             if ne and a.est_focal:
                 _, h_f, b_f = focal_prior(rp.foc, seg_pairs, rp.ext_slot, npar, rp.n_ext, *foc_w)
                 corner[:ne, :ne] += h_f
                 rhs[nb:nb + ne] += b_f
+            if trans_cams:
+                corner[np.ix_(trans_idx, trans_idx)] += h_t
+                rhs[nb + trans_idx] += b_t
             ab[0] += lam * ab[0] + 1e-9
             if ne:
                 corner[np.arange(ne), np.arange(ne)] += lam * np.diag(corner)[:ne] + 1e-9
@@ -1975,12 +2049,15 @@ def cmd_solve(a):
             for key, (col, dim) in index.items():
                 vv.insert(key, dx[col:col + dim])
             new_values = values.retract(vv)
-            new_ric, foc = r_ic.copy(), rp.foc.copy()
+            new_ric, new_tic, foc = r_ic.copy(), t_ic.copy(), rp.foc.copy()
             new_foc = foc.copy()
-            for c in est_cams:
-                new_ric[c] = r_ic[c] @ so3_exp(de[rp.ext_slot[c] * npar:rp.ext_slot[c] * npar + 3])
+            for c, inc in zip(est_cams, de.reshape(-1, npar)):
+                if rp.est_rot[c]:
+                    new_ric[c] = r_ic[c] @ so3_exp(inc[:3])
+                if rp.est_trans[c]:
+                    new_tic[c] += inc[3:6]
                 if a.est_focal:
-                    new_foc[c] += de[rp.ext_slot[c] * npar + 3]
+                    new_foc[c] += inc[-1]
             rp.set_focal(new_foc)
             new_pts = pts + dl
             nr, nt = poses(new_values)
@@ -1996,13 +2073,14 @@ def cmd_solve(a):
                     new_values.insert(V(k), st[2][k])
                     new_values.insert(B(k), gtsam.imuBias.ConstantBias(st[3][k, 0:3], st[3][k, 3:6]))
                 nr, nt, new_pts = st[0], st[1], st[4]
-            new_cost = rp.cost(nr, nt, new_ric, t_ic, new_pts)[0] + graph.error(new_values) + seg_cost(new_ric) \
+            new_cost = rp.cost(nr, nt, new_ric, new_tic, new_pts)[0] + graph.error(new_values) + seg_cost(new_ric, new_tic) \
                 + gyro_cost(new_values, new_gm)
             if new_cost >= cost:
                 rp.set_focal(foc)  # rejected: the focal lengths stay
             if new_cost < cost:
                 rel = (cost - new_cost) / cost
                 values, r_ic, pts, r_wi, t_wi, cost, gm = new_values, new_ric, new_pts, nr, nt, new_cost, new_gm
+                t_ic = new_tic
                 lam = max(lam / 3, 1e-10)
                 mu = mu / 10 if mu > 1e-4 else 0.0
                 accepted = True
@@ -2038,7 +2116,7 @@ def cmd_solve(a):
         "keyframes": n, "landmarks": int(rp.n_lm), "observations": len(rp.kf),
         "active_observations": int(rp.active.sum()),
         "final_cost": cost, "reprojection_cost": reproj, "imu_prior_cost": graph.error(values),
-        "segment_prior_cost": seg_cost(r_ic),
+        "segment_prior_cost": seg_cost(r_ic, t_ic),
         "median_reprojection_px": float(np.median(err_px)),
         "reprojection_over_4px_percent": float(np.mean(err_px > 4) * 100),
         "imu_residual_per_factor": dict(zip(("rotation", "position", "velocity", "accel_bias", "gyro_bias"),
@@ -2058,6 +2136,10 @@ def cmd_solve(a):
         "gyro_scale_per_degree": gm[21:24].tolist(),
         "seconds": time.time() - t0,
     }
+    if trans_cams or (fixed is not None and not np.array_equal(t_ic, t_factory)):
+        offsets = t_ic[n_seg:] - t_ic[:n_seg]
+        summary["stereo_baseline_mm"] = (1000 * np.linalg.norm(offsets, axis=1)).tolist()
+        summary["stereo_offset_change_imu_mm"] = (1000 * (offsets - (t_factory[n_seg:] - t_factory[:n_seg]))).tolist()
     print(json.dumps(summary, indent=1), flush=True)
     with open(os.path.splitext(a.out)[0] + "_summary.json", "w") as f:
         json.dump(summary, f, indent=1)
@@ -2066,11 +2148,11 @@ def cmd_solve(a):
                      for k in range(n)])
     vel = np.array([values.atVector(V(k)) for k in range(n)])
     if a.save_states:  # what loop-correct needs: keyframe poses, landmarks and their observations
-        # r_ic per physical camera and time segment (camera c, segment s at c * ext_segments + s)
-        np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic,
+        # Camera extrinsics are ordered by camera, then by time segment.
+        np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic, t_ic=t_ic,
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber, gm=gm)
-    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
+    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "t_ic": t_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
             "gyro_m": gm[:9].copy(), "accel_m": gm[9:18].copy(), "gyro_temp": gm[18:24].copy()}
 
 
@@ -2284,6 +2366,13 @@ def pnp_body_pose(p3, p2, kmat, r_ic, t_ic, r_wb0, t_wb0, min_inliers):
     return r_wb, -r_wc @ tvec.ravel() - r_wb @ t_ic
 
 
+def saved_camera_translations(states, cams, n_seg):
+    """Read per-segment translations, or use the factory calibration for older states."""
+    if "t_ic" in states:
+        return states["t_ic"]
+    return np.repeat([c["t_ic"] for c in cams], n_seg, axis=0)
+
+
 def cmd_loop_correct(a):
     """Close the revisits of a finished solve with a pose graph.
 
@@ -2305,8 +2394,8 @@ def cmd_loop_correct(a):
     cams, _ = load_calib(a.calib)
     k0, kf_ns, r_wi, t_wi, r_ic, pts = (st[k] for k in ("k0", "kf_ns", "r_wi", "t_wi", "r_ic", "pts"))
     k0, n = int(k0), len(kf_ns)
-    t_ic = np.array([c["t_ic"] for c in cams])
     n_seg = int(st["ext_segments"]) if "ext_segments" in st else 1
+    t_ic = saved_camera_translations(st, cams, n_seg)
     seg_of_kf = np.minimum(np.arange(n) * n_seg // n, n_seg - 1)  # as in solve
     foc = st["foc"] if "foc" in st else np.zeros(2 * n_seg)  # focal length scales of solve --est-focal
     act = st["active"]
@@ -2328,9 +2417,11 @@ def cmd_loop_correct(a):
         if ok.sum() < a.min_inliers:
             return None
         kmat = cams[c2]["K"].copy()
-        kmat[[0, 1], [0, 1]] *= np.exp(foc[c2 * n_seg + seg_of_kf[k2]])
+        camera = c2 * n_seg + seg_of_kf[k2]
+        kmat[[0, 1], [0, 1]] *= np.exp(foc[camera])
         placed = pnp_body_pose(pts[lms[ok]], xy[f2[ok]].astype(np.float64), kmat,
-                               r_ic[c2 * n_seg + seg_of_kf[k2]], t_ic[c2], r_wi[k2], t_wi[k2], a.min_inliers)
+                               r_ic[camera], t_ic[camera],
+                               r_wi[k2], t_wi[k2], a.min_inliers)
         if placed is None:
             return None
         r_wb, t_wb = placed
@@ -2475,6 +2566,13 @@ def main():
                        help="prior on the rotation change between consecutive segments (deg)")
         s.add_argument("--ext-seg-sigma-cams", default="",
                        help="--ext-seg-sigma per estimated camera, comma-separated in --est-extrinsic's order")
+        s.add_argument("--stereo-reference", type=int, choices=(0, 1),
+                       help="fix this camera's transform to the IMU and estimate the other camera's rotation "
+                            "and translation in each segment (both focal scales can still vary with --est-focal)")
+        s.add_argument("--stereo-walk-sigma", type=float, default=0.0005,
+                       help="stereo translation random-walk sigma per segment (m)")
+        s.add_argument("--stereo-baseline-sigma", type=float, default=0.0005,
+                       help="sigma for the factory stereo baseline length in each segment (m)")
         s.add_argument("--focal-seg-sigma-cams", default="",
                        help="--focal-seg-sigma per estimated camera, comma-separated in --est-extrinsic's order")
         s.add_argument("--max-offset", type=int, default=256, help="use matches up to this keyframe offset")

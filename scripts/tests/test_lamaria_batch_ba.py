@@ -66,7 +66,7 @@ class ReprojectionJacobianTest(unittest.TestCase):
             obs_lm.append(j)
         obs_z = np.zeros((n_lm, 2))
         rp = lb.Reprojection(np.array(obs_kf), np.array(obs_cam), np.array(obs_lm), obs_z, n_lm, cams,
-                             [0, 1], 1.0, 1e9, 64, est_focal=True)
+                             [0, 1], 1.0, 1e9, 64, est_focal=True, translation_cams=[1])
         rp.set_focal([0.01, -0.02])
         res, jx, jl, _ = rp.linearize(r_wi, t_wi, r_ic, t_ic, pts)
         eps = 1e-6
@@ -88,11 +88,17 @@ class ReprojectionJacobianTest(unittest.TestCase):
                     ric2[c] = r_ic[c] @ lb.so3_exp(step)
                 num = (residuals(r2, t2, ric2, pts)[o] - res[o]) / eps
                 np.testing.assert_allclose(jx[o, :, d], num, rtol=1e-4, atol=1e-3)
+            for d in range(3):
+                t2 = t_ic.copy()
+                if c == 1:
+                    t2[c, d] += eps
+                num = (rp._project(r_wi, t_wi, r_ic, t2, pts)[-1][o] - res[o]) / eps
+                np.testing.assert_allclose(jx[o, :, 9 + d], num, rtol=1e-4, atol=1e-3)
             foc = rp.foc.copy()
             rp.set_focal(foc + eps * (np.arange(2) == c))  # focal length scale: f <- f exp(s)
             num = (residuals(r_wi, t_wi, r_ic, pts)[o] - res[o]) / eps
             rp.set_focal(foc)
-            np.testing.assert_allclose(jx[o, :, 9], num, rtol=1e-4, atol=1e-3)
+            np.testing.assert_allclose(jx[o, :, -1], num, rtol=1e-4, atol=1e-3)
             for d in range(3):
                 p2 = pts.copy()
                 p2[j, d] += eps
@@ -102,11 +108,12 @@ class ReprojectionJacobianTest(unittest.TestCase):
 
 class NormalEquationsTest(unittest.TestCase):
     def test_one_pass_loop_matches_linearize(self):
-        for focal in (False, True):  # with the focal length scale as a tenth camera parameter
-            with self.subTest(focal=focal):
-                self._check(focal)
+        for focal in (False, True):
+            for stereo in (False, True):
+                with self.subTest(focal=focal, stereo=stereo):
+                    self._check(focal, stereo)
 
-    def _check(self, focal):
+    def _check(self, focal, stereo):
         rng = np.random.default_rng(9)
         cams = two_cameras()
         n_kf, n_lm = 4, 6
@@ -124,12 +131,17 @@ class NormalEquationsTest(unittest.TestCase):
                 obs_lm.append(j)
         obs_z = rng.uniform(100, 600, size=(len(obs_kf), 2))  # far off: some Huber-weighted, some behind
         sigma = rng.uniform(0.5, 2.0, size=len(obs_kf))  # per-observation pixel noise
-        rp = lb.Reprojection(np.array(obs_kf), np.array(obs_cam), np.array(obs_lm), obs_z, n_lm, cams, [1], sigma,
-                             2.0, 64, numpy_pairs=True, est_focal=focal)
+        rp = lb.Reprojection(np.array(obs_kf), np.array(obs_cam), np.array(obs_lm), obs_z, n_lm, cams,
+                             [0, 1] if stereo else [1], sigma, 2.0, 64, numpy_pairs=True, est_focal=focal,
+                             fixed_rotations=[0] if stereo else (), translation_cams=[1] if stereo else ())
         if focal:
             rp.set_focal([0.0, 0.01])
         rp.active[3] = False
         res, jx, jl, w = rp.linearize(r_wi, t_wi, r_ic, t_ic, pts)
+        if stereo:
+            np.testing.assert_array_equal(jx[rp.cam == 0, :, 6:12], 0)
+            if focal:
+                self.assertTrue(np.any(jx[rp.cam == 0, :, -1]))
         wjx, wjl = jx * w[:, None, None], jl * w[:, None, None]
         want = [np.einsum("nki,nkj->nij", wjx, jx), np.einsum("nki,nkj->nij", wjx, jl),
                 np.einsum("nki,nk->ni", wjx, res), np.einsum("nki,nkj->nij", wjl, jl)]
@@ -141,8 +153,8 @@ class NormalEquationsTest(unittest.TestCase):
         nx = 6 + rp.n_par
         got = [np.zeros((n_o, nx, nx)), np.zeros((n_o, nx, 3)), np.zeros((n_o, nx)), np.zeros((n_o, 3, 3)),
                np.zeros((n_lm, 3, 3)), np.zeros((n_lm, 3))]
-        lb._normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam, rp.est, rp.active,
-                       rp.sigma, rp.huber, *got)
+        lb._normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam,
+                       rp.est_rot, rp.est_trans, rp.est_foc, rp.active, rp.sigma, rp.huber, *got)
         self.assertTrue(0 < (w > 0).sum() < n_o)
         for g, wv in zip(got, want):
             np.testing.assert_allclose(g, wv, rtol=1e-12, atol=1e-9)
@@ -163,11 +175,11 @@ class NormalEquationsTest(unittest.TestCase):
         self.assertAlmostEqual(cost, cost_want.sum(), delta=1e-9 * cost_want.sum())
         if lb._normal_eqs_par is not None:  # the parallel kernels (numba), chunk by chunk
             par = [np.zeros_like(g) for g in got]
-            lb._normal_eqs_par(rp.chunks, r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam, rp.est,
-                               rp.active, rp.sigma, rp.huber, *par)
+            lb._normal_eqs_par(rp.chunks, r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam,
+                               rp.est_rot, rp.est_trans, rp.est_foc, rp.active, rp.sigma, rp.huber, *par)
             ser = [np.zeros_like(g) for g in got]
-            lb._normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam, rp.est, rp.active,
-                           rp.sigma, rp.huber, *ser)
+            lb._normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam,
+                           rp.est_rot, rp.est_trans, rp.est_foc, rp.active, rp.sigma, rp.huber, *ser)
             for g, wv in zip(par, ser):
                 np.testing.assert_array_equal(g, wv)
             e_par = np.zeros(n_o)
@@ -220,6 +232,28 @@ class SegmentPriorTest(unittest.TestCase):
         np.testing.assert_allclose(b, -grad(np.zeros(9)), rtol=1e-5, atol=1e-3)
         h_num = np.array([(grad(1e-5 * e) - grad(-1e-5 * e)) / 2e-5 for e in np.eye(9)])
         np.testing.assert_allclose(h, h_num, atol=0.01 * w)  # Gauss-Newton: exact up to O(|e0|)
+
+
+class StereoTranslationPriorTest(unittest.TestCase):
+    def test_normal_equations_match_finite_differences(self):
+        t_ref = np.array([0.04, -0.06, 0.02])
+        offsets = np.array([[0.102, 0.001, 0.000], [0.101, -0.001, 0.003], [0.100, 0.000, 0.001]])
+        translations = t_ref + offsets
+        baseline, walk_sigma, length_sigma = 0.1, 0.0005, 0.0005
+
+        def residuals(tic):
+            d = tic - t_ref
+            return np.r_[(np.diff(d, axis=0) / walk_sigma).ravel(),
+                         (np.linalg.norm(d, axis=1) - baseline) / length_sigma]
+
+        delta = np.eye(translations.size).reshape(-1, 3, 3) * 1e-6
+        jac = np.column_stack([(residuals(translations + d) - residuals(translations - d)) / 2e-6 for d in delta])
+        args = (t_ref, translations, baseline, walk_sigma, length_sigma)
+        h, b = lb.stereo_translation_prior(*args, linearize=True)
+        residual = residuals(translations)
+        np.testing.assert_allclose(h, jac.T @ jac, rtol=1e-8, atol=1e-4)
+        np.testing.assert_allclose(b, -jac.T @ residual, rtol=1e-8, atol=1e-6)
+        self.assertAlmostEqual(lb.stereo_translation_prior(*args), 0.5 * residual @ residual)
 
 
 class FocalPriorTest(unittest.TestCase):

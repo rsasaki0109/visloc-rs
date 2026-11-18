@@ -23,7 +23,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lamaria_batch_ba import load_calib  # noqa: E402
+from lamaria_batch_ba import load_calib, saved_camera_translations  # noqa: E402
 
 
 def lengths_table(name, v):
@@ -62,7 +62,7 @@ def main():
     n_seg = int(st["ext_segments"]) if "ext_segments" in st else 1
     seg_of_kf = np.minimum(np.arange(n) * n_seg // n, n_seg - 1)  # as in solve
     foc = st["foc"] if "foc" in st else np.zeros(2 * n_seg)
-    t_ic = np.array([c["t_ic"] for c in cams])
+    t_ic = saved_camera_translations(st, cams, n_seg)
     kcal = np.array([[c["K"][0, 0], c["K"][1, 1], c["K"][0, 2], c["K"][1, 2]] for c in cams])
     act = st["active"]
     okf, ocam, olm, oz = st["obs_kf"][act], st["obs_cam"][act], st["obs_lm"][act], st["obs_z"][act]
@@ -89,7 +89,7 @@ def main():
     for c in range(2):
         r_c = r_ic[c * n_seg + seg_of_kf]  # (n, 3, 3) imu_from_cam
         rot[:, c] = np.einsum("nij,njk->nik", r_wi, r_c)  # world_from_cam
-        ctr[:, c] = np.einsum("nij,j->ni", r_wi, t_ic[c]) + t_wi
+        ctr[:, c] = np.einsum("nij,nj->ni", r_wi, t_ic[c * n_seg + seg_of_kf]) + t_wi
         s = np.exp(foc[c * n_seg + seg_of_kf])
         kk[:, c] = kcal[c][None] * np.c_[s, s, np.ones(n), np.ones(n)]
 

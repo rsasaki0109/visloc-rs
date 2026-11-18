@@ -2697,11 +2697,12 @@ on.
 
 ### SLAM Dunk's gyroscope matrix and time-varying calibration
 
-SLAM Dunk (Van Meter and Paul, second on the LaMAria leaderboard) estimates
-a full 3×3 gyroscope response matrix per recording (ω ← (I + M) ω, prior
-0.2 %) and lets each camera's focal length and its rotation against the IMU
-change every 5 s. The ideas are taken from their paper's description; the
-code here is written independently. `solve` has both:
+[SLAM Dunk](https://www.alphaxiv.org/abs/2611.slam-dunk.pdf) (Van Meter and
+Paul) estimates a full 3×3 gyroscope response matrix per recording
+(ω ← (I + M) ω, prior 0.2 %). It uses 5 s chunks for the relative stereo
+rotation, translation and both cameras' focal lengths, with camera 0 fixed
+to the IMU. The implementation here is based on the paper's description.
+The initial `solve` experiments used:
 
 - `--est-gyro-m`: M joins the dense border (nine parameters, prior
   `--gyro-m-sigma`). The IMU factors' Jacobian with respect to M comes from
@@ -3043,6 +3044,30 @@ read at t + shift, linear interpolation), and the solve rerun on keyframes
 Both minima are within a millisecond of zero, about one IMU sample, and the
 cost changes by 0.1–0.3 % over ±2 ms. The recording's own time alignment
 holds; the solve gets no time offset.
+
+### Stereo calibration with a fixed reference
+
+`solve --stereo-reference 0 --ext-seg-seconds 5 --est-focal` fixes the
+factory camera-0-to-IMU transform and estimates camera 1's rotation and
+translation in each segment. With a fixed reference, the isotropic
+translation random walk can be applied in the IMU frame. The defaults from
+Table 5 of the paper give the walk and the factory baseline-length prior
+a sigma of 0.5 mm each (`--stereo-walk-sigma` and
+`--stereo-baseline-sigma` are in metres). The solver uses its existing
+approximately equal-length keyframe segments and one focal scale per
+camera for the rectified pinhole images. The solve summary reports the
+estimated baseline length and the change in the stereo offset, in mm.
+`loop-correct` and `solve --fix-calib` use the saved translations.
+LaMAria control-point scores for this variant are pending.
+
+To compare with the default chain, run the same training sequence with
+`--ba-chain` and then with `--ba-chain --ba-stereo-reference=0`, using
+separate `--work-dir` and `--slam-dir` values. The submission driver enables
+the model in the batch passes with approximately 5 s segments. For an
+existing VIO trajectory, use `lamaria_ba_chain.py
+--pass-args="--stereo-reference 0 --ext-seg-seconds 5"` and a fresh
+`--work` directory. The chain reuses completed passes when their output
+files already exist.
 
 ## Usage
 

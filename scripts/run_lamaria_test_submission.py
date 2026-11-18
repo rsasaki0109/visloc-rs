@@ -557,6 +557,9 @@ def main() -> int:
     parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
                         help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
+    parser.add_argument("--ba-stereo-reference", type=int, choices=(0, 1),
+                        help="--ba-chain: in the batch pass, fix this camera's IMU transform and estimate the "
+                             "other camera's rotation and translation in approximately 5 s segments")
     parser.add_argument("--ba-temperature", action=argparse.BooleanOptionalAction, default=True,
                         help="--ba-chain: on --ba-temperature-tracks by day, fetch the SLAM cameras' temperature "
                              "from the .vrs and let the pass estimate the gyroscope's bias and scale change per "
@@ -604,6 +607,8 @@ def main() -> int:
     converter = args.repo / "scripts" / "lamaria_to_basalt_calib.py"
     estimate_converter = args.repo / "scripts" / "basalt_tum_to_lamaria_estimate.py"
     python = sys.executable
+    pass_args = () if args.ba_stereo_reference is None else (
+        "--stereo-reference", str(args.ba_stereo_reference), "--ext-seg-seconds", "5")
 
     log(f"{len(sequences)} sequences: {sequences[0]} .. {sequences[-1]}")
     for seq in sequences:
@@ -723,13 +728,15 @@ def main() -> int:
                     except Exception as error:  # the pass runs without it
                         log(f"{seq}: WARN no camera temperature ({error!r})")
                 log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass" if learned else "")
-                    + (", the temperature" if temperature else "") + ")")
+                    + (", the temperature" if temperature else "")
+                    + (f", stereo reference cam{args.ba_stereo_reference}" if pass_args else "") + ")")
                 try:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
                                            low_light=low_light, rematch=args.ba_rematch, pass_features=learned,
-                                           pass_match=args.ba_pass_match, temperature=temperature)
+                                           pass_match=args.ba_pass_match, pass_args=pass_args,
+                                           temperature=temperature)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = work / "ba" / "ba2.tum"
