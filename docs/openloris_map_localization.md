@@ -117,6 +117,62 @@ The merged map (858 keyframe images, 9,158 landmarks) covers both
 directions. It is in A's frame and is scored with A's alignment to the
 ground truth.
 
+### Five sessions in one map
+
+The maps of office1-1, 1-2, 1-3, 1-6 and 1-7 (rebuilt 2026-11-18, raw
+images; two evenings three days apart, the later one with furniture
+moved) merge into one map in office1-2's frame, added in the order
+office1-7, 1-3, 1-1, 1-6:
+
+| Added map | Its frame vs the base | Keyframes localized | Residual |
+|---|---|---|---|
+| office1-7 | −9.6°, 37 cm | 99 of 422 | 1.7 cm |
+| office1-3 | −167.4°, 69 cm | 15 of 170 | 1.8 cm |
+| office1-1 | 11.0°, 350 cm | 66 of 332 | 0.6 cm |
+| office1-6 | 9.2°, 350 cm | 179 of 372 | 1.8 cm |
+
+The merged map holds 1,652 keyframe images and 16,913 landmarks. Aligned to
+the ground truth by office1-2's keyframes alone, the five sessions' fisheye1
+keyframe centres are at 4.5 cm RMSE (11.2 cm max): office1-2 1.6, 1-7 5.7,
+1-3 2.5, 1-1 3.4 and 1-6 6.0 cm, against 1.6, 4.9, 0.9, 2.8 and 3.7 cm
+for each session's SLAM aligned on its own.
+
+The order matters. Each added map makes the next registration harder, as
+most of its landmarks stay apart from the base's look-alikes (35–111 are
+fused per session) and the ratio test then rejects matches where both
+were seen: office1-7 localizes 99 keyframes in office1-2's map alone but
+7 once office1-3 is merged in, and none in the map of office1-1, 1-3 and 1-2
+merged in that order. Of the 120 orders of the five maps, four register all
+of them. Without local contrast equalization
+([below](#across-lighting-local-contrast-equalization)), office1-4 and 1-5
+(daylight, dawn) registered in none of the maps tried: office1-1's,
+office1-2's (office1-4) or office1-6's (office1-5), and the four-session
+map of office1-1, 1-3, 1-2 and 1-6.
+
+`scripts/openloris_rgbd_cloud.py` places the D435i's colour images and
+aligned depth by a map's keyframe poses, and
+`scripts/render_map_merge_gif.py --cloud` animates the merge with those
+colour clouds:
+
+```bash
+target/release/examples/basalt_map_merge --base runs/o12_map --add runs/o17_map \
+  --add runs/o13_map --add runs/o11_map --add runs/o16_map --out runs/office_merged
+for k in 12 17 13 11 16; do
+  python3 scripts/openloris_rgbd_cloud.py --map runs/o${k}_map \
+    --rgbd rgbd/office${k:0:1}-${k:1:1} --out runs/o${k}_cloud.npz
+done
+python3 scripts/render_map_merge_gif.py --merged runs/office_merged \
+  $(for k in 12 17 13 11 16; do echo --map runs/o${k}_map --cloud runs/o${k}_cloud.npz \
+    --label office${k:0:1}-${k:1:1}; done) \
+  --max-points 50000 --point-size 2 --unit run --place office --fill 0.6 \
+  --title "Multi-session mapping: five robot runs over two days, one map" --out office_merge.gif
+```
+
+`rgbd/office1-N` holds the sequence's `color/`, `aligned_depth/`, their
+`.txt` lists, `trans_matrix.yaml` and `sensors.yaml`, extracted from its
+`.7z`. The GIF is not in the repository: its colours come from the dataset's
+images, which are CC BY-ND 4.0.
+
 ## Results
 
 Each query is localized against a map built from another session, with

@@ -20,6 +20,9 @@ Inputs:
   --merged DIR          the map `basalt_map_merge` wrote from them
   --label NAME (repeated, optional)  one per --map; the map directory's
                         name otherwise
+  --cloud FILE (repeated, optional)  one per --map: a colour point cloud in
+                        that map's frame (`openloris_rgbd_cloud.py`), drawn
+                        in its own colours instead of the map's landmarks
 
 Example:
 
@@ -114,22 +117,38 @@ def se3_from_json(value) -> tuple[np.ndarray, np.ndarray]:
 
 
 class Session:
-    def __init__(self, map_dir: Path, label: str, colour: str, session_json):
+    def __init__(self, map_dir: Path, label: str, colour: str, session_json,
+                 cloud: Path | None = None, max_points: int = 0):
         times = read_image_times(map_dir)
         self.label, self.colour = label, colour
         self.path_t, self.path = read_keyframe_path(map_dir, times)
-        self.points, self.seen = read_landmarks(map_dir, times)
         t0 = self.path_t[0]
-        self.path_t, self.seen = self.path_t - t0, self.seen - t0
+        self.path_t = self.path_t - t0
         self.duration = float(self.path_t[-1])
-        # Drop far-off landmarks (a few are triangulated at the edge of the
-        # depth range): keep those within 8 m of the flight.
-        near = np.full(len(self.points), np.inf)
-        for chunk in np.array_split(np.arange(len(self.points)), max(1, len(self.points) // 4000)):
-            d = np.linalg.norm(self.points[chunk, None, :] - self.path[None, ::5, :], axis=2)
-            near[chunk] = d.min(axis=1)
-        keep = near < 8.0
-        self.points, self.seen = self.points[keep], self.seen[keep]
+        self.rgb = None
+        if cloud is not None:
+            # A colour cloud in the map's frame, timed from its first keyframe
+            # (openloris_rgbd_cloud.py).
+            data = np.load(cloud)
+            self.points = data["points"].astype(np.float64)
+            self.rgb = data["colours"].astype(np.float64)
+            self.seen = data["first_seen"].astype(np.float64)
+        else:
+            self.points, self.seen = read_landmarks(map_dir, times)
+            self.seen = self.seen - t0
+            # Drop far-off landmarks (a few are triangulated at the edge of
+            # the depth range): keep those within 8 m of the flight.
+            near = np.full(len(self.points), np.inf)
+            for chunk in np.array_split(np.arange(len(self.points)), max(1, len(self.points) // 4000)):
+                d = np.linalg.norm(self.points[chunk, None, :] - self.path[None, ::5, :], axis=2)
+                near[chunk] = d.min(axis=1)
+            keep = near < 8.0
+            self.points, self.seen = self.points[keep], self.seen[keep]
+        if max_points and len(self.points) > max_points:
+            keep = np.sort(np.random.default_rng(0).choice(len(self.points), max_points, replace=False))
+            self.points, self.seen = self.points[keep], self.seen[keep]
+            if self.rgb is not None:
+                self.rgb = self.rgb[keep]
         self.rotation, self.translation = se3_from_json(session_json["base_from_session"])
         self.yaw = float(np.arctan2(self.rotation[1, 0], self.rotation[0, 0]))
         self.registration = session_json.get("registration")
@@ -180,8 +199,18 @@ def main() -> int:
     parser.add_argument("--map", type=Path, action="append", required=True)
     parser.add_argument("--merged", type=Path, required=True)
     parser.add_argument("--label", action="append")
+    parser.add_argument("--cloud", type=Path, action="append",
+                        help="per --map: a colour point cloud (.npz from openloris_rgbd_cloud.py) "
+                             "drawn in its own colours instead of the map's landmarks")
+    parser.add_argument("--max-points", type=int, default=0,
+                        help="draw at most this many points per session (0: all)")
+    parser.add_argument("--point-size", type=float, default=1.0,
+                        help="scale of the drawn points")
+    parser.add_argument("--unit", default="flight",
+                        help="what a session is, in the captions (flight, run, ...)")
+    parser.add_argument("--place", default="hall", help="what was mapped, in the captions")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--title", help="default: Multi-session mapping: N flights, one map")
+    parser.add_argument("--title", help="default: Multi-session mapping: N <unit>s, one map")
     parser.add_argument("--width", type=int, default=760)
     parser.add_argument("--height", type=int, default=428)
     parser.add_argument("--fps", type=float, default=12.5)
@@ -192,6 +221,8 @@ def main() -> int:
     parser.add_argument("--orbit-frames", type=int, default=50)
     parser.add_argument("--orbit-degrees", type=float, default=30.0,
                         help="amplitude of the closing azimuth swing")
+    parser.add_argument("--fill", type=float, default=0.68,
+                        help="share of the height the merged map fills")
     parser.add_argument("--orbit-tilt", type=float, default=16.0,
                         help="degrees the orbit rises towards top-down halfway through")
     parser.add_argument("--azimuth", type=float,
@@ -210,8 +241,12 @@ def main() -> int:
         "translation": [0, 0, 0], "quaternion_wxyz": [1, 0, 0, 0]}}]
     if len(session_json) != len(args.map):
         parser.error(f"{args.merged} holds {len(session_json)} sessions, not {len(args.map)}")
-    sessions = [Session(d, label, COLOURS[i % len(COLOURS)], session_json[i])
-                for i, (d, label) in enumerate(zip(args.map, labels))]
+    clouds = args.cloud or [None] * len(args.map)
+    if len(clouds) != len(args.map):
+        parser.error("give one --cloud per --map")
+    sessions = [Session(d, label, COLOURS[i % len(COLOURS)], session_json[i], cloud,
+                        args.max_points)
+                for i, (d, label, cloud) in enumerate(zip(args.map, labels, clouds))]
     for s in sessions:
         print(f"{s.label}: {s.keyframes} keyframes, {len(s.points)} landmarks, "
               f"{s.duration:.0f} s, yaw {np.degrees(s.yaw):+.1f} deg")
@@ -224,7 +259,7 @@ def main() -> int:
     W, H = args.width, args.height
     n = len(sessions)
     words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
-    args.title = args.title or f"Multi-session mapping: {words.get(n, n)} flights, one map"
+    args.title = args.title or f"Multi-session mapping: {words.get(n, n)} {args.unit}s, one map"
     all_merged = np.concatenate([s.placed(s.points, 1.0) for s in sessions])
     if args.azimuth is None:
         xy = all_merged[:, :2] - np.median(all_merged[:, :2], axis=0)
@@ -238,15 +273,15 @@ def main() -> int:
     # and above the legend, left of the queue of maps still to merge.
     all_paths = np.concatenate([s.placed(s.path, 1.0) for s in sessions])
     queue_w = 128
-    area = np.array([W - queue_w - 40, H * 0.70])
-    area_centre = np.array([(W - queue_w) / 2, H * 0.465])
+    area = np.array([W - queue_w - 40, H * args.fill])
+    area_centre = np.array([(W - queue_w) / 2, H * (0.125 + args.fill / 2)])
     merged_centre_world = np.percentile(all_merged, 50, axis=0)
 
     def framing(view):
         """Scale and screen offset that fit the merged map (its landmarks bar
         outliers, and every trajectory) in the area. The offset is kept for
         the map's centre, so a turning view turns about it."""
-        lo, hi = np.percentile(all_merged @ view.T, [1, 99], axis=0)
+        lo, hi = np.percentile(all_merged @ view.T, [0.5, 99.5], axis=0)
         paths = all_paths @ view.T
         lo, hi = np.minimum(lo, paths.min(axis=0)), np.maximum(hi, paths.max(axis=0))
         scale = float(np.min(area / (hi - lo)))
@@ -333,7 +368,7 @@ def main() -> int:
                         fontsize=8.5 - 1.5 * queued["mix"], fontweight="bold", va="top",
                         alpha=alpha, zorder=5)
                 ax.text(cx + pw / 2 - 8, cy + ph / 2 - 7,
-                        f"its own frame · {s.duration:.0f} s flight", color=DIM, fontsize=7,
+                        f"its own frame · {s.duration:.0f} s {args.unit}", color=DIM, fontsize=7,
                         va="top", ha="right", alpha=alpha if queued["mix"] < 0.5 else 0.0, zorder=5)
         # The map so far under the session being added.
         order = sorted(range(n), key=lambda i: (states[i].get("active", False), i))
@@ -345,10 +380,19 @@ def main() -> int:
             shown = s.seen <= st["t"]
             if shown.any():
                 xy = screen(i, s.points[shown], slide, align)
-                colour = blend(s.colour, "#ffffff", 0.5 * flash)
-                size = lerp(0.45, 0.8, smooth(slide)) * (1 + 1.2 * flash)
+                if s.rgb is None:
+                    colour = [blend(s.colour, "#ffffff", 0.5 * flash)]
+                else:
+                    # True colours, tinted with the session's colour until it
+                    # is registered.
+                    tint = 0.0 if st["merged"] or slide <= 0 else 0.5 * (1 - align)
+                    base = np.array(matplotlib.colors.to_rgb(s.colour))
+                    colour = s.rgb[shown] * (1 - tint) + base * tint
+                    colour = colour * (1 - 0.35 * flash) + 0.35 * flash
+                size = (lerp(0.45, 0.8, smooth(slide)) * (1 + 1.2 * flash)
+                        * args.point_size)
                 fade = swap if slide <= 0 else 1.0
-                ax.scatter(xy[:, 0], xy[:, 1], s=size, c=[colour],
+                ax.scatter(xy[:, 0], xy[:, 1], s=size, c=colour,
                            alpha=(0.6 if not st.get("active") else 0.75) * fade,
                            linewidths=0, zorder=1 + i * 0.01 + (1 if st.get("active") else 0))
             k = np.searchsorted(s.path_t, st["t"], side="right")
@@ -370,7 +414,7 @@ def main() -> int:
             text = s.label + ((" base" if i == 0 else " ✓") if done else "")
             ax.text(x + 12, 16, text, color=TEXT if done else DIM, fontsize=8,
                     va="center", zorder=6)
-            x += 66 + (16 if done else 0)
+            x += 24 + 5.4 * len(text)
         if state.get("status"):
             ax.text(W - 14, 16, state["status"], color=TEXT, fontsize=8, va="center",
                     ha="right", zorder=6)
@@ -388,11 +432,11 @@ def main() -> int:
     for f in range(args.grow_frames):
         t = clock_end * f / (args.grow_frames - 1)
         draw({"sessions": [session_state(t=t) for _ in sessions],
-              "caption": f"{n} separate SLAM sessions of one hall, each mapping in its own "
+              "caption": f"{n} separate SLAM sessions of one {args.place}, each mapping in its own "
                          f"world frame    t = {t:3.0f} s"}, f)
     for _ in range(args.hold_frames):
         draw({"sessions": [session_state() for _ in sessions],
-              "caption": f"{n} maps of the same hall, in {n} coordinate frames"}, 0)
+              "caption": f"{n} maps of the same {args.place}, in {n} coordinate frames"}, 0)
 
     # Act 2: merge in order. The base slides into the shared view and stays;
     # each added map slides over it in its own frame (visibly off), then
@@ -439,7 +483,7 @@ def main() -> int:
 
     # Act 3: the merged map, orbiting.
     summary = (f"One map in {sessions[0].label}'s frame: {total_images_merged:,} keyframe images, "
-               f"{total_landmarks_merged:,} landmarks from {n} flights")
+               f"{total_landmarks_merged:,} landmarks from {n} {args.unit}s")
     for f in range(args.orbit_frames):
         u = f / max(1, args.orbit_frames - 1)
         # A swing out and back, so the loop restarts where act 1 began.
@@ -448,7 +492,7 @@ def main() -> int:
         fit["scale"], fit["offset"] = framing(view)
         draw({"sessions": [session_state(slide=1.0, align=1.0, panel=0.0, merged=True)
                            for _ in sessions],
-              "caption": summary, "status": "later flights localize in it"}, 0)
+              "caption": summary, "status": f"later {args.unit}s localize in it"}, 0)
 
     palette = frames_dir / "palette.png"
     pattern = str(frames_dir / "frame_%04d.png")
