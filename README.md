@@ -462,6 +462,11 @@ one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).
 
+<p align="center">
+  <img src="docs/assets/hero_map_merge.gif" alt="Five SLAM maps of the EuRoC Machine Hall, MH_01 to MH_05, first growing side by side, each in its own world frame (MH_04's and MH_05's are turned about 112 and 115 degrees from the others). Then they are merged one at a time: each slides over the map so far in its own frame, visibly off, and turns and moves by the transform basalt_map_merge found until its trajectory and landmarks lie on the others. The merged map then swings round." width="720"><br>
+  <sub>Five flights of the Machine Hall, each mapped by its own SLAM session in its own frame, merged by <code>basalt_map_merge</code> into one map of 4,450 keyframe images and 47,796 landmarks. Placed by MH_01's ground-truth alignment alone, the five flights' keyframes are at <b>6.2 cm RMSE</b> against ground truth (MH_01–03 1.5–2.9 cm; MH_04 12.3 cm, with 53 of its 706 keyframes localized; MH_05 8.2 cm). <a href="docs/basalt_map_localization.md#lifelong-use-appending-each-session">Details</a>.</sub>
+</p>
+
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
 [archived README details](docs/readme_details.md#demos).

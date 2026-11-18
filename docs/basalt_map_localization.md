@@ -799,6 +799,45 @@ What these show:
   74 ms, while 43.7% of the images localize instead of 43.3%. Against
   MH_01 alone, where most images match neither way, it costs about 6 ms.
 
+#### All five flights in one map
+
+![Five SLAM maps of the Machine Hall merged into one](assets/hero_map_merge.gif)
+
+The five Machine Hall flights, each mapped by its own SLAM session and merged
+in flight order in one call (a rerun, 2026-11-18; the registration counts
+differ a little from the table above):
+
+```bash
+target/release/examples/basalt_map_merge --base runs/mh01_map --add runs/mh02_map \
+  --add runs/mh03_map --add runs/mh04_map --add runs/mh05_map --out runs/mh_merged
+python3 scripts/render_map_merge_gif.py \
+  --map runs/mh01_map --label MH_01 --map runs/mh02_map --label MH_02 \
+  --map runs/mh03_map --label MH_03 --map runs/mh04_map --label MH_04 \
+  --map runs/mh05_map --label MH_05 --merged runs/mh_merged \
+  --title "Multi-session mapping: five EuRoC flights, one map" \
+  --out docs/assets/hero_map_merge.gif
+```
+
+| Added map | Its frame vs the base | Keyframes localized | Residual | Landmarks fused / added |
+|---|---|---|---|---|
+| MH_02 | 9.3°, 43 cm | 865 of 974 | 3.0 cm | 1,608 / 12,210 |
+| MH_03 | 2.7°, 39 cm | 441 of 874 | 3.2 cm | 747 / 7,385 |
+| MH_04 | −111.9°, 37 cm | 53 of 706 | 7.0 cm | 160 / 6,105 |
+| MH_05 | −115.3°, 47 cm | 506 of 764 | 7.6 cm | 962 / 6,667 |
+
+The merged map holds 4,450 keyframe images and 47,796 landmarks. Placed in
+it and aligned to ground truth by MH_01's keyframes alone, each flight's cam0
+keyframe centres are at (RMSE / max) MH_01 1.5 / 4.6 cm, MH_02 2.5 / 5.3,
+MH_03 2.9 / 8.9, MH_04 12.3 / 28.2 and MH_05 8.2 / 17.0 cm; 6.2 cm over all
+2,160. Aligned on their own, MH_04's and MH_05's keyframes are at 7.1 and
+6.5 cm, so the merge adds about 5 cm to MH_04, registered from 53 keyframes,
+and 2 cm to MH_05.
+
+The GIF shows each map growing in its own frame (each landmark from the
+first keyframe that saw it), then each added map over the map so far in its
+own frame and moved by the merge's transform (`map.json`'s
+`base_from_session`). The script reads only the saved maps.
+
 ### Local contrast equalization
 
 `basalt_euroc_online_slam_demo --equalize-local-contrast` equalizes each
