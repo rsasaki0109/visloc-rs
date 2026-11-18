@@ -151,8 +151,22 @@ All notable changes to `visloc-rs` will be documented here.
     first 260 poses are byte-identical. Its accuracy over the full highway
     drive is poor (263 m ATE against OXTS); only the first 260 frames were
     ever tuned.
-  - The same unbounded `from_matrix` call remains in P3P, PnP, two-view and
-    the Basalt mapper; no hang has been seen there.
+  - Every other unbounded `from_matrix` call in the workspace now goes
+    through `visloc_core::geometry::rotation_from_matrix` (next entry).
+
+- **No unbounded rotation projection left in the workspace**
+  (`visloc_core::geometry::rotation_from_matrix`).
+  - **What.** It replaces nalgebra's `UnitQuaternion::from_matrix` in P3P,
+    PnP, generalized PnP, two-view, `SO3::from_matrix`, gsplat-train's photo
+    alignment, the SfM debug alignment, the Basalt mapper's loop geometry and
+    six examples.
+  - **How.** It runs the same iteration with a cap of 1,000 and accepts the
+    result only if one more iteration leaves it unchanged, which is how the
+    unbounded loop stops. A converged result has the same bits as before:
+    a test checks 200 rotations and general matrices.
+  - **Otherwise.** It takes the nearest rotation from the SVD, which covers
+    the half turn and other cycles. A non-finite input, which also looped
+    forever, now returns a rotation.
 
 ### Changed
 

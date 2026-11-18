@@ -267,8 +267,10 @@ impl GeneralizedDltPoseEstimator {
         let rotation_matrix = u * sign * v_t;
         let translation_normalized = Vector3::new(solution[9], solution[10], solution[11]);
         let translation = translation_normalized - rotation_matrix * centroid;
-        let pose =
-            Pose::from_world_to_camera(UnitQuaternion::from_matrix(&rotation_matrix), translation);
+        let pose = Pose::from_world_to_camera(
+            visloc_core::geometry::rotation_from_matrix(&rotation_matrix),
+            translation,
+        );
 
         // Reject the reflected/behind-camera branch and gross linear failures.
         let positive = correspondences
