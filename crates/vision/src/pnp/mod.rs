@@ -197,7 +197,7 @@ impl PoseEstimator for DltPnP {
         }
 
         Some(Pose::from_world_to_camera(
-            UnitQuaternion::from_matrix(&rotation),
+            visloc_core::geometry::rotation_from_matrix(&rotation),
             translation,
         ))
     }

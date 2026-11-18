@@ -774,33 +774,10 @@ fn kabsch_n(samples: &[&StereoPairCorrespondence]) -> Option<Pose> {
     Some(Pose::from_world_to_camera(rotation, translation))
 }
 
-/// Iteration cap for [`rotation_from_orthonormal`]. Converging projections
-/// take a handful of iterations; the cap is only ever reached by the cycle.
-const ROTATION_PROJECTION_MAX_ITERATIONS: usize = 1_000;
-
-/// `UnitQuaternion::from_matrix(r_mat)` for a rotation matrix that is already
-/// orthonormal with determinant +1 (Kabsch's `V S Uᵀ`), without its hang.
-///
-/// nalgebra's `from_matrix` iterates Müller et al.'s projection from the
-/// identity with no iteration limit. On a rotation of about 180° (a bad
-/// minimal RANSAC sample, e.g. `diag(-0.995, 0.995, -1)` on KITTI 01's
-/// highway) it lands in its "stuck in a maximum" branch and cycles forever:
-/// the stereo VO hung there for good. This runs the same iteration (same
-/// epsilon, same start) with a cap, so every converging case gives the same
-/// bits as before; a non-converged result falls back to the matrix itself,
-/// which is already a rotation.
+/// `UnitQuaternion::from_matrix(r_mat)` without its hang on a half-turn
+/// RANSAC hypothesis; see [`visloc_core::geometry::rotation_from_matrix`].
 fn rotation_from_orthonormal(r_mat: &Matrix3<f64>) -> UnitQuaternion<f64> {
-    let projected = nalgebra::Rotation3::from_matrix_eps(
-        r_mat,
-        f64::EPSILON,
-        ROTATION_PROJECTION_MAX_ITERATIONS,
-        nalgebra::Rotation3::identity(),
-    );
-    if (projected.matrix() - r_mat).norm() <= 1.0e-6 {
-        projected.into()
-    } else {
-        UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(*r_mat))
-    }
+    visloc_core::geometry::rotation_from_matrix(r_mat)
 }
 
 fn score_pose_3d3d(
@@ -3731,7 +3708,7 @@ mod tests {
         let capped = nalgebra::Rotation3::from_matrix_eps(
             &half_turn,
             f64::EPSILON,
-            ROTATION_PROJECTION_MAX_ITERATIONS,
+            visloc_core::geometry::ROTATION_FROM_MATRIX_MAX_ITERATIONS,
             nalgebra::Rotation3::identity(),
         );
         assert!((capped.matrix() - half_turn).norm() > 1.0e-6);

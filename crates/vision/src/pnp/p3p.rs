@@ -18,7 +18,7 @@
 //! sample disambiguate by reprojection.
 
 use nalgebra::linalg::Schur;
-use nalgebra::{Matrix3, Matrix4, Point3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 
@@ -312,14 +312,14 @@ fn kabsch_three(world: &[Point3<f64>; 3], camera: &[Point3<f64>; 3]) -> Option<P
         return None;
     }
     let translation = cc - r_mat * cw;
-    let rotation = UnitQuaternion::from_matrix(&r_mat);
+    let rotation = visloc_core::geometry::rotation_from_matrix(&r_mat);
     Some(Pose::from_world_to_camera(rotation, translation))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::{Point3, Vector3};
+    use nalgebra::{Point3, UnitQuaternion, Vector3};
 
     fn make_corr(camera: &Camera, pose: &Pose, point3d: Point3<f64>) -> Correspondence2D3D {
         Correspondence2D3D {
