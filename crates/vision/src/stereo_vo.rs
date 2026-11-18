@@ -770,8 +770,37 @@ fn kabsch_n(samples: &[&StereoPairCorrespondence]) -> Option<Pose> {
     }
     let r_mat = v * s * u.transpose();
     let translation = centroid_b - r_mat * centroid_a;
-    let rotation = UnitQuaternion::from_matrix(&r_mat);
+    let rotation = rotation_from_orthonormal(&r_mat);
     Some(Pose::from_world_to_camera(rotation, translation))
+}
+
+/// Iteration cap for [`rotation_from_orthonormal`]. Converging projections
+/// take a handful of iterations; the cap is only ever reached by the cycle.
+const ROTATION_PROJECTION_MAX_ITERATIONS: usize = 1_000;
+
+/// `UnitQuaternion::from_matrix(r_mat)` for a rotation matrix that is already
+/// orthonormal with determinant +1 (Kabsch's `V S Uᵀ`), without its hang.
+///
+/// nalgebra's `from_matrix` iterates Müller et al.'s projection from the
+/// identity with no iteration limit. On a rotation of about 180° (a bad
+/// minimal RANSAC sample, e.g. `diag(-0.995, 0.995, -1)` on KITTI 01's
+/// highway) it lands in its "stuck in a maximum" branch and cycles forever:
+/// the stereo VO hung there for good. This runs the same iteration (same
+/// epsilon, same start) with a cap, so every converging case gives the same
+/// bits as before; a non-converged result falls back to the matrix itself,
+/// which is already a rotation.
+fn rotation_from_orthonormal(r_mat: &Matrix3<f64>) -> UnitQuaternion<f64> {
+    let projected = nalgebra::Rotation3::from_matrix_eps(
+        r_mat,
+        f64::EPSILON,
+        ROTATION_PROJECTION_MAX_ITERATIONS,
+        nalgebra::Rotation3::identity(),
+    );
+    if (projected.matrix() - r_mat).norm() <= 1.0e-6 {
+        projected.into()
+    } else {
+        UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(*r_mat))
+    }
 }
 
 fn score_pose_3d3d(
@@ -3673,6 +3702,41 @@ mod tests {
                 kept
             })
             .collect()
+    }
+
+    #[test]
+    fn rotation_from_orthonormal_matches_from_matrix_and_survives_the_half_turn() {
+        // An ordinary rotation: bit-identical to nalgebra's unbounded call.
+        let ordinary = UnitQuaternion::from_euler_angles(0.3, -0.2, 1.1)
+            .to_rotation_matrix()
+            .into_inner();
+        let expected = UnitQuaternion::from_matrix(&ordinary);
+        let actual = rotation_from_orthonormal(&ordinary);
+        assert_eq!(actual.coords.as_slice(), expected.coords.as_slice());
+
+        // The half turn KITTI 01 produced at pair ~326 (column-major). The
+        // unbounded projection cycles forever on it; capped, it does not
+        // converge, and the matrix itself is returned.
+        let half_turn = Matrix3::from_column_slice(&[
+            -0.9954361201834596,
+            0.0954302396208945,
+            0.0,
+            0.09543023962089417,
+            0.9954361201834596,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+        ]);
+        let capped = nalgebra::Rotation3::from_matrix_eps(
+            &half_turn,
+            f64::EPSILON,
+            ROTATION_PROJECTION_MAX_ITERATIONS,
+            nalgebra::Rotation3::identity(),
+        );
+        assert!((capped.matrix() - half_turn).norm() > 1.0e-6);
+        let rotation = rotation_from_orthonormal(&half_turn);
+        assert!((rotation.to_rotation_matrix().into_inner() - half_turn).norm() < 1.0e-12);
     }
 
     #[test]
