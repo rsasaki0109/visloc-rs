@@ -770,8 +770,14 @@ fn kabsch_n(samples: &[&StereoPairCorrespondence]) -> Option<Pose> {
     }
     let r_mat = v * s * u.transpose();
     let translation = centroid_b - r_mat * centroid_a;
-    let rotation = UnitQuaternion::from_matrix(&r_mat);
+    let rotation = rotation_from_orthonormal(&r_mat);
     Some(Pose::from_world_to_camera(rotation, translation))
+}
+
+/// `UnitQuaternion::from_matrix(r_mat)` without its hang on a half-turn
+/// RANSAC hypothesis; see [`visloc_core::geometry::rotation_from_matrix`].
+fn rotation_from_orthonormal(r_mat: &Matrix3<f64>) -> UnitQuaternion<f64> {
+    visloc_core::geometry::rotation_from_matrix(r_mat)
 }
 
 fn score_pose_3d3d(
@@ -3673,6 +3679,41 @@ mod tests {
                 kept
             })
             .collect()
+    }
+
+    #[test]
+    fn rotation_from_orthonormal_matches_from_matrix_and_survives_the_half_turn() {
+        // An ordinary rotation: bit-identical to nalgebra's unbounded call.
+        let ordinary = UnitQuaternion::from_euler_angles(0.3, -0.2, 1.1)
+            .to_rotation_matrix()
+            .into_inner();
+        let expected = UnitQuaternion::from_matrix(&ordinary);
+        let actual = rotation_from_orthonormal(&ordinary);
+        assert_eq!(actual.coords.as_slice(), expected.coords.as_slice());
+
+        // The half turn KITTI 01 produced at pair ~326 (column-major). The
+        // unbounded projection cycles forever on it; capped, it does not
+        // converge, and the matrix itself is returned.
+        let half_turn = Matrix3::from_column_slice(&[
+            -0.9954361201834596,
+            0.0954302396208945,
+            0.0,
+            0.09543023962089417,
+            0.9954361201834596,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+        ]);
+        let capped = nalgebra::Rotation3::from_matrix_eps(
+            &half_turn,
+            f64::EPSILON,
+            visloc_core::geometry::ROTATION_FROM_MATRIX_MAX_ITERATIONS,
+            nalgebra::Rotation3::identity(),
+        );
+        assert!((capped.matrix() - half_turn).norm() > 1.0e-6);
+        let rotation = rotation_from_orthonormal(&half_turn);
+        assert!((rotation.to_rotation_matrix().into_inner() - half_turn).norm() < 1.0e-12);
     }
 
     #[test]

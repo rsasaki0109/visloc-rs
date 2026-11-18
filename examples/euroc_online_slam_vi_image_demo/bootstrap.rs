@@ -8,7 +8,7 @@ use super::*;
 pub(super) fn se3_from_t_bs(t_bs: &Matrix4<f64>) -> SE3 {
     let rotation_matrix = t_bs.fixed_view::<3, 3>(0, 0).into_owned();
     let translation = Vector3::new(t_bs[(0, 3)], t_bs[(1, 3)], t_bs[(2, 3)]);
-    let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
+    let rotation = visloc_rs::geometry::rotation_from_matrix(&rotation_matrix);
     SE3::new(rotation, translation)
 }
 

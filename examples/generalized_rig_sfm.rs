@@ -2343,7 +2343,7 @@ fn rotation_from_snapshot_bits(bits: [u64; 9]) -> Option<UnitQuaternion<f64>> {
     {
         return None;
     }
-    Some(UnitQuaternion::from_matrix(&matrix))
+    Some(visloc_rs::geometry::rotation_from_matrix(&matrix))
 }
 
 fn pair_rotation_disagreement_deg(

@@ -23,6 +23,14 @@ All notable changes to `visloc-rs` will be documented here.
     +1.38 dB and room +0.76 dB. At 0.5x (`images_8`) both gain
     +0.36-0.38 dB (docs/gsplat_cuda.md, "Mip-Splatting's 3D filter").
 
+- **`visloc_vio_node` with the online mapper, through `ros2 bag play` on ROS 2
+  Jazzy** (EuRoC V1_01, 1.0x, Fast DDS):
+  - stereo: shutdown trajectory 0.0355 m (live `map_pose` 0.0385 m), the
+    same as the DDS-free replay;
+  - mono: 0.034 m;
+  - all 2,912 frames processed in both runs, no mapper packet dropped, and
+    `map -> odom` on `/tf` for every frame (ros2/visloc-ros2/README.md).
+
 - **`visloc_vio_node` runs monocular-inertial VIO (opt-in, `mono:=true`).**
   - The calibration is cut to one camera (`mono_camera`, default 0), and only
     `left/image_raw` is subscribed. Every image is a frame once IMU data
@@ -145,6 +153,37 @@ All notable changes to `visloc-rs` will be documented here.
   `:latest` for the newest tag). The GPU paths use wgpu through Vulkan: with
   `--gpus all` (NVIDIA Container Toolkit) on the GPU, otherwise on Mesa's
   software Vulkan device (docs/docker.md).
+
+### Fixed
+
+- **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
+  2011_10_03_0042 the stereo VO stopped for good at pair ~326.
+  - **Cause.** `kabsch_n` converted its rotation with nalgebra's
+    `UnitQuaternion::from_matrix`, an iterative projection with no iteration
+    limit. On a ~180° rotation from a bad RANSAC sample it cycles forever.
+  - **Fix.** The same projection, capped at 1,000 iterations, falls back to
+    the matrix itself, which is already a rotation. Every converging case
+    gives the same bits as before.
+  - **Result.** The whole drive now runs (1,170 frames in 423 s), and its
+    first 260 poses are byte-identical. Its accuracy over the full highway
+    drive is poor (263 m ATE against OXTS); only the first 260 frames were
+    ever tuned.
+  - Every other unbounded `from_matrix` call in the workspace now goes
+    through `visloc_core::geometry::rotation_from_matrix` (next entry).
+
+- **No unbounded rotation projection left in the workspace**
+  (`visloc_core::geometry::rotation_from_matrix`).
+  - **What.** It replaces nalgebra's `UnitQuaternion::from_matrix` in P3P,
+    PnP, generalized PnP, two-view, `SO3::from_matrix`, gsplat-train's photo
+    alignment, the SfM debug alignment, the Basalt mapper's loop geometry and
+    six examples.
+  - **How.** It runs the same iteration with a cap of 1,000 and accepts the
+    result only if one more iteration leaves it unchanged, which is how the
+    unbounded loop stops. A converged result has the same bits as before:
+    a test checks 200 rotations and general matrices.
+  - **Otherwise.** It takes the nearest rotation from the SVD, which covers
+    the half turn and other cycles. A non-finite input, which also looped
+    forever, now returns a rotation.
 
 ### Changed
 
