@@ -17,8 +17,8 @@ depth registered to them, back-projected from the poses of a map's keyframes.
   fisheye1 (the keyframe's pose) <- base_link <- colour camera
   (`trans_matrix.yaml`). Depth is in millimetres.
 - `--tum DIR`: the sequence (`rgb.txt`, `depth.txt`, `rgb/`, `depth/`). The
-  map's camera 0 is the RGB camera itself, with Freiburg 1's calibration
-  (undistorted with OpenCV). Depth is in 1/5000 m.
+  map's camera 0 is the RGB camera itself, with `--tum-camera`'s calibration
+  (Freiburg 1's by default; undistorted with OpenCV). Depth is in 1/5000 m.
 
 For each keyframe (every `--every`-th camera-0 image) the colour image and
 depth taken within `--max-dt-ms` of it are back-projected (every
@@ -125,6 +125,10 @@ def main() -> int:
                         help="metres per depth unit (default 0.001 OpenLORIS, 0.0002 TUM)")
     parser.add_argument("--voxel", type=float, default=0.02)
     parser.add_argument("--max-dt-ms", type=float, default=20.0)
+    parser.add_argument("--tum-camera", nargs=9, type=float, metavar="V",
+                        default=[517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633],
+                        help="TUM RGB camera: fx fy cx cy k1 k2 p1 p2 k3 (default Freiburg 1; "
+                             "Freiburg 2: 520.9 521.0 325.1 249.7 0.2312 -0.7849 -0.0033 -0.0001 0.9172)")
     args = parser.parse_args()
 
     if args.openloris is not None:
@@ -141,9 +145,9 @@ def main() -> int:
     else:
         root = args.tum
         cam0_colour = np.eye(4)
-        # Freiburg 1's RGB camera (TUM RGB-D calibration page).
-        fx, fy, cx, cy = 517.3, 516.5, 318.6, 255.3
-        distortion = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633])
+        # The RGB camera (TUM RGB-D calibration page).
+        fx, fy, cx, cy = args.tum_camera[:4]
+        distortion = np.array(args.tum_camera[4:])
         colour_t, colour_files = read_stamped(root / "rgb.txt")
         depth_t, depth_files = read_stamped(root / "depth.txt")
         depth_scale = args.depth_scale or 1 / 5000
