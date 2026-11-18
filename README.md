@@ -22,6 +22,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/map_merge_kitti.gif" alt="Three KITTI raw drives through one residential district, recorded on two days, each mapped by its own stereo-inertial SLAM session in its own frame, then merged one at a time into one map of the district, and a drive at street level along a street two of them share, past parked cars and houses." width="720"><br>
+  <sub>Multi-session mapping: three <a href="https://www.cvlibs.net/datasets/kitti/raw_data.php">KITTI raw</a> drives (4.9 km, 30 Sep and 3 Oct 2011), each mapped on its own, merged by <code>basalt_map_merge</code> into one district map: <b>1.1 m RMSE</b> against the OXTS ground truth over all three, about the base drive's own SLAM error. Each covers its own part of the district and they share a few streets, so only the merge makes the whole. Colours from the colour cameras, brightened for display. Data CC BY-NC-SA 3.0, and so is this GIF. <a href="docs/basalt_map_localization.md#across-days-three-kitti-raw-drives">Details</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,583 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, streets and parked cars included, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,583 camera poses &rarr; 4.7M-gaussian splat &rarr; 5.9M-triangle mesh in 2.5 h, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
@@ -461,6 +466,11 @@ robot's wheel odometry instead of the VIO; see
 one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).
+
+<p align="center">
+  <img src="docs/assets/hero_map_merge.gif" alt="Five SLAM maps of the EuRoC Machine Hall, MH_01 to MH_05, first growing side by side, each in its own world frame (MH_04's and MH_05's are turned about 112 and 115 degrees from the others). Then they are merged one at a time: each slides over the map so far in its own frame, visibly off, and turns and moves by the transform basalt_map_merge found until its trajectory and landmarks lie on the others. The merged map then swings round." width="720"><br>
+  <sub>Five flights of the Machine Hall, each mapped by its own SLAM session in its own frame, merged by <code>basalt_map_merge</code> into one map of 4,450 keyframe images and 47,796 landmarks. Placed by MH_01's ground-truth alignment alone, the five flights' keyframes are at <b>6.2 cm RMSE</b> against ground truth (MH_01–03 1.5–2.9 cm; MH_04 12.3 cm, with 53 of its 706 keyframes localized; MH_05 8.2 cm). <a href="docs/basalt_map_localization.md#lifelong-use-appending-each-session">Details</a>.</sub>
+</p>
 
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the

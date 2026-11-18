@@ -6,6 +6,34 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`merge_maps` merges maps of another calibration of the rig**
+  (another day's): a camera that differs from the base map's under the same
+  id is added under a new id (`MergedMap::camera_ids`), instead of failing
+  with `CameraMismatch`. `basalt_map_merge` records such a session's
+  `t_imu_cam` in `map.json`. `scripts/euroc_stereo_to_rgbd.py` turns a
+  rectified stereo sequence and its SLAM trajectory into the RGB-D layout of
+  `tum_rgbd_save_map` (`--keep-world` keeps a visual-inertial world), and
+  `fetch_kitti_raw_drive.py --colour-frames` fetches the colour cameras of
+  chosen frames. Three KITTI raw drives on two days merge into one district map at
+  1.12 m RMSE against the OXTS (docs/basalt_map_localization.md, GIF under
+  KITTI's CC BY-NC-SA 3.0). `render_map_merge_gif.py --zoom` adds a
+  close-up of where a session joined, `--drive` a street-level drive along a
+  session's trajectory.
+
+- **Maps from TUM RGB-D sequences, merged across sessions**
+  (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
+  `basalt_euroc_online_slam_demo --save-map` writes, from the RGB images,
+  their depth and a trajectory (the virtual-stereo VO), levelled by the
+  Kinect's accelerometer or, without one, the map's largest horizontal
+  plane. `basalt_map_merge` merges four parts of fr3_long_office_household,
+  each seeing one side of the desks, into the whole office at 13.1 cm RMSE
+  against ground truth (docs/tum_rgbd_benchmark.md).
+- **Map-merge GIFs** (`scripts/render_map_merge_gif.py`): separate SLAM maps
+  growing in their own frames, then moved by the merge's transforms; with
+  `--cloud`, RGB-D colour clouds (`scripts/rgbd_map_cloud.py`). EuRoC's five
+  Machine Hall flights in one map at 6.2 cm RMSE (README), OpenLORIS-Scene's
+  office over three days at 4.6 cm.
+
 - **CUDA trainer: Mip-Splatting's 3D smoothing filter (opt-in,
   `gsplat_train_cuda --filter3d 0.2`, `CudaTrainer::set_filter3d`).**
   - **How.** Each gaussian's covariance gains `0.2 (z / fx)^2`, the finest

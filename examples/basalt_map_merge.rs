@@ -13,7 +13,9 @@
 //! ([`merge_maps`](visloc_rs::localization::merge_maps)): its keyframes and
 //! landmarks are moved into the base frame and renumbered, and its landmarks
 //! that coincide with existing ones are fused into them. All maps must come
-//! from the same camera rig and calibration.
+//! from the same camera rig. Another calibration of it (another day's) is
+//! kept: its cameras get new ids in the merged COLMAP model, and its
+//! session in `map.json` records its `t_imu_cam`.
 //!
 //! The merged map keeps the base map's world frame, so poses localized
 //! against it, and anything aligned to the base map's SLAM trajectory, stay
@@ -138,12 +140,15 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     for dir in &args.add {
         let other = map_files::load(dir)?;
-        if !same_rig(&merged.imu_from_camera, &other.imu_from_camera) {
-            return Err(format!(
-                "{}: camera extrinsics differ from the base map's",
+        // Another calibration of the rig (another day's) merges too: its
+        // cameras get new ids in the COLMAP model, and its session records
+        // its own T_imu_cam (map.json's cameras stay the base map's).
+        let other_rig = !same_rig(&merged.imu_from_camera, &other.imu_from_camera);
+        if other_rig {
+            println!(
+                "{}: another calibration of the rig than the base map's",
                 dir.display()
-            )
-            .into());
+            );
         }
         // Features extracted differently (equalized or raw, blurred or not)
         // do not match each other.
@@ -206,6 +211,15 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("map.json: session without base_from_session")?;
             session["base_from_session"] =
                 map_files::se3_json(&registration.base_from_other.compose(&other_from_session));
+            if other_rig && session.get("t_imu_cam").is_none() {
+                session["t_imu_cam"] = Value::Array(
+                    other
+                        .imu_from_camera
+                        .iter()
+                        .map(map_files::se3_json)
+                        .collect(),
+                );
+            }
             if index == 0 {
                 session["registration"] = json!({
                     "keyframes": registration.keyframes,

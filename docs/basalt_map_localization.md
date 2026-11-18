@@ -799,6 +799,144 @@ What these show:
   74 ms, while 43.7% of the images localize instead of 43.3%. Against
   MH_01 alone, where most images match neither way, it costs about 6 ms.
 
+#### All five flights in one map
+
+![Five SLAM maps of the Machine Hall merged into one](assets/hero_map_merge.gif)
+
+The five Machine Hall flights, each mapped by its own SLAM session and merged
+in flight order in one call (a rerun, 2026-11-18; the registration counts
+differ a little from the table above):
+
+```bash
+target/release/examples/basalt_map_merge --base runs/mh01_map --add runs/mh02_map \
+  --add runs/mh03_map --add runs/mh04_map --add runs/mh05_map --out runs/mh_merged
+python3 scripts/render_map_merge_gif.py \
+  --map runs/mh01_map --label MH_01 --map runs/mh02_map --label MH_02 \
+  --map runs/mh03_map --label MH_03 --map runs/mh04_map --label MH_04 \
+  --map runs/mh05_map --label MH_05 --merged runs/mh_merged \
+  --title "Multi-session mapping: five EuRoC flights, one map" \
+  --out docs/assets/hero_map_merge.gif
+```
+
+| Added map | Its frame vs the base | Keyframes localized | Residual | Landmarks fused / added |
+|---|---|---|---|---|
+| MH_02 | 9.3°, 43 cm | 865 of 974 | 3.0 cm | 1,608 / 12,210 |
+| MH_03 | 2.7°, 39 cm | 441 of 874 | 3.2 cm | 747 / 7,385 |
+| MH_04 | −111.9°, 37 cm | 53 of 706 | 7.0 cm | 160 / 6,105 |
+| MH_05 | −115.3°, 47 cm | 506 of 764 | 7.6 cm | 962 / 6,667 |
+
+The merged map holds 4,450 keyframe images and 47,796 landmarks. Placed in
+it and aligned to ground truth by MH_01's keyframes alone, each flight's cam0
+keyframe centres are at (RMSE / max) MH_01 1.5 / 4.6 cm, MH_02 2.5 / 5.3,
+MH_03 2.9 / 8.9, MH_04 12.3 / 28.2 and MH_05 8.2 / 17.0 cm; 6.2 cm over all
+2,160. Aligned on their own, MH_04's and MH_05's keyframes are at 7.1 and
+6.5 cm, so the merge adds about 5 cm to MH_04, registered from 53 keyframes,
+and 2 cm to MH_05.
+
+The GIF shows each map growing in its own frame (each landmark from the
+first keyframe that saw it), then each added map over the map so far in its
+own frame and moved by the merge's transform (`map.json`'s
+`base_from_session`). The script reads only the saved maps.
+
+#### Across days: three KITTI raw drives
+
+![Three KITTI raw drives of one district, on two days, each mapped in its own frame, merged into one map, then a drive at street level along a street two of them share, past parked cars and houses](assets/map_merge_kitti.gif)
+
+<sub>Data: [KITTI raw](https://www.cvlibs.net/datasets/kitti/raw_data.php) 2011_10_03_drive_0027, 2011_09_30_drive_0027 and 2011_09_30_drive_0028 (Geiger et al., IJRR 2013), CC BY-NC-SA 3.0. This GIF is under the same licence. Colours are the left colour camera's images placed by stereo depth, without blown-out pixels, brightened and saturated for display (`--gamma 1.3 --saturation 1.8`).</sub>
+
+Three drives through one residential district of Karlsruhe, on 30 September
+and 3 October 2011. Each covers its own part, and they share a few streets:
+only the merge makes the district. The stereo-inertial SLAM maps each
+drive on its own (grey cameras and the 100 Hz OXTS through
+`scripts/kitti_raw_to_euroc.py`, `configs/basalt/kitti/kitti_config.json`):
+
+| Drive | Path | SLAM ATE (own alignment) |
+|---|---|---|
+| 2011_10_03_drive_0027 (odometry 00) | 3,723 m | 0.98 m |
+| 2011_09_30_drive_0027 (odometry 07) | 692 m | 0.46 m |
+| 2011_09_30_drive_0028 (odometry 08), first 700 frames | 508 m | 0.48 m |
+
+Only the first 700 frames of drive 0028 are used: between its frames 600
+and 1,000 the VIO fails, and its error jumps from 0.4 m to 41 m. Those 700
+frames hold the street it shares with 2011_10_03_drive_0027.
+
+Two things the earlier merges did not need:
+
+- **Another day's calibration.** The two days have different rectified
+  cameras. `merge_maps` now adds a camera that differs from the base map's
+  under a new id instead of failing, and `basalt_map_merge` records the
+  session's own `t_imu_cam`.
+- **Denser maps.** The SLAM's own map keeps only the landmarks its mapper
+  tracked (6,115 for the 3.7 km drive), and 2011_09_30_drive_0027's
+  keyframes do not localize in it (none of 528). So each drive's map is
+  rebuilt with a landmark at every depth-valid corner:
+  `scripts/euroc_stereo_to_rgbd.py` computes SGBM depth from the grey pair
+  for every 2nd frame and moves the SLAM trajectory to camera 0, then
+  `tum_rgbd_save_map --keep-world` builds the map (keyframes every 1 m or
+  5°, depths 2–30 m), keeping the SLAM's gravity-aligned world.
+
+| Added map (in order) | Its frame vs 2011_10_03's | Keyframes localized | Residual |
+|---|---|---|---|
+| 2011_09_30_drive_0027 | −91.4°, 385 m | 8 of 450 (4 agree) | 7.8 cm |
+| 2011_09_30_drive_0028 | −84.1°, 393 m | 3 of 316 | 8.7 cm |
+
+The merged map holds 2,931 keyframe images and 96,040 landmarks. Against
+the OXTS ground truth in one east-north-up frame, aligned by the
+2011_10_03 drive's keyframes alone, the keyframe centres are at 1.12 m RMSE
+(4.74 m max): 0.96, 1.14 and 1.87 m for the three drives, against 0.96,
+0.47 and 0.48 m for each aligned on its own. The GIF ends with a drive at
+street level along 2011_09_30_drive_0027's first 25 s, which the other day's
+drive also took: a perspective camera 7 m behind and 3 m above its
+trajectory, through every drive's points. The colours come from
+`fetch_kitti_raw_drive.py --colour-frames` (the keyframes' image_02 and
+image_03) and `scripts/rgbd_map_cloud.py --kitti` (SGBM on the colour
+pair).
+
+```bash
+for d in 2011_10_03_drive_0027 2011_09_30_drive_0027 2011_09_30_drive_0028; do
+  python3 scripts/fetch_kitti_raw_drive.py --drive $d --out raw --skip-tracklets
+  python3 scripts/kitti_raw_to_euroc.py --raw raw/${d:0:10} --drive $d --out euroc/$d
+done
+# SLAM (drive 0028: --max-frames 700)
+target/release/examples/basalt_euroc_online_slam_demo --euroc-dir euroc/$d \
+  --calibration euroc/$d/calibration.json --config configs/basalt/kitti/kitti_config.json \
+  --out-dir runs/${d}_slam --save-map runs/${d}_map
+# Dense map from stereo depth, in the SLAM's world
+python3 scripts/euroc_stereo_to_rgbd.py --euroc euroc/$d \
+  --trajectory runs/${d}_slam/trajectory_online.tum --out rgbd/$d
+read fx fy cx cy < rgbd/$d/camera.txt
+target/release/examples/tum_rgbd_save_map --seq-dir rgbd/$d \
+  --trajectory rgbd/$d/trajectory.tum --out runs/${d}_dmap --keep-world \
+  --fx $fx --fy $fy --cx $cx --cy $cy --k1 0 --k2 0 --p1 0 --p2 0 --k3 0 \
+  --depth-scale 0.001 --min-depth 2 --max-depth 30 --keyframe-m 1.0 --keyframe-deg 5 \
+  --match-radius-px 8 --track-keyframes 5
+target/release/examples/basalt_map_merge --base runs/2011_10_03_drive_0027_dmap \
+  --add runs/2011_09_30_drive_0027_dmap --add runs/2011_09_30_drive_0028_dmap \
+  --out runs/kitti_merged
+# Colours: the keyframes' colour pairs, then the clouds and the GIF
+python3 scripts/fetch_kitti_raw_drive.py --drive $d --out raw --colour-frames KEYFRAME_FRAMES.txt
+python3 scripts/rgbd_map_cloud.py --map runs/${d}_dmap --kitti raw/${d:0:10}/${d}_sync \
+  --kitti-frames euroc/$d/frames.csv --out runs/${d}_cloud.npz --every 1 --stride 3 \
+  --min-depth 3 --max-depth 25 --voxel 0.15 --max-dt-ms 5 --drop-overexposed 0.92
+python3 scripts/render_map_merge_gif.py --merged runs/kitti_merged \
+  --map runs/2011_10_03_drive_0027_dmap --cloud runs/2011_10_03_drive_0027_cloud.npz \
+  --label "2011-10-03 #27" --note "3.7 km" \
+  --map runs/2011_09_30_drive_0027_dmap --cloud runs/2011_09_30_drive_0027_cloud.npz \
+  --label "2011-09-30 #27" --note "0.7 km" \
+  --map runs/2011_09_30_drive_0028_dmap --cloud runs/2011_09_30_drive_0028_cloud.npz \
+  --label "2011-09-30 #28" --note "first 0.6 km" \
+  --max-points 300000 --point-size 0.6 --saturation 1.8 --gamma 1.3 \
+  --unit drive --place district --fill 0.66 \
+  --elevation 70 --orbit-frames 24 --drive 1 5 25 --drive-frames 100 \
+  --title "Multi-session mapping: three drives on two days, one map" \
+  --frames-dir frames --out map_merge_kitti.gif
+# then re-encoded from frames/: 10 fps, the drive at 6.25 fps, 96 colours
+```
+
+`KEYFRAME_FRAMES.txt` lists the sync frame indices of the map's keyframes
+(its `images.csv` timestamps looked up in `euroc/$d/frames.csv`; every 3rd for
+the 3.7 km drive).
+
 ### Local contrast equalization
 
 `basalt_euroc_online_slam_demo --equalize-local-contrast` equalizes each
