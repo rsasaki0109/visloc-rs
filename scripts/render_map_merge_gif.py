@@ -225,6 +225,16 @@ def main() -> int:
     parser.add_argument("--orbit-frames", type=int, default=50)
     parser.add_argument("--orbit-degrees", type=float, default=30.0,
                         help="amplitude of the closing azimuth swing")
+    parser.add_argument("--zoom", type=float, default=1.0,
+                        help="close-up after the orbit: magnification (1: none)")
+    parser.add_argument("--zoom-frames", type=int, default=70)
+    parser.add_argument("--zoom-session", type=int, default=1,
+                        help="the session whose trajectory's median the close-up flies to")
+    parser.add_argument("--zoom-at", type=float, nargs=3, metavar=("X", "Y", "Z"),
+                        help="the close-up's target in the merged frame instead")
+    parser.add_argument("--zoom-elevation", type=float, default=40.0)
+    parser.add_argument("--zoom-turn", type=float, default=40.0,
+                        help="degrees the view turns while close")
     parser.add_argument("--fill", type=float, default=0.68,
                         help="share of the height the merged map fills")
     parser.add_argument("--orbit-tilt", type=float, default=16.0,
@@ -294,7 +304,7 @@ def main() -> int:
         scale = float(np.min(area / (hi - lo)))
         return scale, (merged_centre_world @ view.T - (lo + hi) / 2) * scale
 
-    fit = {}
+    fit = {"centre": merged_centre_world, "zoom": 1.0}
     fit["scale"], fit["offset"] = framing(view)
 
     # Act 1 panels: a row of three over a row of the rest. Act 2 shrinks them
@@ -338,7 +348,7 @@ def main() -> int:
         own = (world - s.centre) @ view.T * scale + centre
         if slide <= 0:
             return own
-        whole = (world - merged_centre_world) @ view.T * fit["scale"] + area_centre + fit["offset"]
+        whole = (world - fit["centre"]) @ view.T * fit["scale"] + area_centre + fit["offset"]
         return lerp(own, whole, smooth(slide))
 
     fig = plt.figure(figsize=(W / 100, H / 100), dpi=100, facecolor=BACKGROUND)
@@ -398,7 +408,7 @@ def main() -> int:
                     colour = s.rgb[shown] * (1 - tint) + base * tint
                     colour = colour * (1 - 0.35 * flash) + 0.35 * flash
                 size = (lerp(0.45, 0.8, smooth(slide)) * (1 + 1.2 * flash)
-                        * args.point_size)
+                        * args.point_size * fit["zoom"] ** 0.7)
                 fade = swap if slide <= 0 else 1.0
                 ax.scatter(xy[:, 0], xy[:, 1], s=size, c=colour,
                            alpha=(0.6 if not st.get("active") else 0.75) * fade,
@@ -412,6 +422,10 @@ def main() -> int:
                 if st["t"] < s.duration:
                     ax.scatter([xy[-1, 0]], [xy[-1, 1]], s=14, c="white", zorder=4,
                                linewidths=0)
+        # Bands behind the header and the legend, for close-ups under them.
+        for y0, height in ((H - 48, 48), (0, 32)):
+            ax.add_patch(matplotlib.patches.Rectangle((0, y0), W, height, facecolor=BACKGROUND,
+                                                      edgecolor="none", alpha=0.75, zorder=5.5))
         ax.text(14, H - 14, args.title, color=TEXT, fontsize=11, va="top", zorder=6)
         ax.text(14, H - 34, state["caption"], color=DIM, fontsize=8.5, va="top", zorder=6)
         # Legend: one chip per session, with its state.
@@ -501,6 +515,32 @@ def main() -> int:
         draw({"sessions": [session_state(slide=1.0, align=1.0, panel=0.0, merged=True)
                            for _ in sessions],
               "caption": summary, "status": f"later {args.unit}s localize in it"}, 0)
+
+    # Optional close-up: fly down to where a session joined the map, tilted
+    # towards the street, and back out.
+    if args.zoom > 1 and args.zoom_frames > 0:
+        target_session = sessions[args.zoom_session % n]
+        target = np.median(target_session.placed(target_session.path, 1.0), axis=0)
+        if args.zoom_at is not None:
+            target = np.array(args.zoom_at, dtype=float)
+        base_view = view_matrix(args.azimuth, args.elevation)
+        base_scale, base_offset = framing(base_view)
+        caption = (f"Close up: where {target_session.label} joins the map")
+        for f in range(args.zoom_frames):
+            u = f / max(1, args.zoom_frames - 1)
+            k = smooth(min(1.0, 3 * u)) * smooth(min(1.0, 3 * (1 - u)))  # in, hold, out
+            view = view_matrix(args.azimuth + args.zoom_turn * (u - 0.5) * k,
+                               lerp(args.elevation, args.zoom_elevation, k))
+            scale, offset = framing(view)
+            fit["zoom"] = lerp(1.0, args.zoom, k)
+            fit["scale"] = scale * fit["zoom"]
+            fit["centre"] = lerp(merged_centre_world, target, k)
+            fit["offset"] = offset * fit["zoom"] * (1 - k)
+            draw({"sessions": [session_state(slide=1.0, align=1.0, panel=0.0, merged=True)
+                               for _ in sessions],
+                  "caption": caption if k > 0.2 else summary,
+                  "status": f"later {args.unit}s localize in it"}, 0)
+        fit.update(zoom=1.0, centre=merged_centre_world, scale=base_scale, offset=base_offset)
 
     palette = frames_dir / "palette.png"
     pattern = str(frames_dir / "frame_%04d.png")

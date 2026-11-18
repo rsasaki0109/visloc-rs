@@ -14,7 +14,10 @@ All notable changes to `visloc-rs` will be documented here.
   rectified stereo sequence and its SLAM trajectory into the RGB-D layout of
   `tum_rgbd_save_map` (`--keep-world` keeps a visual-inertial world), and
   `fetch_kitti_raw_drive.py --colour-frames` fetches the colour cameras of
-  chosen frames.
+  chosen frames. Three KITTI raw drives on two days merge into one district map at
+  1.12 m RMSE against the OXTS (docs/basalt_map_localization.md, GIF under
+  KITTI's CC BY-NC-SA 3.0). `render_map_merge_gif.py --zoom` adds a
+  close-up of where a session joined.
 
 - **Maps from TUM RGB-D sequences, merged across sessions**
   (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
