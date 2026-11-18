@@ -226,7 +226,8 @@ def main():
     p.add_argument("--flow", action="store_true", help="link consecutive keyframes by Lucas-Kanade flow through "
                    "the frames between them, for every solve")
     p.add_argument("--final-refinement", action="store_true",
-                   help="after the last solve, solve once more with its calibration held (ba4.tum)")
+                   help="after the last solve, solve once more with its calibration held (ba4.tum; off: -0.10 over five "
+                        "sequences, docs/lamaria_batch_ba.md#slam-dunks-final-refinement)")
     p.add_argument("--temperature", default=None,
                    help="the SLAM cameras' temperature (lamaria_temperature.py CSV): by day the pass estimates the "
                         "gyroscope's bias and scale change per degree")

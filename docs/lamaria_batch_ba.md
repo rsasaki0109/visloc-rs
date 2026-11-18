@@ -2975,6 +2975,30 @@ the `.vrs` over HTTP range requests, a sparse copy, then reads them with
 projectaria_tools. A sequence without it runs the pass as before. Low light
 and Moving platform stay without it: neither was measured.
 
+### SLAM Dunk's final refinement
+
+SLAM Dunk ends with one more solve in which the calibration stays as the
+solves before left it. `solve --init-states STATES --fix-calib` does that:
+it starts from a solve's `--save-states` (velocities, biases, each camera's
+rotation and focal length per time segment, the IMU's response) and estimates
+the trajectory only. `lamaria_ba_chain.py --final-refinement` runs it after
+the chain's last solve (ba4.tum). On seed 1 of the seeds above, ba3 and ba4
+come from the same run, so the pair differs in that solve only (ba3
+reproduces the control's to the digit):
+
+| Sequence | ba3 | ba4 (calibration held) | Change |
+|---|---:|---:|---:|
+| sequence_1_19 | 82.79 | 82.85 | +0.07 |
+| sequence_2_11 | 88.18 | 87.80 | −0.38 |
+| sequence_3_17 | 79.91 | 79.87 | −0.04 |
+| sequence_4_10 | 67.48 | 67.33 | −0.15 |
+| sequence_4_11 | 74.57 | 74.56 | −0.01 |
+| Mean | 78.58 | 78.48 | −0.10 |
+
+The last solve has already converged with the calibration free; holding it
+moves the trajectory by less than the seeds do, and not upward. It stays
+off.
+
 ### The IMU's clock
 
 SLAM Dunk refines a time offset per IMU channel. Before adding one to the
