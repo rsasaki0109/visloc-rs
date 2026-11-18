@@ -102,7 +102,7 @@ stage are complementary, not independently additive.
 
 ## Several sessions in one map
 
-![Four sessions around one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd.gif)
+![Four sessions around one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd_fr3_parts.gif)
 
 <sub>Data: [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) fr3_long_office_household (Sturm et al., IROS 2012), CC BY 4.0. Colours are the RGB images placed by their depth.</sub>
 
@@ -154,9 +154,47 @@ keyframes, and every map's level is off by about 1.7° in its own
 direction, which a yaw and a translation cannot absorb: 2° over the 4 m
 between part 1 and part 2 is 14 cm.
 
-The fr1 sequences of one office (fr1_room, fr1_desk2, fr1_desk) merge
-too, at 7.4 cm RMSE, but fr1_room alone covers what the other two see, so
-the merge adds little.
+### Three separate recordings: fr1_room, fr1_desk2, fr1_desk
+
+![Three TUM RGB-D recordings of one office, each mapped in its own frame, merged into one map](assets/map_merge_tum_rgbd_fr1.gif)
+
+<sub>Data: TUM RGB-D fr1_room, fr1_desk2 and fr1_desk, CC BY 4.0.</sub>
+
+Three separate recordings of one office merge the same way (Freiburg 1,
+levelled by the accelerometer; VO ATE 5.33, 4.67 and 2.27 cm). fr1_room
+alone covers what the other two see, so the merge adds little to the map:
+
+| Added map (in order) | Its frame vs fr1_room's | Keyframes localized | Residual |
+|---|---|---|---|
+| fr1_desk2 | 71.6°, 248 cm | 20 of 209 | 8.6 cm |
+| fr1_desk | 72.1°, 227 cm | 17 of 171 | 4.0 cm |
+
+The merged map holds 751 keyframe images and 53,063 landmarks, at 7.4 cm
+RMSE against the ground truth by fr1_room's alignment alone (fr1_room 5.4,
+fr1_desk2 10.2, fr1_desk 7.0 cm; 5.4, 4.6 and 2.4 cm aligned on their own).
+fr1_360 (turning in place, VO ATE 9.95 cm) and fr1_plant register in none
+of the other maps, in any order.
+
+```bash
+D=/path/to/tum   # rgbd_dataset_freiburg1_{room,desk2,desk}
+for s in room desk2 desk; do
+  TUM_MAX_KEYPOINTS=1024 scripts/run_tum_rgbd_benchmark.sh \
+    --seq-dir $D/rgbd_dataset_freiburg1_$s --out-dir runs/tum_$s --device cpu
+  target/release/examples/tum_rgbd_save_map --seq-dir $D/rgbd_dataset_freiburg1_$s \
+    --trajectory runs/tum_$s/full_tv/est.tum --out runs/fr1_${s}_map \
+    --keyframe-m 0.05 --keyframe-deg 5 --match-radius-px 8 --track-keyframes 10
+  python3 scripts/rgbd_map_cloud.py --map runs/fr1_${s}_map \
+    --tum $D/rgbd_dataset_freiburg1_$s --out runs/fr1_${s}_cloud.npz --every 3 --max-depth 3
+done
+target/release/examples/basalt_map_merge --base runs/fr1_room_map \
+  --add runs/fr1_desk2_map --add runs/fr1_desk_map --out runs/fr1_merged
+python3 scripts/render_map_merge_gif.py --merged runs/fr1_merged \
+  $(for s in room desk2 desk; do echo --map runs/fr1_${s}_map --cloud runs/fr1_${s}_cloud.npz \
+    --label fr1_$s; done) \
+  --max-points 60000 --point-size 2 --unit session --place office --fill 0.6 \
+  --title "Multi-session mapping: three RGB-D sessions, one map" \
+  --out docs/assets/map_merge_tum_rgbd_fr1.gif
+```
 
 ```bash
 F=/path/to/rgbd_dataset_freiburg3_long_office_household
@@ -190,7 +228,7 @@ python3 scripts/render_map_merge_gif.py --merged runs/lo_merged \
   --map runs/lo2_map --cloud runs/lo2_cloud.npz --label "part 2" --note "22–43 s" \
   --max-points 60000 --point-size 2 --unit session --place office --fill 0.6 \
   --title "Multi-session mapping: four sessions around one office, one map" \
-  --out docs/assets/map_merge_tum_rgbd.gif
+  --out docs/assets/map_merge_tum_rgbd_fr3_parts.gif
 ```
 
 ## Reproduce
