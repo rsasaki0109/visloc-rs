@@ -307,6 +307,12 @@ pub struct GnssPoseGraphConfig {
     /// After classification, re-solve with outliers removed and inliers at
     /// full weight (a hard-rejection refinement).
     pub refine_without_outliers: bool,
+    /// Robust kernel on the VO relative-pose factors (IRLS on their whitened
+    /// squared residual, in every LM stage). `RobustKernel::None`, the
+    /// default, leaves them plain least squares. Without it a corrupted VO
+    /// step (a large object crossing the view) is trusted at its fixed noise,
+    /// and the GNSS robust step rejects the correct fixes around it instead.
+    pub vo_robust: RobustKernel,
 }
 
 impl Default for GnssPoseGraphConfig {
@@ -326,6 +332,7 @@ impl Default for GnssPoseGraphConfig {
             relative_cost_tolerance: 1e-6,
             outlier_chi2_threshold: GNSS_CHI2_3DOF_999,
             refine_without_outliers: true,
+            vo_robust: RobustKernel::None,
         }
     }
 }
@@ -405,6 +412,15 @@ pub struct GnssPoseGraph {
     pub lever_arm: Vector3<f64>,
     /// Nodes held constant (at least one is required to fix the gauge).
     pub fixed_nodes: BTreeSet<u64>,
+    /// Optional per-GNSS-factor multipliers (factor order) on the whitened
+    /// squared residual wherever it decides *robustness*: the GNC / kernel
+    /// weights computed between LM stages and the χ² inlier classification.
+    /// The least-squares weighting itself is unchanged. Use it when a
+    /// factor's information was deliberately down-weighted (one fix shared
+    /// between several frames) but its consistency should still be judged at
+    /// the fix's own accuracy. Empty (the default) means 1 for every factor;
+    /// IRLS inside an LM stage (`GnssRobustMode::Kernel`) does not use it.
+    pub gnss_gate_scales: Vec<f64>,
 }
 
 /// Per-factor GNSS weighting used inside one LM stage.
@@ -428,6 +444,8 @@ struct Whitening {
     relative: Vec<Matrix7>,
     gnss: Vec<Matrix3<f64>>,
     prior: Option<Matrix7>,
+    /// `GnssPoseGraphConfig::vo_robust`.
+    vo_kernel: RobustKernel,
 }
 
 impl GnssPoseGraph {
@@ -481,6 +499,40 @@ impl GnssPoseGraph {
             .collect()
     }
 
+    /// Whitened squared residual of every VO relative factor at the current
+    /// estimate (factor order), under the information `config` sets.
+    pub fn relative_squared_residuals(
+        &self,
+        config: &GnssPoseGraphConfig,
+    ) -> Result<Vec<f64>, GnssPoseGraphError> {
+        let whitening = self.whitening(config)?;
+        Ok(self
+            .relative_factors
+            .iter()
+            .zip(&whitening.relative)
+            .map(|(factor, w)| {
+                let (r, _, _) = relative_residual(
+                    &self.nodes[&factor.from],
+                    &self.nodes[&factor.to],
+                    &factor.relative,
+                );
+                (w * r).norm_squared()
+            })
+            .collect())
+    }
+
+    /// [`Self::gnss_squared_residuals`] times [`Self::gnss_gate_scales`]: the
+    /// statistic the robust weights and the inlier classification use.
+    pub fn gnss_gating_residuals(&self) -> Vec<f64> {
+        let mut residuals = self.gnss_squared_residuals();
+        if !self.gnss_gate_scales.is_empty() {
+            for (s, scale) in residuals.iter_mut().zip(&self.gnss_gate_scales) {
+                *s *= scale;
+            }
+        }
+        residuals
+    }
+
     /// Jointly optimize the free nodes and the alignment.
     pub fn optimize(
         &mut self,
@@ -520,7 +572,7 @@ impl GnssPoseGraph {
                     &mut symbolic,
                 )?;
                 total_iterations += stage.iterations;
-                for (weight, s) in weights.iter_mut().zip(self.gnss_squared_residuals()) {
+                for (weight, s) in weights.iter_mut().zip(self.gnss_gating_residuals()) {
                     *weight = kernel.weight(s);
                 }
                 stage.converged
@@ -539,7 +591,7 @@ impl GnssPoseGraph {
                 total_iterations += stage.iterations;
                 let mut converged = stage.converged;
                 if gnss_count > 0 {
-                    let residuals = self.gnss_squared_residuals();
+                    let residuals = self.gnss_gating_residuals();
                     let s_max = residuals.iter().copied().fold(0.0_f64, f64::max);
                     let effective = match gnc_config.auto_scale {
                         Some(k) => GncConfig {
@@ -553,7 +605,7 @@ impl GnssPoseGraph {
                     for _ in 0..gnc_config.max_outer.max(1) {
                         gnc_levels += 1;
                         let terminal = state.is_terminal();
-                        let residuals = self.gnss_squared_residuals();
+                        let residuals = self.gnss_gating_residuals();
                         if gnc_config.auto_scale_readapt {
                             if let Some(k) = gnc_config.auto_scale {
                                 if let Some(c) = gnc::estimate_scale_mad(&residuals, k) {
@@ -579,7 +631,7 @@ impl GnssPoseGraph {
                         }
                         state.anneal();
                     }
-                    for (weight, s) in weights.iter_mut().zip(self.gnss_squared_residuals()) {
+                    for (weight, s) in weights.iter_mut().zip(self.gnss_gating_residuals()) {
                         *weight = state.weight(s);
                     }
                 }
@@ -595,7 +647,7 @@ impl GnssPoseGraph {
                 .collect::<Vec<_>>()
         };
         let mut residuals = self.gnss_squared_residuals();
-        let mut inliers = classify(&weights, &residuals);
+        let mut inliers = classify(&weights, &self.gnss_gating_residuals());
 
         if config.refine_without_outliers && gnss_count > 0 {
             let mask: Vec<f64> = inliers
@@ -613,9 +665,10 @@ impl GnssPoseGraph {
             total_iterations += stage.iterations;
             converged = stage.converged;
             residuals = self.gnss_squared_residuals();
+            let gating = self.gnss_gating_residuals();
             // Hard rejection keeps the earlier verdicts; a previously-accepted
             // fix that the refined trajectory now contradicts is demoted.
-            for ((inlier, weight), &s) in inliers.iter_mut().zip(&mut weights).zip(&residuals) {
+            for ((inlier, weight), &s) in inliers.iter_mut().zip(&mut weights).zip(&gating) {
                 if *inlier && s > config.outlier_chi2_threshold {
                     *inlier = false;
                 }
@@ -750,6 +803,7 @@ impl GnssPoseGraph {
             relative,
             gnss,
             prior,
+            vo_kernel: config.vo_robust,
         })
     }
 
@@ -762,7 +816,7 @@ impl GnssPoseGraph {
                 &self.nodes[&factor.to],
                 &factor.relative,
             );
-            total += (w * r).norm_squared();
+            total += whitening.vo_kernel.cost((w * r).norm_squared());
         }
         for (index, (factor, w)) in self.gnss_factors.iter().zip(&whitening.gnss).enumerate() {
             let r = predicted_antenna(&self.alignment, &self.nodes[&factor.node], &self.lever_arm)
@@ -850,6 +904,7 @@ impl GnssPoseGraph {
                 &self.nodes[&factor.to],
                 &factor.relative,
             );
+            let rw = w * r;
             accumulate(
                 &mut columns,
                 &mut gradient,
@@ -857,8 +912,8 @@ impl GnssPoseGraph {
                     (layout.node_index.get(&factor.from).copied(), w * j_from),
                     (layout.node_index.get(&factor.to).copied(), w * j_to),
                 ],
-                &(w * r),
-                1.0,
+                &rw,
+                whitening.vo_kernel.weight(rw.norm_squared()),
             );
         }
 

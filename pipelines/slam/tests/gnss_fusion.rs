@@ -237,3 +237,126 @@ fn fusion_reports_unobservable_alignment_and_bad_timestamps() {
     ));
     assert_eq!(fusion.optimize(), Err(GnssFusionError::TooFewFrames));
 }
+
+#[test]
+fn gating_at_fix_accuracy_catches_jumps_hidden_by_information_sharing() {
+    // 10 Hz camera, 1 Hz receiver: each fix feeds ~10 frames, so sharing its
+    // information inflates every frame's covariance ~10x. A 12 m multipath
+    // jump against 2 m sigmas is then only ~2 sigma per frame unless it is
+    // judged at the fix's own accuracy (`gate_at_fix_accuracy`).
+    let scenario = generate_gnss_vo_scenario(&SyntheticGnssVoConfig {
+        frame_count: 600,
+        frame_rate_hz: 10.0,
+        lap_seconds: 60.0,
+        gnss_rate_hz: 1.0,
+        gnss_horizontal_sigma: 2.0,
+        gnss_vertical_sigma: 4.0,
+        dropout: None,
+        outliers: vec![SyntheticOutlier {
+            time_seconds: 40.0,
+            burst_length: 1,
+            offset_enu: Vector3::new(9.0, -8.0, 0.0),
+        }],
+        ..SyntheticGnssVoConfig::default()
+    });
+    let near: Vec<bool> = scenario
+        .vo
+        .iter()
+        .map(|pose| {
+            scenario.outlier_fix_timestamps.iter().any(|t| {
+                (t.as_nanoseconds() - pose.timestamp.as_nanoseconds()).abs() < 1_000_000_000
+            })
+        })
+        .collect();
+    let flagged = |result: &GnssVoFusionResult| -> (usize, usize) {
+        let mut counts = (0, 0);
+        for (frame, near) in result.frames.iter().zip(&near) {
+            if matches!(frame.gnss, FrameGnssStatus::Outlier { .. }) {
+                if *near {
+                    counts.0 += 1;
+                } else {
+                    counts.1 += 1;
+                }
+            }
+        }
+        counts
+    };
+
+    let default = fuse(&scenario, GnssVoFusionConfig::metric_gravity_aligned());
+    let mut config = GnssVoFusionConfig::metric_gravity_aligned();
+    config.gate_at_fix_accuracy = true;
+    let gated = fuse(&scenario, config);
+    let (default_near, default_elsewhere) = flagged(&default);
+    let (gated_near, gated_elsewhere) = flagged(&gated);
+    eprintln!(
+        "outlier frames flagged near the jump: default {default_near}, gated {gated_near} \
+         (elsewhere {default_elsewhere} / {gated_elsewhere})"
+    );
+    assert_eq!(
+        default_near, 0,
+        "the shared-information gate is expected to miss the jump"
+    );
+    assert!(
+        gated_near >= 5,
+        "gated run flagged only {gated_near} frames"
+    );
+    assert_eq!(gated_elsewhere, 0);
+    let truth = &scenario.ground_truth_enu;
+    let default_ate = position_rmse(&default.trajectory_enu, truth).unwrap();
+    let gated_ate = position_rmse(&gated.trajectory_enu, truth).unwrap();
+    eprintln!("ATE default {default_ate:.3} m, gated {gated_ate:.3} m");
+    assert!(
+        gated_ate <= default_ate + 0.05,
+        "gated {gated_ate} vs default {default_ate}"
+    );
+}
+
+#[test]
+fn robust_vo_factors_absorb_a_corrupted_vo_step() {
+    // One VO step goes wrong (a large object crossing the view): every later
+    // pose is offset by the same rigid jump, so exactly one relative factor
+    // is corrupted. Plain least squares trusts it at its fixed noise and
+    // rejects the correct fixes around it; a robust kernel on the VO factors
+    // gives that step up instead.
+    let mut scenario = generate_gnss_vo_scenario(&SyntheticGnssVoConfig {
+        frame_count: 300,
+        lap_seconds: 60.0,
+        dropout: None,
+        outliers: Vec::new(),
+        ..SyntheticGnssVoConfig::default()
+    });
+    let jump = visloc_core::geometry::SE3::new(
+        nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 6.0_f64.to_radians()),
+        Vector3::new(4.0, -3.0, 0.5),
+    );
+    for pose in scenario.vo.iter_mut().skip(150) {
+        let camera_to_world = pose.value.world_to_camera.inverse();
+        pose.value = Pose {
+            world_to_camera: jump.compose(&camera_to_world).inverse(),
+        };
+    }
+    let rejected = |result: &GnssVoFusionResult| {
+        result
+            .frames
+            .iter()
+            .filter(|frame| matches!(frame.gnss, FrameGnssStatus::Outlier { .. }))
+            .count()
+    };
+    let truth = &scenario.ground_truth_enu;
+    let plain = fuse(&scenario, GnssVoFusionConfig::metric_gravity_aligned());
+    let mut config = GnssVoFusionConfig::metric_gravity_aligned();
+    config.optimizer.vo_robust = visloc_slam::RobustKernel::Cauchy { c: 3.0 };
+    let robust = fuse(&scenario, config);
+    let plain_ate = position_rmse(&plain.trajectory_enu, truth).unwrap();
+    let robust_ate = position_rmse(&robust.trajectory_enu, truth).unwrap();
+    eprintln!(
+        "ATE plain {plain_ate:.3} m ({} fixes rejected), robust VO {robust_ate:.3} m ({} rejected)",
+        rejected(&plain),
+        rejected(&robust)
+    );
+    assert!(
+        robust_ate < 0.7 * plain_ate,
+        "robust {robust_ate} vs plain {plain_ate}"
+    );
+    assert!(rejected(&robust) < rejected(&plain));
+}

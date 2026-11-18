@@ -1,0 +1,14 @@
+# Only the workspace sources go into the image build; the benchmark
+# evidence, docs media, work logs and the standalone bindings / ROS 2 crates
+# are not needed (and would add hundreds of MB to the build context).
+.git
+target
+**/target
+work
+docs
+benchmarks
+bindings
+ros2
+tools
+scripts
+native

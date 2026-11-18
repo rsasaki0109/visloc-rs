@@ -7,6 +7,8 @@
 //! * [`sync`] -- stereo pairing, IMU interval bookkeeping, drop-oldest
 //!   frame queue for the VIO node;
 //! * [`vio`] -- Basalt VIO estimator wrapper and output message builders;
+//! * [`vio_mapper`] -- the VIO node's opt-in online mapper (loop closure,
+//!   global BA) and its `map -> odom` correction;
 //! * [`localize`] -- COLMAP-map localization core and output builders;
 //! * [`map_localize`] -- localization against a saved Basalt map, correcting
 //!   VIO odometry into it (`map -> odom`);
@@ -30,4 +32,5 @@ pub mod queue;
 pub mod sync;
 pub mod tf_tree;
 pub mod vio;
+pub mod vio_mapper;
 pub mod wheel_odom;

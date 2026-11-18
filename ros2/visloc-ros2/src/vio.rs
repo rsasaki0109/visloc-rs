@@ -3,10 +3,13 @@
 //! Wraps [`BasaltVioEstimatorAdapter`] exactly as
 //! `examples/basalt_euroc_online_slam_demo.rs` builds it (same calibration /
 //! config JSON contracts, same urgent-keyframe defaults), but is fed from
-//! ROS messages instead of the EuRoC reader. No mapper thread is attached:
-//! the node runs the lean VIO path (`process_without_marg_data_no_trace`),
-//! which the adapter documents as numerically identical to the
-//! MargData-retaining path for the trajectory.
+//! ROS messages instead of the EuRoC reader. By default the node runs the
+//! lean VIO path (`process_without_marg_data_no_trace`), which the adapter
+//! documents as numerically identical to the MargData-retaining path for the
+//! trajectory. With [`VioOptions::retain_marg_data`] the stages run the
+//! retaining path instead and [`VioBackend::estimate_with_marg_data`] hands
+//! out the mapper packets for the opt-in online mapper
+//! ([`crate::vio_mapper`]).
 //!
 //! [`VioCore::into_stages`] splits the core into a [`VioFrontend`] (KLT
 //! tracking) and a [`VioBackend`] (the estimator step) so the node can run
@@ -18,9 +21,9 @@ use std::collections::VecDeque;
 use nalgebra::{UnitQuaternion, Vector3};
 use serde_json::json;
 use visloc_basalt::{
-    config::BasaltConfig, BasaltAdapterOutput, BasaltCalibration, BasaltFrontendPacket,
-    BasaltVioEstimatorAdapter, BasaltVioEstimatorStage, BasaltVioFrontendStage, EurocSensorFrame,
-    ImuSample, RawU16Image,
+    config::BasaltConfig, vio::MargData, BasaltAdapterOutput, BasaltCalibration,
+    BasaltFrontendPacket, BasaltVioEstimatorAdapter, BasaltVioEstimatorStage,
+    BasaltVioFrontendStage, EurocSensorFrame, ImuSample, RawU16Image,
 };
 use visloc_core::geometry::SE3;
 
@@ -40,6 +43,15 @@ pub struct VioOptions {
     pub imu_seed_klt: bool,
     /// Overrides `config.vio_max_iterations` (LM iterations per frame).
     pub max_iterations: Option<u32>,
+    /// Run the MargData-retaining estimator path (compact LM variant, as the
+    /// online demo does) so the backend can feed an online mapper. The
+    /// trajectory is the same as without it; it costs the keyframe images
+    /// the estimator keeps and the packets it builds.
+    pub retain_marg_data: bool,
+    /// Monocular-inertial VIO on one camera of the calibration (index
+    /// `Some(i)`; `None` is stereo). Frames carry no right image. As in
+    /// `basalt_euroc_vio_demo --mono` (docs/mono_inertial_vio.md).
+    pub mono_camera: Option<usize>,
 }
 
 impl Default for VioOptions {
@@ -48,6 +60,8 @@ impl Default for VioOptions {
             urgent_keyframes: true,
             imu_seed_klt: false,
             max_iterations: None,
+            retain_marg_data: false,
+            mono_camera: None,
         }
     }
 }
@@ -92,7 +106,36 @@ pub struct VioCore {
     calibration: BasaltCalibration,
     config: BasaltConfig,
     adapter: BasaltVioEstimatorAdapter,
+    retain_marg_data: bool,
     next_frame_id: u64,
+}
+
+/// Builds the estimator; with `retain_marg_data` its MargData path uses the
+/// compact LM variant (`set_lean_marg_data(true)`), the online demo's
+/// default.
+fn build_adapter(
+    calibration: &BasaltCalibration,
+    config: &BasaltConfig,
+    retain_marg_data: bool,
+) -> Result<BasaltVioEstimatorAdapter, String> {
+    let mut adapter = BasaltVioEstimatorAdapter::from_config(calibration, config)
+        .map_err(|error| error.to_string())?;
+    if retain_marg_data {
+        adapter.estimator.set_lean_marg_data(true);
+    }
+    Ok(adapter)
+}
+
+/// [`build_adapter`], split into stages for the node's two threads.
+fn build_stages(
+    calibration: &BasaltCalibration,
+    config: &BasaltConfig,
+    retain_marg_data: bool,
+) -> Result<(BasaltVioFrontendStage, BasaltVioEstimatorStage), String> {
+    let (mut frontend, backend) =
+        build_adapter(calibration, config, retain_marg_data)?.into_stages();
+    frontend.set_retain_marg_data(retain_marg_data);
+    Ok((frontend, backend))
 }
 
 impl VioCore {
@@ -105,7 +148,15 @@ impl VioCore {
     ) -> Result<Self, String> {
         let calibration = BasaltCalibration::from_json_str(calibration_json)
             .map_err(|error| format!("calibration JSON: {error}"))?;
-        if calibration.cameras.len() < 2 || calibration.resolutions.len() < 2 {
+        let calibration = match options.mono_camera {
+            Some(index) => calibration
+                .select_camera(index)
+                .map_err(|error| format!("mono_camera {index}: {error}"))?,
+            None => calibration,
+        };
+        if options.mono_camera.is_none()
+            && (calibration.cameras.len() < 2 || calibration.resolutions.len() < 2)
+        {
             return Err(format!(
                 "stereo VIO needs two cameras in the calibration, found {}",
                 calibration.cameras.len()
@@ -133,18 +184,25 @@ impl VioCore {
                 config.values.entry(key.to_string()).or_insert(value);
             }
         }
-        let adapter = BasaltVioEstimatorAdapter::from_config(&calibration, &config)
+        let adapter = build_adapter(&calibration, &config, options.retain_marg_data)
             .map_err(|error| format!("estimator setup: {error}"))?;
         Ok(Self {
             calibration,
             config,
             adapter,
+            retain_marg_data: options.retain_marg_data,
             next_frame_id: 0,
         })
     }
 
     pub const fn calibration(&self) -> &BasaltCalibration {
         &self.calibration
+    }
+
+    /// The Basalt config with the [`VioOptions`] applied (the mapper's
+    /// settings are read from it too).
+    pub const fn config(&self) -> &BasaltConfig {
+        &self.config
     }
 
     /// `(width, height)` the calibration expects for camera `index`.
@@ -162,19 +220,25 @@ impl VioCore {
 
     /// Drops all estimator state; the next frame re-initializes from IMU.
     pub fn reset(&mut self) -> Result<(), String> {
-        self.adapter = BasaltVioEstimatorAdapter::from_config(&self.calibration, &self.config)
+        self.adapter = build_adapter(&self.calibration, &self.config, self.retain_marg_data)
             .map_err(|error| format!("estimator reset: {error}"))?;
         Ok(())
     }
 
-    /// Runs one stereo frame through frontend + estimator.
+    /// Runs one stereo frame through frontend + estimator. With
+    /// [`VioOptions::retain_marg_data`] it runs the adapter's retaining
+    /// path (with its diagnostic trace) and drops the MargData; the node
+    /// uses [`Self::into_stages`] instead.
     pub fn process(&mut self, packet: SensorPacket<RawU16Image>) -> Result<VioEstimate, VioError> {
         check_resolution(&self.calibration, &packet)?;
         let header = FrameHeader::new(self.next_frame_id, &packet);
-        let output = self
-            .adapter
-            .process_without_marg_data_no_trace(euroc_frame(header.frame_id, packet))
-            .map_err(basalt_error)?;
+        let frame = euroc_frame(header.frame_id, packet);
+        let output = if self.retain_marg_data {
+            self.adapter.process(frame)
+        } else {
+            self.adapter.process_without_marg_data_no_trace(frame)
+        }
+        .map_err(basalt_error)?;
         self.next_frame_id += 1;
         Ok(header.estimate(&output))
     }
@@ -185,18 +249,21 @@ impl VioCore {
     /// [`VioCore::process`] would, provided `track` gets the gyro bias of the
     /// previous estimate (only `imu_seed_klt` reads it).
     pub fn into_stages(self) -> (VioFrontend, VioBackend) {
-        let (frontend, backend) = self.adapter.into_stages();
+        let (mut frontend, backend) = self.adapter.into_stages();
+        frontend.set_retain_marg_data(self.retain_marg_data);
         (
             VioFrontend {
                 calibration: self.calibration.clone(),
                 config: self.config.clone(),
                 stage: frontend,
+                retain_marg_data: self.retain_marg_data,
                 next_frame_id: self.next_frame_id,
             },
             VioBackend {
                 calibration: self.calibration,
                 config: self.config,
                 stage: backend,
+                retain_marg_data: self.retain_marg_data,
             },
         )
     }
@@ -207,6 +274,7 @@ pub struct VioFrontend {
     calibration: BasaltCalibration,
     config: BasaltConfig,
     stage: BasaltVioFrontendStage,
+    retain_marg_data: bool,
     next_frame_id: u64,
 }
 
@@ -232,9 +300,8 @@ impl VioFrontend {
 
     /// Drops all tracks; the next frame starts a new stream.
     pub fn reset(&mut self) -> Result<(), String> {
-        self.stage = BasaltVioEstimatorAdapter::from_config(&self.calibration, &self.config)
+        self.stage = build_stages(&self.calibration, &self.config, self.retain_marg_data)
             .map_err(|error| format!("frontend reset: {error}"))?
-            .into_stages()
             .0;
         Ok(())
     }
@@ -245,21 +312,34 @@ pub struct VioBackend {
     calibration: BasaltCalibration,
     config: BasaltConfig,
     stage: BasaltVioEstimatorStage,
+    retain_marg_data: bool,
 }
 
 impl VioBackend {
     /// Runs the estimator step of one tracked frame; frames must arrive in
     /// the order [`VioFrontend::track`] produced them.
     pub fn estimate(&mut self, frame: TrackedFrame) -> Result<VioEstimate, VioError> {
+        self.estimate_with_marg_data(frame)
+            .map(|(estimate, _)| estimate)
+    }
+
+    /// [`Self::estimate`], plus the frame's mapper packet: the MargData of
+    /// the keyframes it marginalized (`MargData::is_mapper_packet`). Always
+    /// `None` without [`VioOptions::retain_marg_data`].
+    pub fn estimate_with_marg_data(
+        &mut self,
+        frame: TrackedFrame,
+    ) -> Result<(VioEstimate, Option<MargData>), VioError> {
         let output = self.stage.process(frame.tracks).map_err(basalt_error)?;
-        Ok(frame.header.estimate(&output))
+        let estimate = frame.header.estimate(&output);
+        let marg_data = output.estimator.marg_data;
+        Ok((estimate, marg_data.is_mapper_packet().then_some(marg_data)))
     }
 
     /// Drops all estimator state; the next frame re-initializes from IMU.
     pub fn reset(&mut self) -> Result<(), String> {
-        self.stage = BasaltVioEstimatorAdapter::from_config(&self.calibration, &self.config)
+        self.stage = build_stages(&self.calibration, &self.config, self.retain_marg_data)
             .map_err(|error| format!("estimator reset: {error}"))?
-            .into_stages()
             .1;
         Ok(())
     }
@@ -319,7 +399,8 @@ fn check_resolution(
     calibration: &BasaltCalibration,
     packet: &SensorPacket<RawU16Image>,
 ) -> Result<(), VioError> {
-    for (index, image) in [&packet.left, &packet.right].into_iter().enumerate() {
+    let images = std::iter::once(&packet.left).chain(packet.right.as_ref());
+    for (index, image) in images.enumerate() {
         if let Some((width, height)) = calibration.resolutions.get(index) {
             let expected = (*width as usize, *height as usize);
             let actual = (image.width(), image.height());
@@ -342,7 +423,7 @@ fn euroc_frame(frame_id: u64, packet: SensorPacket<RawU16Image>) -> EurocSensorF
         frame_id,
         timestamp_ns: packet.stamp_ns,
         cam0: packet.left,
-        cam1: Some(packet.right),
+        cam1: packet.right,
         cam0_path: Default::default(),
         cam1_path: None,
         imu: packet.imu,

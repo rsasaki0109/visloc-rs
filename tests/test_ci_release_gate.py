@@ -18,6 +18,21 @@ def ci_job(name: str) -> str:
     return match.group(0)
 
 
+def shell_package_list(path: str) -> list[str]:
+    match = re.search(r'(?ms)^packages="\n(.*?)^"', read(path))
+    if match is None:
+        raise AssertionError(f"missing packages list: {path}")
+    return match.group(1).split()
+
+
+def release_job(name: str) -> str:
+    release = read(".github/workflows/release.yml")
+    match = re.search(rf"(?ms)^  {re.escape(name)}:.*?(?=^  [A-Za-z0-9_-]+:|\Z)", release)
+    if match is None:
+        raise AssertionError(f"missing release job: {name}")
+    return match.group(0)
+
+
 class CiReleaseGateTests(unittest.TestCase):
     def test_rust_ci_job_covers_release_gate_scripts(self):
         rust = ci_job("rust")
@@ -66,6 +81,35 @@ class CiReleaseGateTests(unittest.TestCase):
 
         self.assertNotIn("onnx-inference", matrix)
         self.assertNotIn("onnx-cuda", matrix)
+
+    def test_publish_order_matches_docs_and_package_check(self):
+        documented = re.findall(r"(?m)^\d+\. `(visloc-[a-z0-9-]+)`$", read("docs/publishing.md"))
+        self.assertEqual(len(documented), 18)
+        self.assertEqual(shell_package_list("scripts/publish_crates.sh"), documented)
+        self.assertEqual(shell_package_list("scripts/package_check.sh"), documented)
+
+    def test_release_workflow_publishes_packages(self):
+        crates = release_job("crates")
+        self.assertIn("cargo package --workspace", crates)
+        self.assertIn("scripts/publish_crates.sh", crates)
+        self.assertIn("CARGO_REGISTRY_TOKEN", crates)
+
+        wheels = release_job("wheels")
+        self.assertIn("PyO3/maturin-action", wheels)
+        for os_name in ["ubuntu-latest", "windows-latest", "macos-latest"]:
+            self.assertIn(os_name, wheels)
+        self.assertIn("command: sdist", release_job("sdist"))
+
+        image = release_job("image")
+        self.assertIn("packages: write", image)
+        self.assertIn("ghcr.io/${{ github.repository }}", image)
+        self.assertIn("docker/build-push-action", image)
+        self.assertTrue((ROOT / "Dockerfile").is_file())
+
+        pypi = release_job("pypi")
+        self.assertIn("needs: [wheels, sdist]", pypi)
+        self.assertIn("id-token: write", pypi)
+        self.assertIn("pypa/gh-action-pypi-publish", pypi)
 
 
 if __name__ == "__main__":

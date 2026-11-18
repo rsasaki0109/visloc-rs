@@ -9,7 +9,7 @@
 # `cargo build --manifest-path ros2/visloc-ros2/Cargo.toml`.
 [package]
 name = "visloc-ros2"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -32,6 +32,9 @@ name = "visloc_localize_node"
 path = "src/bin/visloc_localize_node.rs"
 
 [dependencies]
+# Graceful shutdown (final mapper optimization) on SIGINT/SIGTERM; the
+# handler is installed only with `mapper:=true`.
+ctrlc = { version = "3.4", features = ["termination"] }
 futures = "0.3"
 nalgebra = "0.33"
 rayon = "1"

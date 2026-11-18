@@ -8,7 +8,7 @@
 //! ```text
 //! cargo run --example gnss_vo_fusion_demo -- \
 //!     [--scenario metric|monocular] [--window <frames>] \
-//!     [--robust gnc|huber|none] [--out-dir <dir>]
+//!     [--robust gnc|huber|none] [--gate-at-fix-accuracy] [--out-dir <dir>]
 //! ```
 
 use std::env;
@@ -29,13 +29,14 @@ struct Args {
     monocular: bool,
     window: Option<usize>,
     robust: String,
+    gate_at_fix_accuracy: bool,
     out_dir: Option<PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: cargo run --example gnss_vo_fusion_demo -- [--scenario metric|monocular] \
-         [--window <frames>] [--robust gnc|huber|none] [--out-dir <dir>]"
+         [--window <frames>] [--robust gnc|huber|none] [--gate-at-fix-accuracy] [--out-dir <dir>]"
     );
     std::process::exit(2);
 }
@@ -45,6 +46,7 @@ fn parse_args() -> Args {
         monocular: false,
         window: None,
         robust: "gnc".to_owned(),
+        gate_at_fix_accuracy: false,
         out_dir: None,
     };
     let mut iter = env::args().skip(1);
@@ -58,6 +60,7 @@ fn parse_args() -> Args {
             },
             "--window" => args.window = Some(value().parse().unwrap_or_else(|_| usage())),
             "--robust" => args.robust = value(),
+            "--gate-at-fix-accuracy" => args.gate_at_fix_accuracy = true,
             "--out-dir" => args.out_dir = Some(PathBuf::from(value())),
             _ => usage(),
         }
@@ -94,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     config.lever_arm = scenario.lever_arm;
     config.window = args.window;
+    config.gate_at_fix_accuracy = args.gate_at_fix_accuracy;
     config.optimizer.robust = match args.robust.as_str() {
         "gnc" => GnssRobustMode::default(),
         "huber" => GnssRobustMode::Kernel(RobustKernel::Huber {

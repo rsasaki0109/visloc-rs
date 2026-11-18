@@ -14,8 +14,11 @@ rejected there.
 
 ## Current status (2026-10-27)
 
-- Latest release: **0.3.0** (tagged, with prebuilt binaries); main is at
-  **0.3.1** (CHANGELOG cut, not tagged). See [`CHANGELOG.md`](CHANGELOG.md).
+- Latest release: **0.4.0** (tagged 2026-11-17, a GitHub release with
+  prebuilt binaries; 0.3.1 was cut in the CHANGELOG but never tagged).
+  crates.io / PyPI publishing is opt-in and not done
+  ([`docs/publishing.md`](docs/publishing.md)). See
+  [`CHANGELOG.md`](CHANGELOG.md).
 - Moving to a local GPU machine: the handovers are
   [`docs/photos_sfm_handover.md`](docs/photos_sfm_handover.md) (photos to
   SfM / MVS / 3DGS, release, evaluation scripts) and
@@ -33,8 +36,8 @@ rejected there.
 | Photos to 3DGS + mesh | Benchmarked. Faster than brush on 5/5 scenes | [`docs/rust_3dgs_plan.md`](docs/rust_3dgs_plan.md) |
 | Map-based localization | Benchmarked. OpenLORIS rig 98.96% localized; RNE simulated house 38 ms/frame | [`docs/map_matching_localization_plan.md`](docs/map_matching_localization_plan.md) |
 | Stereo / RGB-D VO | Benchmarked. KITTI 00 1.23 m, 09 2.07 m; TUM fr1_xyz 1.4 cm | [`docs/kitti_multiseq_benchmark.md`](docs/kitti_multiseq_benchmark.md) |
-| Monocular + IMU VIO (Basalt port) | Experimental. Synthetic scale error < 0.3%; no EuRoC result yet | [`docs/mono_inertial_vio.md`](docs/mono_inertial_vio.md) |
-| VO + GNSS | Experimental. Joint pose-graph fusion; synthetic ATE 5.25 m → 0.90 m | [`docs/gnss_fusion.md`](docs/gnss_fusion.md) |
+| Monocular + IMU VIO (Basalt port) | Experimental. EuRoC 11/11 with the online mapper: mean ATE 0.062 m (VIO alone 0.139 m; ORB-SLAM3 mono-inertial 0.043 m), lower than ORB-SLAM3 on 5/11 | [`docs/mono_inertial_vio.md`](docs/mono_inertial_vio.md) |
+| VO + GNSS | Experimental. Joint pose-graph fusion; synthetic ATE 5.25 m → 0.90 m; KITTI raw (3 drives, OXTS GT, simulated 1 Hz receiver) 6.0–6.6 m raw GNSS / 9–10 m VO → 3.5–4.8 m batch | [`docs/gnss_fusion.md`](docs/gnss_fusion.md) |
 | Multi-camera rig SfM | Experimental. OpenLORIS 10k registered; RMSE 0.3890 m vs COLMAP 0.3843 m | [`docs/sfm_benchmarks.md`](docs/sfm_benchmarks.md) |
 | Python bindings | `bindings/python` (pyo3 + maturin), outside the root workspace | [`bindings/python/README.md`](bindings/python/README.md) |
 | ROS 2 nodes | `ros2/visloc-ros2` over pure-Rust DDS, outside the root workspace | [`ros2/visloc-ros2/README.md`](ros2/visloc-ros2/README.md) |

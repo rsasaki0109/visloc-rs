@@ -393,6 +393,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlc"
+version = "3.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
+dependencies = [
+ "dispatch2",
+ "nix",
+ "windows-sys",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1751,7 +1762,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visloc-basalt"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64",
  "image",
@@ -1765,14 +1776,14 @@ dependencies = [
 
 [[package]]
 name = "visloc-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "visloc-fusion"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1781,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-io"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.21",
@@ -1793,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-localization"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1802,8 +1813,9 @@ dependencies = [
 
 [[package]]
 name = "visloc-ros2"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "ctrlc",
  "futures",
  "nalgebra",
  "rayon",
@@ -1819,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-vision"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
  "rand 0.8.8",

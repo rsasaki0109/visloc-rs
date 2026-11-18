@@ -384,3 +384,21 @@ pub fn write_basalt_map(dir: &std::path::Path) {
     });
     std::fs::write(dir.join("map.json"), summary.to_string()).unwrap();
 }
+
+/// The EuRoC VIO config with a keyframe on (nearly) every frame, so the
+/// static synthetic rig marginalizes keyframes and the estimator emits
+/// mapper packets within a couple of seconds of data.
+pub fn keyframe_every_frame_config_json() -> String {
+    let config = std::fs::read_to_string(euroc_config_path()).unwrap();
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let values = config["value0"].as_object_mut().unwrap();
+    values.insert(
+        "config.vio_new_kf_keypoints_thresh".into(),
+        serde_json::json!(1.1),
+    );
+    values.insert(
+        "config.vio_min_frames_after_kf".into(),
+        serde_json::json!(0),
+    );
+    serde_json::to_string_pretty(&config).unwrap()
+}
