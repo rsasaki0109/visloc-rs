@@ -647,7 +647,14 @@ target/release/examples/basalt_map_merge \
 Each added map is registered to the merged map so far
 (`visloc_localization::register_map`). Every keyframe of the added map is
 localized in it like a camera image, using its landmark observations as the
-keypoints and their descriptors. A keyframe counts with at least 15
+keypoints and their descriptors, matched against the landmarks of the 30
+base keyframes that look most like it (`--retrieval-keyframes`, 0 for the
+whole map), with base landmarks within 0.3 m of the best treated as one
+point by the ratio test (`--duplicate-radius-m`), as a merged map holds a
+place once per session. Against matching the whole map this is 4–8 times
+faster (EuRoC's four registrations: 1.4–1.8 s instead of 4–6 s; KITTI: 0.3–0.6 s
+instead of 2.4–3.4 s), and the transforms move by at most 9 cm (KITTI) and
+4 cm (EuRoC). A keyframe counts with at least 15
 inliers: a keyframe has only the keypoints that became landmarks, fewer than
 an image. The transform (yaw and translation, as both maps are
 gravity-aligned) is the one most localized keyframes agree with, within

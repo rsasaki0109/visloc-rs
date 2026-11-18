@@ -46,7 +46,8 @@ impl Args {
     fn usage() -> String {
         "usage: basalt_map_merge --base DIR --add DIR [--add DIR ...] --out DIR \
          [--min-inliers N] [--min-keyframes N] [--max-hamming N] \
-         [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N]"
+         [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N] \
+         [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M]"
             .into()
     }
 
@@ -84,6 +85,9 @@ impl Args {
                 "--add" => args.add.push(PathBuf::from(value()?)),
                 "--out" => out = Some(PathBuf::from(value()?)),
                 "--min-inliers" => config.min_inliers = number(&option, value()?)?,
+                "--retrieval-keyframes" => config.retrieval_keyframes = number(&option, value()?)?,
+                "--retrieval-bits" => config.retrieval_bits = number(&option, value()?)?,
+                "--duplicate-radius-m" => config.duplicate_radius_m = number(&option, value()?)?,
                 "--min-keyframes" => config.min_keyframes = number(&option, value()?)?,
                 "--max-hamming" => config.gates.max_distance = number(&option, value()?)?,
                 "--fuse-radius-m" => config.fuse_radius_m = number(&option, value()?)?,

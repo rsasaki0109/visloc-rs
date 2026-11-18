@@ -6,6 +6,15 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`register_map` matches each keyframe against its most similar base
+  keyframes' landmarks** (`MapMergeConfig::retrieval_keyframes`, default 30,
+  `KeyframeRetrieval`) and treats base landmarks within 0.3 m of the best as
+  one point in the ratio test (`duplicate_radius_m`). Registrations are 4–8x
+  faster, and merging no longer depends on the order of the sessions: on
+  OpenLORIS-Scene's office, all 16 orders that can register five maps do,
+  against 4 before. `basalt_map_merge --retrieval-keyframes N
+  --duplicate-radius-m M` (0 for the earlier behaviour).
+
 - **`merge_maps` merges maps of another calibration of the rig**
   (another day's): a camera that differs from the base map's under the same
   id is added under a new id (`MergedMap::camera_ids`), instead of failing

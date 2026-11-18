@@ -137,13 +137,21 @@ keyframe centres are at 4.5 cm RMSE (11.2 cm max): office1-2 1.6, 1-7 5.7,
 1-3 2.5, 1-1 3.4 and 1-6 6.0 cm, against 1.6, 4.9, 0.9, 2.8 and 3.7 cm
 for each session's SLAM aligned on its own.
 
-The order matters. Each added map makes the next registration harder, as
-most of its landmarks stay apart from the base's look-alikes (35–111 are
-fused per session) and the ratio test then rejects matches where both
-were seen: office1-7 localizes 99 keyframes in office1-2's map alone but
-7 once office1-3 is merged in, and none in the map of office1-1, 1-3 and 1-2
-merged in that order. Of the 120 orders of the five maps, four register all
-of them. Without local contrast equalization
+The order used to matter. Each added map made the next registration harder,
+as most of its landmarks stay apart from the base's look-alikes (35–111 are
+fused per session) and the ratio test then rejected matches where both
+were seen: office1-7 localized 99 keyframes in office1-2's map alone but
+7 once office1-3 was merged in. Only 8 ordered pairs of the five maps
+register on their own (office1-1 and 1-2, driven in opposite directions,
+see nothing in common), so 16 of the 120 orders can register all five, each
+added map next to one it registers with. With the matching of every keyframe
+against the whole base map, 4 of those 16 did. `register_map` now matches
+each keyframe against the landmarks of its 30 most similar base keyframes
+(`--retrieval-keyframes 30`) and lets the ratio test treat base landmarks
+within 0.3 m of the best as the same point (`--duplicate-radius-m 0.3`), the
+defaults: all 16 register. Retrieval alone gives 15, the radius alone 13.
+The registered transforms move by at most 3.4 cm and 0.12° against the
+earlier ones. Without local contrast equalization
 ([below](#across-lighting-local-contrast-equalization)), office1-4 and 1-5
 (daylight, dawn) registered in none of the maps tried: office1-1's,
 office1-2's (office1-4) or office1-6's (office1-5), and the four-session

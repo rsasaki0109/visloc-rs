@@ -49,8 +49,8 @@ use visloc_vision::ransac::PnPRansac;
 
 use crate::odom_correction::{wrap_angle, yaw_of, Offset};
 use crate::{
-    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, LocalizationConfig,
-    LocalizationPipeline,
+    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, KeyframeRetrieval,
+    LocalizationConfig, LocalizationPipeline,
 };
 
 /// Settings of [`register_map`] and [`merge_maps`].
@@ -77,6 +77,22 @@ pub struct MapMergeConfig {
     pub fuse_max_hamming: u32,
     /// Threads localizing the other map's keyframes.
     pub threads: usize,
+    /// When above 0 (30 by default), each keyframe of the other map is
+    /// matched only to the
+    /// landmarks of the `retrieval_keyframes` base keyframes that look most
+    /// like it ([`KeyframeRetrieval`]), not to the whole base map: faster
+    /// on large maps, and the ratio test then weighs a match against the
+    /// landmarks of the same few places only.
+    pub retrieval_keyframes: usize,
+    /// Visual-word bits of that retrieval.
+    pub retrieval_bits: u8,
+    /// When above 0 (0.3 m by default), the ratio test of keyframe-to-map
+    /// matching treats base
+    /// landmarks within this distance of the best one as the same point
+    /// ([`BinaryLandmarkIndex::with_duplicate_radius`]): a merged base map
+    /// holds each place once per session that saw it, and those copies
+    /// would otherwise reject each other's matches.
+    pub duplicate_radius_m: f64,
 }
 
 impl Default for MapMergeConfig {
@@ -97,6 +113,9 @@ impl Default for MapMergeConfig {
             fuse_radius_m: 0.10,
             fuse_max_hamming: 50,
             threads: 1,
+            retrieval_keyframes: 30,
+            retrieval_bits: 16,
+            duplicate_radius_m: 0.3,
         }
     }
 }
@@ -256,6 +275,7 @@ fn localize_keyframe(
     other: &VisualMap,
     other_descriptors: &LandmarkDescriptorStore,
     index: &BinaryLandmarkIndex,
+    retrieval: Option<&KeyframeRetrieval>,
     pipeline: &Pipeline,
     config: &MapMergeConfig,
 ) -> Option<KeyframeFix> {
@@ -275,8 +295,14 @@ fn localize_keyframe(
     if keypoints.len() < config.min_inliers {
         return None;
     }
-    let correspondences =
-        index.match_all(&keypoints, &index.pack_query(&descriptors), config.gates, 1);
+    let packed = index.pack_query(&descriptors);
+    let correspondences = match retrieval {
+        Some(retrieval) => {
+            let candidates = retrieval.candidate_landmarks(&packed, config.retrieval_keyframes);
+            index.match_among(&keypoints, &packed, config.gates, &candidates)
+        }
+        None => index.match_all(&keypoints, &packed, config.gates, 1),
+    };
     let result = pipeline.localize_correspondences(camera, correspondences);
     let base_pose = result.pose.as_ref().filter(|_| result.success)?;
     let base_from_other = base_pose
@@ -299,11 +325,14 @@ pub fn register_map(
     other_descriptors: &LandmarkDescriptorStore,
     config: &MapMergeConfig,
 ) -> Result<MapRegistration, MapMergeError> {
-    let index = BinaryLandmarkIndex::new(base, base_descriptors);
+    let index = BinaryLandmarkIndex::new(base, base_descriptors)
+        .with_duplicate_radius(config.duplicate_radius_m);
     if index.is_empty() {
         return Err(MapMergeError::EmptyBaseMap);
     }
     let pipeline = pnp_pipeline(config);
+    let retrieval = (config.retrieval_keyframes > 0)
+        .then(|| KeyframeRetrieval::new(base, &index, config.retrieval_bits));
     let mut keyframes = other
         .keyframes
         .values()
@@ -320,6 +349,7 @@ pub fn register_map(
                     other,
                     other_descriptors,
                     &index,
+                    retrieval.as_ref(),
                     &pipeline,
                     config,
                 )
@@ -1059,5 +1089,49 @@ mod tests {
         .expect("merged");
         assert_eq!(merged.camera_ids[&CAMERA_ID], CAMERA_ID);
         assert_eq!(merged.map.cameras.len(), 1);
+    }
+
+    #[test]
+    fn copies_of_the_base_map_do_not_reject_each_others_matches() {
+        // A base map that holds every point twice, as a merged map holds a
+        // place once per session: a copy 2 cm off with the same
+        // descriptors, added without fusion. The plain ratio test then sees
+        // two equally good landmarks for every match.
+        let s = sessions();
+        let copy_from_base = SE3::new(UnitQuaternion::identity(), Vector3::new(0.02, 0.0, 0.0));
+        let doubled = merge_maps(
+            &s.base.0,
+            &s.base.1,
+            &s.base.0,
+            &s.base.1,
+            &copy_from_base,
+            &MapMergeConfig {
+                fuse_radius_m: 0.0,
+                ..MapMergeConfig::default()
+            },
+        )
+        .expect("doubled");
+        assert_eq!(doubled.fused_landmarks, 0);
+        let register = |config: &MapMergeConfig| {
+            register_map(
+                &doubled.map,
+                &doubled.descriptors,
+                &s.other.0,
+                &s.other.1,
+                config,
+            )
+        };
+        let plain = register(&MapMergeConfig {
+            retrieval_keyframes: 0,
+            duplicate_radius_m: 0.0,
+            ..MapMergeConfig::default()
+        });
+        assert!(
+            plain.is_err(),
+            "the ratio test rejects matches among copies: {plain:?}"
+        );
+        let registration = register(&MapMergeConfig::default()).expect("registered");
+        assert_se3_close(&registration.base_from_other, &s.base_from_other, 0.03, 0.2);
+        assert!(registration.agreeing_keyframes >= 10, "{registration:?}");
     }
 }
