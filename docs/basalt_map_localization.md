@@ -840,7 +840,7 @@ own frame and moved by the merge's transform (`map.json`'s
 
 #### Across days: three KITTI raw drives
 
-![Three KITTI raw drives of one district, on two days, each mapped in its own frame, merged into one map, then a close-up of a street where two of them meet](assets/map_merge_kitti.gif)
+![Three KITTI raw drives of one district, on two days, each mapped in its own frame, merged into one map, then a drive at street level along a street two of them share, past parked cars and houses](assets/map_merge_kitti.gif)
 
 <sub>Data: [KITTI raw](https://www.cvlibs.net/datasets/kitti/raw_data.php) 2011_10_03_drive_0027, 2011_09_30_drive_0027 and 2011_09_30_drive_0028 (Geiger et al., IJRR 2013), CC BY-NC-SA 3.0. This GIF is under the same licence. Colours are the left colour camera's images placed by stereo depth, without blown-out pixels, brightened and saturated for display (`--gamma 1.3 --saturation 1.8`).</sub>
 
@@ -884,7 +884,10 @@ The merged map holds 2,931 keyframe images and 96,040 landmarks. Against
 the OXTS ground truth in one east-north-up frame, aligned by the
 2011_10_03 drive's keyframes alone, the keyframe centres are at 1.12 m RMSE
 (4.74 m max): 0.96, 1.14 and 1.87 m for the three drives, against 0.96,
-0.47 and 0.48 m for each aligned on its own. The close-up colours come from
+0.47 and 0.48 m for each aligned on its own. The GIF ends with a drive at
+street level along 2011_09_30_drive_0027's first 25 s, which the other day's
+drive also took: a perspective camera 7 m behind and 3 m above its
+trajectory, through every drive's points. The colours come from
 `fetch_kitti_raw_drive.py --colour-frames` (the keyframes' image_02 and
 image_03) and `scripts/rgbd_map_cloud.py --kitti` (SGBM on the colour
 pair).
@@ -926,7 +929,8 @@ python3 scripts/render_map_merge_gif.py --merged runs/kitti_merged \
   --unit drive --place district --fill 0.66 \
   --elevation 70 --orbit-frames 30 --zoom 8 --zoom-frames 80 \
   --title "Multi-session mapping: three drives on two days, one map" \
-  --fps 12.5 --out docs/assets/map_merge_kitti.gif   # then re-encoded at 10 fps, 128 colours
+  --frames-dir frames --out map_merge_kitti.gif
+# then re-encoded from frames/: 10 fps, the drive at 6.25 fps, 96 colours
 ```
 
 `KEYFRAME_FRAMES.txt` lists the sync frame indices of the map's keyframes

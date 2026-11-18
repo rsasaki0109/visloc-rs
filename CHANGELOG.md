@@ -17,7 +17,8 @@ All notable changes to `visloc-rs` will be documented here.
   chosen frames. Three KITTI raw drives on two days merge into one district map at
   1.12 m RMSE against the OXTS (docs/basalt_map_localization.md, GIF under
   KITTI's CC BY-NC-SA 3.0). `render_map_merge_gif.py --zoom` adds a
-  close-up of where a session joined.
+  close-up of where a session joined, `--drive` a street-level drive along a
+  session's trajectory.
 
 - **Maps from TUM RGB-D sequences, merged across sessions**
   (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout

@@ -144,6 +144,8 @@ class Session:
                 near[chunk] = d.min(axis=1)
             keep = near < 8.0
             self.points, self.seen = self.points[keep], self.seen[keep]
+        # Everything, for the street-level drive (`--drive`).
+        self.full_points, self.full_rgb = self.points, self.rgb
         if max_points and len(self.points) > max_points:
             keep = np.sort(np.random.default_rng(0).choice(len(self.points), max_points, replace=False))
             self.points, self.seen = self.points[keep], self.seen[keep]
@@ -239,6 +241,16 @@ def main() -> int:
     parser.add_argument("--zoom-elevation", type=float, default=40.0)
     parser.add_argument("--zoom-turn", type=float, default=40.0,
                         help="degrees the view turns while close")
+    parser.add_argument("--drive", type=float, nargs=3, metavar=("SESSION", "FROM_S", "TO_S"),
+                        help="end with a street-level drive: a perspective camera behind and "
+                             "above SESSION's trajectory from FROM_S to TO_S seconds of it, "
+                             "through every session's points (clouds drawn in full)")
+    parser.add_argument("--drive-frames", type=int, default=90)
+    parser.add_argument("--drive-back", type=float, default=7.0, help="metres behind the trajectory")
+    parser.add_argument("--drive-up", type=float, default=3.0, help="metres above it")
+    parser.add_argument("--drive-range", type=float, default=45.0, help="metres drawn ahead")
+    parser.add_argument("--drive-point-size", type=float, default=30.0,
+                        help="a point's size at 1 m (it falls with the distance)")
     parser.add_argument("--fill", type=float, default=0.68,
                         help="share of the height the merged map fills")
     parser.add_argument("--orbit-tilt", type=float, default=16.0,
@@ -271,9 +283,13 @@ def main() -> int:
     if args.saturation != 1.0 or args.gamma != 1.0:
         for s in sessions:
             if s.rgb is not None:
-                rgb = s.rgb ** (1.0 / args.gamma)
-                grey = rgb.mean(axis=1, keepdims=True)
-                s.rgb = np.clip(grey + (rgb - grey) * args.saturation, 0.0, 1.0)
+                def vivid(colours):
+                    rgb = colours ** (1.0 / args.gamma)
+                    grey = rgb.mean(axis=1, keepdims=True)
+                    return np.clip(grey + (rgb - grey) * args.saturation, 0.0, 1.0)
+
+                s.rgb = vivid(s.rgb)
+                s.full_rgb = vivid(s.full_rgb)
     for s in sessions:
         print(f"{s.label}: {s.keyframes} keyframes, {len(s.points)} landmarks, "
               f"{s.duration:.0f} s, yaw {np.degrees(s.yaw):+.1f} deg")
@@ -551,6 +567,94 @@ def main() -> int:
                   "caption": caption if k > 0.2 else summary,
                   "status": f"later {args.unit}s localize in it"}, 0)
         fit.update(zoom=1.0, centre=merged_centre_world, scale=base_scale, offset=base_offset)
+
+    # Optional street-level drive along one session's trajectory.
+    if args.drive is not None:
+        index, t_from, t_to = int(args.drive[0]), args.drive[1], args.drive[2]
+        driver = sessions[index % n]
+        path = driver.placed(driver.path, 1.0)
+        keep = (driver.path_t >= t_from) & (driver.path_t <= t_to)
+        if keep.sum() < 2:
+            raise SystemExit("--drive: no trajectory in that time range")
+        segment = path[keep]
+        # Every session's full cloud within reach of the segment.
+        reach = args.drive_range + 10.0
+        lo_box, hi_box = segment.min(axis=0) - reach, segment.max(axis=0) + reach
+        clouds = []
+        for s in sessions:
+            points = s.placed(s.full_points, 1.0)
+            inside = np.all((points >= lo_box) & (points <= hi_box), axis=1)
+            colours = s.full_rgb if s.full_rgb is not None else np.tile(
+                matplotlib.colors.to_rgb(s.colour), (len(points), 1))
+            clouds.append((points[inside], colours[inside]))
+        cloud_points = np.concatenate([c[0] for c in clouds])
+        cloud_rgb = np.concatenate([c[1] for c in clouds])
+        trails = [(s, s.placed(s.path, 1.0)) for s in sessions]
+        # Arc length along the segment, for an even speed.
+        steps = np.linalg.norm(np.diff(segment, axis=0), axis=1)
+        arc = np.r_[0.0, np.cumsum(steps)]
+        focal = W * 0.55
+        caption = f"Street level: driving {driver.label}'s route through the merged map"
+        for f in range(args.drive_frames):
+            u = smooth(f / max(1, args.drive_frames - 1)) * 0.98
+            at = np.interp(u * arc[-1], arc, np.arange(len(arc)))
+            i0 = int(at)
+            i1 = min(i0 + 1, len(segment) - 1)
+            position = lerp(segment[i0], segment[i1], at - i0)
+            ahead = np.interp(min(u * arc[-1] + 8.0, arc[-1]), arc, np.arange(len(arc)))
+            j0 = int(ahead)
+            target = lerp(segment[j0], segment[min(j0 + 1, len(segment) - 1)], ahead - j0)
+            forward = target - position
+            forward[2] = 0.0
+            forward = forward / max(np.linalg.norm(forward), 1e-6)
+            eye = position - args.drive_back * forward + np.array([0.0, 0.0, args.drive_up])
+            look = position + 12.0 * forward
+            z_axis = look - eye
+            z_axis /= np.linalg.norm(z_axis)
+            x_axis = np.cross(z_axis, [0.0, 0.0, 1.0])
+            x_axis /= np.linalg.norm(x_axis)
+            y_axis = np.cross(z_axis, x_axis)  # image down
+            camera = np.stack([x_axis, y_axis, z_axis])
+
+            ax.clear()
+            ax.set_xlim(0, W)
+            ax.set_ylim(0, H)
+            ax.axis("off")
+            ax.set_facecolor(BACKGROUND)
+            local = (cloud_points - eye) @ camera.T
+            visible = (local[:, 2] > 1.0) & (local[:, 2] < args.drive_range)
+            local, colours = local[visible], cloud_rgb[visible]
+            order = np.argsort(-local[:, 2])
+            local, colours = local[order], colours[order]
+            px = W / 2 + focal * local[:, 0] / local[:, 2]
+            py = H * 0.55 - focal * local[:, 1] / local[:, 2]
+            on = (px > -20) & (px < W + 20) & (py > -20) & (py < H + 20)
+            ax.scatter(px[on], py[on], s=args.drive_point_size / local[on, 2],
+                       c=colours[on], alpha=0.95, linewidths=0, zorder=1)
+            for s, trail in trails:
+                t_local = (trail - eye) @ camera.T
+                front = (t_local[:, 2] > 1.5) & (t_local[:, 2] < args.drive_range)
+                if front.sum() < 2:
+                    continue
+                for run in np.split(np.where(front)[0], np.where(np.diff(np.where(front)[0]) > 1)[0] + 1):
+                    if len(run) < 2:
+                        continue
+                    q = t_local[run]
+                    ax.plot(W / 2 + focal * q[:, 0] / q[:, 2], H * 0.55 - focal * q[:, 1] / q[:, 2],
+                            color=blend(s.colour, "#ffffff", 0.3), lw=1.6, alpha=0.9, zorder=3)
+            for y0, height in ((H - 48, 48), (0, 32)):
+                ax.add_patch(matplotlib.patches.Rectangle((0, y0), W, height, facecolor=BACKGROUND,
+                                                          edgecolor="none", alpha=0.75, zorder=5.5))
+            ax.text(14, H - 14, args.title, color=TEXT, fontsize=11, va="top", zorder=6)
+            ax.text(14, H - 34, caption, color=DIM, fontsize=8.5, va="top", zorder=6)
+            x = 14
+            for s in sessions:
+                ax.scatter([x + 4], [16], s=30, c=[s.colour], marker="s", linewidths=0, zorder=6)
+                ax.text(x + 12, 16, s.label, color=TEXT, fontsize=8, va="center", zorder=6)
+                x += 24 + 5.4 * len(s.label)
+            path_png = frames_dir / f"frame_{len(frame_paths):04d}.png"
+            fig.savefig(path_png, dpi=100, facecolor=BACKGROUND)
+            frame_paths.append(path_png)
 
     palette = frames_dir / "palette.png"
     pattern = str(frames_dir / "frame_%04d.png")
