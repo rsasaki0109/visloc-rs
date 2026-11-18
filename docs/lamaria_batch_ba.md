@@ -2985,6 +2985,13 @@ temperature terms on the same seeds' online results:
 | sequence_4_11 | 74.57 / 77.85 / 75.02 | 75.81 | 76.59 / 78.29 / 74.02 | **76.30** |
 | Mean | | **71.19** | | 68.68 |
 
+On sequence_4_10 the bias change per degree comes out at
+[−170, −579, −123] µrad/s per °C, twice the day sequences' largest and about
+twelve times its prior. Over 20 °C that is 0.66 °/s on one axis. The
+low-light pass's error there is in the local scale
+(sequence_4_10 keeps few observations per keyframe), and the temperature
+terms take it up instead of the gyroscope's real change.
+
 By day the gyroscope's response matrix (`--est-gyro-m`) on top of the
 temperature terms does not gain either. The first four runs of the same seeds
 are below; the rest were not run:
@@ -2995,13 +3002,6 @@ are below; the rest were not run:
 | sequence_2_11, 1 | 89.91 | 90.47 | +0.56 |
 | sequence_3_17, 1 | 79.60 | 80.18 | +0.58 |
 | sequence_1_19, 2 | 86.21 | 84.13 | −2.08 |
-
-On sequence_4_10 the bias change per degree comes out at
-[−170, −579, −123] µrad/s per °C, twice the day sequences' largest and about
-twelve times its prior. Over 20 °C that is 0.66 °/s on one axis. The
-low-light pass's error there is in the local scale
-(sequence_4_10 keeps few observations per keyframe), and the temperature
-terms take it up instead of the gyroscope's real change.
 
 ### SLAM Dunk's final refinement
 
