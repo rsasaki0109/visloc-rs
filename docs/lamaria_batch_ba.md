@@ -2972,8 +2972,25 @@ read; not the online windows). The submission driver fetches the curve per
 sequence (`--ba-temperature`, on by default on `--ba-temperature-tracks`
 1 2 3). It takes every 200th record of the two SLAM cameras' streams from
 the `.vrs` over HTTP range requests, a sparse copy, then reads them with
-projectaria_tools. A sequence without it runs the pass as before. Low light
-and Moving platform stay without it: neither was measured.
+projectaria_tools. A sequence without it runs the pass as before. Moving
+platform stays without it (not measured), and Low light too: both low-light
+training recordings warm from about 15 to 35 °C, more than the day ones, but
+the low-light pass (with the response matrix, [Low light: the gyroscope's
+response matrix](#low-light-the-gyroscopes-response-matrix)) loses with the
+temperature terms on the same seeds' online results:
+
+| Sequence | The chain, seeds 1 / 2 / 3 | Mean | With bias and scale per degree, seeds 1 / 2 / 3 | Mean |
+|---|---|---:|---|---:|
+| sequence_4_10 | 67.48 / 64.25 / 67.99 | **66.57** | 60.59 / 60.77 / 61.80 | 61.05 |
+| sequence_4_11 | 74.57 / 77.85 / 75.02 | 75.81 | 76.59 / 78.29 / 74.02 | **76.30** |
+| Mean | | **71.19** | | 68.68 |
+
+On sequence_4_10 the bias change per degree comes out at
+[−170, −579, −123] µrad/s per °C, twice the day sequences' largest and about
+twelve times its prior. Over 20 °C that is 0.66 °/s on one axis. The
+low-light pass's error there is in the local scale
+(sequence_4_10 keeps few observations per keyframe), and the temperature
+terms take it up instead of the gyroscope's real change.
 
 ### SLAM Dunk's final refinement
 
