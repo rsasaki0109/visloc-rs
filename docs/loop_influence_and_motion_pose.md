@@ -40,6 +40,8 @@ The depth fallback uses prior reference depth. In the offline pose experiment, a
 
 All seven holdout fallback queries received an interpolated pose. The two-view relocalizer added zero poses. At those queries, position RMSE was 46.8 cm for the causal estimate and 46.7 cm for the interpolated estimate. Holdout static retention was 98.16% for Basalt alone and 98.05% with offline depth. All five eligible development queries remained unlocalized. The experiments measure the benefit of depth with independent poses and the gap that remains with RGB-D tracking through occlusions. [Development motion counts](../benchmarks/bonn/development_offline_motion_results.json) · [Holdout motion counts](../benchmarks/bonn/holdout_offline_motion_results.json)
 
+The public LILocBench holdout tests the same depth selector on two labeled corridor changes. [LILocBench results](lilocbench_map_changes.md)
+
 ## Reproduce
 
 Build the same examples and use the dataset layout from the prior Bonn and OpenLORIS benchmarks. The OpenLORIS script uses the two equalized source maps and aligned depth, and reports pose scores with a single alignment fit to the unmerged base trajectory. [Bonn inputs](bonn_map_followup.md#reproduce) · [OpenLORIS map preparation](openloris_map_localization.md)

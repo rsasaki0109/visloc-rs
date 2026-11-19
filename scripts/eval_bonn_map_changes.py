@@ -83,9 +83,10 @@ class Sequence:
                 yield self.pose(time), path
 
 
-def points_at(pose, depth, x, y):
+def points_at(pose, depth, x, y, intrinsics=INTRINSICS):
+    fx, fy, cx, cy = intrinsics
     z = depth[y, x] * 0.001
-    local = np.column_stack(((x - CX) * z / FX, (y - CY) * z / FY, z))
+    local = np.column_stack(((x - cx) * z / fx, (y - cy) * z / fy, z))
     return local @ pose[:3, :3].T + pose[:3, 3], z
 
 
@@ -281,7 +282,7 @@ def evaluate_motion(sequence, annotations, basalt, work, interpolate=False, hold
     }
 
 
-def labeled_voxels(sequence, annotations, voxel):
+def labeled_voxels(sequence, annotations, voxel, intrinsics=INTRINSICS):
     labeled = {label: set() for label in ("stable", "box", "floor")}
     for item in annotations:
         frame = item["frame"]
@@ -289,13 +290,14 @@ def labeled_voxels(sequence, annotations, voxel):
         pose = sequence.pose(sequence.times[frame])
         for label in labeled:
             y, x = np.nonzero(polygon_mask(item.get(label, [])))
-            points, z = points_at(pose, depth, x, y)
+            points, z = points_at(pose, depth, x, y, intrinsics)
             valid = (z >= 0.3) & (z <= 4.0)
             labeled[label].update(map(tuple, np.unique(keys(points[valid], voxel), axis=0)))
     return labeled
 
 
-def floor_behind_box(floor, visits, sequences, voxel):
+def floor_behind_box(floor, visits, sequences, voxel, intrinsics=INTRINSICS):
+    fx, fy, cx, cy = intrinsics
     floor_keys = sorted(floor)
     points = (np.asarray(floor_keys).reshape(-1, 3) + 0.5) * voxel
     covered = np.zeros(len(points), dtype=bool)
@@ -309,8 +311,8 @@ def floor_behind_box(floor, visits, sequences, voxel):
             local = (points - pose[:3, 3]) @ pose[:3, :3]
             indices = np.flatnonzero((local[:, 2] >= 0.3) & (local[:, 2] <= 4.0))
             x, y, z = local[indices].T
-            u = np.rint(FX * x / z + CX).astype(int)
-            v = np.rint(FY * y / z + CY).astype(int)
+            u = np.rint(fx * x / z + cx).astype(int)
+            v = np.rint(fy * y / z + cy).astype(int)
             valid = (0 <= u) & (u < 640) & (0 <= v) & (v < 480)
             indices, u, v, z = indices[valid], u[valid], v[valid], z[valid]
             box_pixels = polygon_mask(item["box"])[v, u]
@@ -319,8 +321,8 @@ def floor_behind_box(floor, visits, sequences, voxel):
     return {key for key, hide in zip(floor_keys, covered, strict=True) if hide}
 
 
-def select_frames(window, holdout):
-    return [frame for frame in range(window[0], window[1] + 1, 5) if frame not in holdout]
+def select_frames(window, holdout, every=5):
+    return [frame for frame in range(window[0], window[1] + 1, every) if frame not in holdout]
 
 
 def explain_map_misses(truth, found, changed, hits, free, evidence, min_views, expected_direction):
@@ -347,12 +349,12 @@ def explain_map_misses(truth, found, changed, hits, free, evidence, min_views, e
     return reasons
 
 
-def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, diagnostics=False, poses=None):
+def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, diagnostics=False, poses=None, intrinsics=INTRINSICS):
     samples, labels, occupancy, missing = [], [], [], []
     for visit in pair["visits"]:
         sequence = sequences[visit["sequence"]]
         annotation_frames = {item["frame"] for item in visit["labels"]}
-        frames = select_frames(visit["window"], annotation_frames)
+        frames = select_frames(visit["window"], annotation_frames, visit.get("every", 5))
         if not annotation_frames or not all(visit["window"][0] <= f <= visit["window"][1]
                                             for f in annotation_frames):
             raise ValueError(f"{pair['name']}: label frames must be within each visit's window")
@@ -364,13 +366,13 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, d
         if len(sample) < min_views:
             raise ValueError(f"{pair['name']}: insufficient synchronized frames")
         samples.append(sample)
-        occupancy.append(surface_voxels(sample, INTRINSICS, stride, voxel, None))
-        labels.append(labeled_voxels(sequence, visit["labels"], voxel))
+        occupancy.append(surface_voxels(sample, intrinsics, stride, voxel, None))
+        labels.append(labeled_voxels(sequence, visit["labels"], voxel, intrinsics))
 
     box = labels[0]["box"] | labels[1]["box"]
     floor = labels[0]["floor"] | labels[1]["floor"]
     stable = labels[0]["stable"] | labels[1]["stable"] | floor
-    occluded = floor_behind_box(floor, pair["visits"], sequences, voxel)
+    occluded = floor_behind_box(floor, pair["visits"], sequences, voxel, intrinsics)
     ambiguous = box & stable
     box -= ambiguous
     stable -= ambiguous
@@ -383,7 +385,7 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, d
     gt_occluded = np.array([key in occluded for key in gt_keys])
     seen = np.array([[key in occupied for key in gt_keys] for occupied in occupancy])
     evidence = [{}, {}] if diagnostics else [None, None]
-    votes = [visibility(gt_points, sample, INTRINSICS, margin, evidence=detail)
+    votes = [visibility(gt_points, sample, intrinsics, margin, evidence=detail)
              for sample, detail in zip(samples, evidence, strict=True)]
     hits, free = (np.stack(v) for v in zip(*votes))
     found = seen.any(axis=0)

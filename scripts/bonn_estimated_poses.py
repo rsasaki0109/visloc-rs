@@ -86,11 +86,14 @@ def floor_level(normals):
     return Rotation.align_vectors([[0, 0, 1]], [up])[0], int(np.count_nonzero(keep))
 
 
-def export_visit(sequence, observations, intrinsics, work, map_builder, *, level_from_depth=False):
+def export_visit(sequence, observations, intrinsics, work, map_builder, *,
+                 level_from_depth=False, odometry=None):
     work.mkdir(parents=True)
     cv2.setRNGSeed(0)
     detector = cv2.SIFT_create(nfeatures=1800)
     matcher = cv2.BFMatcher(cv2.NORM_L2)
+    if level_from_depth and odometry is not None:
+        raise ValueError("external odometry must already be gravity aligned")
     camera = np.eye(4)
     previous = previous_depth = None
     normals = []
@@ -103,17 +106,20 @@ def export_visit(sequence, observations, intrinsics, work, map_builder, *, level
         rgb = sequence.rectify(sequence.rgb_paths[sequence.rgb_index(frame)])
         grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         depth = sequence.depth(frame)
-        current = detector.detectAndCompute(grey, None)
-        if current[1] is None:
-            raise ValueError(f"{sequence.root.name} frame {frame}: no RGB features")
-        if previous is not None:
-            try:
-                step, support = rgbd_pose(previous, current, previous_depth, intrinsics, matcher)
-            except ValueError as error:
-                raise ValueError(f"{sequence.root.name} frame {frame}: {error}") from error
-            camera = camera @ step
-            inliers.append(support)
-        previous, previous_depth = current, depth
+        if odometry is not None:
+            camera = odometry[frame]
+        else:
+            current = detector.detectAndCompute(grey, None)
+            if current[1] is None:
+                raise ValueError(f"{sequence.root.name} frame {frame}: no RGB features")
+            if previous is not None:
+                try:
+                    step, support = rgbd_pose(previous, current, previous_depth, intrinsics, matcher)
+                except ValueError as error:
+                    raise ValueError(f"{sequence.root.name} frame {frame}: {error}") from error
+                camera = camera @ step
+                inliers.append(support)
+            previous, previous_depth = current, depth
         if level_from_depth:
             normal = floor_normal(depth, intrinsics, rng)
             if normal is not None:
@@ -126,7 +132,7 @@ def export_visit(sequence, observations, intrinsics, work, map_builder, *, level
         manifest.append((stamp, frame))
     (work / "rgb.txt").write_text("".join(f"{stamp:.9f} rgb_{frame}.png\n" for stamp, frame in manifest))
     (work / "depth.txt").write_text("".join(f"{stamp:.9f} depth_{frame}.png\n" for stamp, frame in manifest))
-    flags = []
+    flags = ["--keep-world"] if odometry is not None else []
     if level_from_depth:
         level, support = floor_level(normals)
         trajectory = np.asarray(trajectory)
@@ -187,7 +193,7 @@ def merge_trial(visits, runs, merged, map_merge, *, refine=True, separation=None
         errors.append(pose_rmse(observations, aligned[-1]))
     summary = json.loads((merged / "map.json").read_text())
     return aligned, {
-        "pose_errors": errors, "minimum_odometry_inliers": [min(run[2]) for run in runs],
+        "pose_errors": errors, "minimum_odometry_inliers": [min(run[2], default=None) for run in runs],
         "session_alignment": summary["session_alignment"],
     }
 
