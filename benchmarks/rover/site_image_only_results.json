@@ -1,0 +1,306 @@
+{
+  "sampled": [
+    114,
+    116
+  ],
+  "candidate_pairs": {
+    "near_time": 454,
+    "within_season_retrieved": 319,
+    "cross_season": 101
+  },
+  "verified_pairs": 451,
+  "verified_cross_season_pairs": 40,
+  "registered_images_per_season": [
+    56,
+    72
+  ],
+  "models_with_both_seasons": 0,
+  "models": [
+    {
+      "id": 0,
+      "registered_offsets_s": [
+        [],
+        [
+          0,
+          3,
+          6,
+          9,
+          12,
+          15,
+          18,
+          21,
+          24,
+          27,
+          126,
+          129,
+          132,
+          135,
+          138,
+          141,
+          144,
+          147,
+          234,
+          237,
+          240,
+          243,
+          246,
+          249,
+          252,
+          330,
+          333,
+          336,
+          339,
+          342,
+          345
+        ]
+      ],
+      "points": 769,
+      "mean_reprojection_error_px": 0.8137521485469694
+    },
+    {
+      "id": 1,
+      "registered_offsets_s": [
+        [],
+        [
+          51,
+          168,
+          273
+        ]
+      ],
+      "points": 0,
+      "mean_reprojection_error_px": 0.0
+    },
+    {
+      "id": 2,
+      "registered_offsets_s": [
+        [
+          54,
+          57,
+          60,
+          63,
+          66,
+          69,
+          72,
+          162,
+          165,
+          168,
+          171,
+          174,
+          177,
+          180,
+          264,
+          267,
+          270,
+          273,
+          276,
+          279,
+          282,
+          285
+        ],
+        []
+      ],
+      "points": 390,
+      "mean_reprojection_error_px": 0.4109148120119737
+    },
+    {
+      "id": 3,
+      "registered_offsets_s": [
+        [],
+        [
+          45,
+          159,
+          162,
+          264,
+          267
+        ]
+      ],
+      "points": 215,
+      "mean_reprojection_error_px": 0.2115306076287757
+    },
+    {
+      "id": 4,
+      "registered_offsets_s": [
+        [
+          0,
+          3,
+          6,
+          9,
+          12,
+          111,
+          114,
+          117,
+          120,
+          123,
+          126,
+          219,
+          222,
+          225,
+          228,
+          231,
+          234,
+          324,
+          327,
+          330,
+          333,
+          336,
+          339
+        ],
+        []
+      ],
+      "points": 471,
+      "mean_reprojection_error_px": 1.080345742638792
+    },
+    {
+      "id": 5,
+      "registered_offsets_s": [
+        [],
+        [
+          30,
+          33,
+          36,
+          150,
+          153,
+          255
+        ]
+      ],
+      "points": 37,
+      "mean_reprojection_error_px": 0.27516789904357897
+    },
+    {
+      "id": 6,
+      "registered_offsets_s": [
+        [
+          18,
+          21,
+          132,
+          240
+        ],
+        []
+      ],
+      "points": 34,
+      "mean_reprojection_error_px": 0.3494158275165337
+    },
+    {
+      "id": 7,
+      "registered_offsets_s": [
+        [
+          39,
+          42,
+          150,
+          153,
+          258
+        ],
+        []
+      ],
+      "points": 118,
+      "mean_reprojection_error_px": 0.7038952372610994
+    },
+    {
+      "id": 8,
+      "registered_offsets_s": [
+        [],
+        [
+          183,
+          186,
+          285
+        ]
+      ],
+      "points": 48,
+      "mean_reprojection_error_px": 0.4873225420213159
+    },
+    {
+      "id": 9,
+      "registered_offsets_s": [
+        [],
+        [
+          48,
+          165,
+          270
+        ]
+      ],
+      "points": 45,
+      "mean_reprojection_error_px": 0.29618906476742224
+    },
+    {
+      "id": 10,
+      "registered_offsets_s": [
+        [],
+        [
+          180,
+          279,
+          282
+        ]
+      ],
+      "points": 42,
+      "mean_reprojection_error_px": 0.22684504649950965
+    },
+    {
+      "id": 11,
+      "registered_offsets_s": [
+        [],
+        [
+          75,
+          291
+        ]
+      ],
+      "points": 34,
+      "mean_reprojection_error_px": 0.15597054667279323
+    },
+    {
+      "id": 12,
+      "registered_offsets_s": [
+        [],
+        [
+          111,
+          114,
+          219
+        ]
+      ],
+      "points": 36,
+      "mean_reprojection_error_px": 0.5792042148431754
+    },
+    {
+      "id": 13,
+      "registered_offsets_s": [
+        [
+          15,
+          129
+        ],
+        []
+      ],
+      "points": 43,
+      "mean_reprojection_error_px": 0.20838279484680072
+    },
+    {
+      "id": 14,
+      "registered_offsets_s": [
+        [],
+        [
+          60,
+          63,
+          66,
+          69,
+          72,
+          75,
+          78,
+          177,
+          180,
+          183,
+          186,
+          189,
+          192,
+          195,
+          279,
+          282,
+          285,
+          288,
+          291,
+          294,
+          297
+        ]
+      ],
+      "points": 323,
+      "mean_reprojection_error_px": 0.7666240112139918
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "summer_landmarks": 558,
+  "winter_only_tracks": 317,
+  "winter_landmarks_added": 36,
+  "summer_landmarks_retained": 558,
+  "winter_addition_holdout_px_median": 1.325794465026842,
+  "independently_triangulated_common_tracks": 30,
+  "common_tracks_distance_median_m": 0.11676685258257456,
+  "common_tracks_within_25cm": 25
+}

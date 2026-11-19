@@ -25,7 +25,7 @@ class Capture:
         self.sift = cv2.SIFT_create()
 
     @lru_cache
-    def image(self, seconds):
+    def image(self, seconds, color=False):
         index = int(np.argmin(np.abs(self.times - self.times[0] - seconds)))
         path = self.stream / self.rows[index][1]
         if not path.is_file():
@@ -33,7 +33,7 @@ class Capture:
             sampled = json.loads((self.root / "selected.json").read_text())
             if sampled[str(seconds)]["rgb_time"] != self.times[index]:
                 raise ValueError(f"{path}: sampled timestamp differs from official manifest")
-        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR if color else cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError(f"could not read {path}")
         return float(self.times[index]), image
@@ -78,8 +78,10 @@ def epipolar_inliers(left, right, k, distortion):
 
 
 class EfficientLoFTR:
-    def __init__(self, path):
+    def __init__(self, path, max_side=None):
         import onnxruntime as ort
+
+        self.max_side = max_side
 
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2
@@ -91,7 +93,8 @@ class EfficientLoFTR:
         scales = []
         for name, image in zip(("image0", "image1"), (first, second), strict=True):
             height, width = image.shape
-            target = (width // 32 * 32, height // 32 * 32)
+            factor = min(1.0, self.max_side / max(height, width)) if self.max_side else 1.0
+            target = (max(32, int(width * factor) // 32 * 32), max(32, int(height * factor) // 32 * 32))
             resized = cv2.resize(image, target, interpolation=cv2.INTER_AREA)
             images[name] = resized[None, None].astype(np.float32) / 255.0
             scales.append(np.array([width, height]) / target)

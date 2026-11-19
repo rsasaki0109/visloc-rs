@@ -16,20 +16,31 @@ import yaml
 from eval_rover_seasonal_overlap import Capture, EfficientLoFTR, covered_cells, epipolar_inliers
 
 
+FACADE_WINDOW = Path(__file__).resolve().parents[1] / "benchmarks" / "rover" / "facade_window.json"
+
+
 def collect_tracks(images, matcher, k, distortion, summer_count):
+    def matches():
+        for first, second in combinations(range(len(images)), 2):
+            cross_season = first < summer_count <= second
+            if not cross_season and second - first > 3:
+                continue
+            if cross_season and abs(first - (second - summer_count)) > 1:
+                continue
+            yield first, second, *matcher.match(images[first], images[second])
+
+    return assemble_tracks(images, matches(), k, distortion, summer_count)
+
+
+def assemble_tracks(images, matches, k, distortion, summer_count):
     # The matcher gives slightly different subpixel coordinates for each pair.
     # Reuse tracks within a 2 px grid and keep one-to-one image correspondences.
     grids = [{} for _ in images]
     points = [[] for _ in images]
     pairs = {}
     edges = []
-    for first, second in combinations(range(len(images)), 2):
+    for first, second, left, right in matches:
         cross_season = first < summer_count <= second
-        if not cross_season and second - first > 3:
-            continue
-        if cross_season and abs(first - (second - summer_count)) > 1:
-            continue
-        left, right = matcher.match(images[first], images[second])
         keep = epipolar_inliers(left, right, k, distortion)
         left, right = left[keep], right[keep]
         covered = [covered_cells(uv, images[i].shape) for i, uv in ((first, left), (second, right))]
@@ -159,11 +170,12 @@ def main():
     parser.add_argument("--winter", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--efficient-loftr", type=Path, required=True)
+    parser.add_argument("--models-out", type=Path, help="save the reconstructed COLMAP models")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     capture = [Capture(root, "realsense_D435i") for root in (args.summer, args.winter)]
     # Exploratory window around the previously accepted house-facade pair.
-    offsets = ([311, 313, 314, 315, 316, 317], [101, 103, 104, 105, 106, 107])
+    offsets = json.loads(FACADE_WINDOW.read_text())
     frames = [[source.image(seconds) for seconds in series]
               for source, series in zip(capture, offsets, strict=True)]
     images = [image for group in frames for _, image in group]
@@ -179,7 +191,15 @@ def main():
     points, pairs, edges = collect_tracks(images, EfficientLoFTR(args.efficient_loftr), k, distortion, len(offsets[0]))
     with TemporaryDirectory(prefix="rover-sfm-") as temp:
         models = reconstruct(images, points, pairs, k, distortion, Path(temp))
-        scores = [check_scale(model, len(offsets[0]), refs, prism) for model in models.values()]
+        if args.models_out:
+            args.models_out.mkdir(parents=True)
+        scores = []
+        for identifier, model in models.items():
+            scores.append(check_scale(model, len(offsets[0]), refs, prism))
+            if args.models_out:
+                destination = args.models_out / str(identifier)
+                destination.mkdir()
+                model.write(destination)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     result = {"rgb_offset_seconds": offsets, "accepted_edges": edges, "models": scores}
     args.out.write_text(json.dumps(result, indent=2) + "\n")

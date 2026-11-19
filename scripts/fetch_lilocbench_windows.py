@@ -18,7 +18,7 @@ from rgbd_map_cloud import nearest
 
 ROOT_URL = "https://www.ipb.uni-bonn.de/html/projects/localization_benchmark/data"
 ARCHIVE_BYTES = {"mapping": 18271426492, "lt_changes_0": 10008762359,
-                 "lt_changes_dynamics_0": 12940694854}
+                 "lt_changes_dynamics_0": 12940694854, "lt_changes_dynamics_1": 15112070989}
 CAMERA = "camera_front"
 CALIBRATION = (
     "transformations.yaml", f"{CAMERA}/color/intrinsics.yaml", f"{CAMERA}/depth/intrinsics.yaml",
@@ -112,11 +112,14 @@ def timestamped_members(members, kind):
 def fetch_sequence(sequence, pairs, output, workers):
     size = ARCHIVE_BYTES[sequence]
     url = f"{ROOT_URL}/data_files_zipped/{sequence}.zip"
-    truth = output / f"{sequence}.tum"
-    if not truth.is_file():
-        with urlopen(f"{ROOT_URL}/gt_poses_public/{sequence}/gt_poses.txt", timeout=25) as response:
-            write_atomically(truth, response.read())
-    start = float(truth.read_text().split(maxsplit=1)[0])
+    needs_truth = any(visit["sequence"] == sequence and visit.get("anchor", "reference") == "reference"
+                      for pair in pairs for visit in pair["visits"])
+    if needs_truth:
+        truth = output / f"{sequence}.tum"
+        if not truth.is_file():
+            with urlopen(f"{ROOT_URL}/gt_poses_public/{sequence}/gt_poses.txt", timeout=25) as response:
+                write_atomically(truth, response.read())
+        reference_start = float(truth.read_text().split(maxsplit=1)[0])
     with RemoteZip(url, size) as remote, zipfile.ZipFile(remote) as archive:
         members = {entry.filename: entry for entry in archive.infolist()}
     rgb_times, rgb_names = timestamped_members(members, "color")
@@ -129,6 +132,10 @@ def fetch_sequence(sequence, pairs, output, workers):
         for visit in pair["visits"]:
             if visit["sequence"] != sequence:
                 continue
+            anchor = visit.get("anchor", "reference")
+            if anchor not in ("reference", "first_rgb"):
+                raise ValueError(f"unknown capture anchor: {anchor}")
+            start = rgb_times[0] if anchor == "first_rgb" else reference_start
             first, last = visit["capture_seconds"]
             relative = np.arange(first, last + 0.001, 0.25)
             rgb_ids = [nearest(rgb_times, start + value) for value in relative]

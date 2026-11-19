@@ -63,3 +63,5 @@ python scripts/eval_bonn_loop_closure.py \
   --pair holdout_box_removed --map-tools target/release/examples --level-from-depth \
   --compare-removals --out runs/bonn_clearance.json
 ```
+
+The follow-up extends the ROVER sampling across both traversals and validates deletion after two independent LILocBench revisits. [Site alignment and persistent clearance](rover_site_and_clearance_revisits.md)

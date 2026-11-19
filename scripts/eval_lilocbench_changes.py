@@ -35,7 +35,7 @@ def calibration_matrix(path):
 
 
 class Visit:
-    def __init__(self, root, case, sequence):
+    def __init__(self, root, case, sequence, *, reference=True):
         self.root = root / "dataset" / sequence
         manifest = json.loads((root / f"{case}_{sequence}.json").read_text())
         self.rgb_paths = manifest["rgb"]
@@ -45,10 +45,11 @@ class Visit:
         if not (len(self.times) == len(depth_times) and np.all(np.diff(self.times) > 0)
                 and np.all(np.abs(depth_times - self.times) < 0.035)):
             raise ValueError(f"{case}/{sequence}: invalid RGB-D synchronization")
-        truth = np.loadtxt(root / f"{sequence}.tum")
-        self.truth_time = truth[:, 0]
-        self.positions = truth[:, 1:4]
-        self.rotations = Slerp(self.truth_time, Rotation.from_quat(truth[:, 4:8]))
+        if reference:
+            truth = np.loadtxt(root / f"{sequence}.tum")
+            self.truth_time = truth[:, 0]
+            self.positions = truth[:, 1:4]
+            self.rotations = Slerp(self.truth_time, Rotation.from_quat(truth[:, 4:8]))
         extrinsics = yaml.safe_load((self.root / "transformations.yaml").read_text())
         transforms = {(entry["parent"], entry["child"]): yaml_matrix(entry) for entry in extrinsics}
         cam = "camera_front"
@@ -119,15 +120,19 @@ class Visit:
         aligned[np.isinf(aligned)] = 0
         return np.rint(aligned.reshape(480, 640) * 1000).astype(np.uint16)
 
-    def observations(self, frames, directory):
+    def depth_files(self, frames, directory):
         directory.mkdir(parents=True, exist_ok=True)
         for frame in frames:
-            timestamp = self.times[frame]
-            if not self.truth_time[0] <= timestamp <= self.truth_time[-1]:
-                raise ValueError(f"frame {frame} outside published pose interval")
             path = directory / f"{frame}.png"
             if not path.is_file():
                 Image.fromarray(self.depth(frame)).save(path)
+            yield frame, path
+
+    def observations(self, frames, directory):
+        for frame, path in self.depth_files(frames, directory):
+            timestamp = self.times[frame]
+            if not self.truth_time[0] <= timestamp <= self.truth_time[-1]:
+                raise ValueError(f"frame {frame} outside published pose interval")
             yield self.pose(timestamp), path
 
 
