@@ -151,7 +151,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aria_factory_imu_rectify import VRS_HEAD_BYTES, extract_record, rectify_csv  # noqa: E402
 from aria_device_refinement import lookup as device_refinement, rotate_rig  # noqa: E402
-from lamaria_ba_chain import PASS_MATCH, run_chain  # noqa: E402
+from lamaria_ba_chain import PASS_MATCH, pass_work, run_chain  # noqa: E402
 import http_zip  # noqa: E402
 
 LOOP_MATCH_MAX_ROT_ERROR_DEG = 5
@@ -287,6 +287,21 @@ def pass_features(args, track: int, serial: str | None) -> str | None:
             and serial in args.ba_pass_features_serials:
         return args.ba_pass_features
     return None
+
+
+def share_ba_inputs(source, target, features):
+    """Reuse the completed online pass and the inputs of the first batch solve."""
+    inputs = ["features.npz", "matches.npz", "match.done", "loops.npz"]
+    paths = [source / name for name in [*inputs, "online.tum", "online.done"]]
+    if features:
+        paths.extend(pass_work(source, features) / name for name in inputs)
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        link = target / path.relative_to(source)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if not link.is_symlink():
+            link.symlink_to(path.resolve())
 
 
 def estimator_command(args, inner: Path, calibration: Path, out_dir: Path,
@@ -560,6 +575,9 @@ def main() -> int:
     parser.add_argument("--ba-stereo-reference", type=int, choices=(0, 1),
                         help="--ba-chain: in the batch pass, fix this camera's IMU transform and estimate the "
                              "other camera's rotation and translation in approximately 5 s segments")
+    parser.add_argument("--ba-stereo-compare", action="store_true",
+                        help="also run the default batch pass from the same inputs and save its estimates "
+                             "under --log-dir (requires --ba-chain and --ba-stereo-reference)")
     parser.add_argument("--ba-temperature", action=argparse.BooleanOptionalAction, default=True,
                         help="--ba-chain: on --ba-temperature-tracks by day, fetch the SLAM cameras' temperature "
                              "from the .vrs and let the pass estimate the gyroscope's bias and scale change per "
@@ -596,6 +614,8 @@ def main() -> int:
     args = parser.parse_args()
     if not (args.slam_exe or args.vio_exe):
         parser.error("one of --slam-exe or --vio-exe is required")
+    if args.ba_stereo_compare and not (args.ba_chain and args.ba_stereo_reference is not None and args.log_dir):
+        parser.error("--ba-stereo-compare requires --ba-chain, --ba-stereo-reference and --log-dir")
 
     args.config = args.config or (BA_CHAIN_CONFIG if args.ba_chain else DEFAULT_CONFIG)
     low_light_arg = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
@@ -611,6 +631,7 @@ def main() -> int:
         "--stereo-reference", str(args.ba_stereo_reference), "--ext-seg-seconds", "5")
 
     log(f"{len(sequences)} sequences: {sequences[0]} .. {sequences[-1]}")
+    comparison_failed = False
     for seq in sequences:
         estimate = args.slam_dir / f"{seq}.txt"
         if estimate.is_file():
@@ -730,18 +751,33 @@ def main() -> int:
                 log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass" if learned else "")
                     + (", the temperature" if temperature else "")
                     + (f", stereo reference cam{args.ba_stereo_reference}" if pass_args else "") + ")")
+                ba_work = work / "ba"
+                chain_args = (inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv", ba_calib, track)
+                chain_options = dict(jobs=args.ba_jobs, threads=args.ba_threads, python=python,
+                                     log=lambda m, seq=seq: log(f"{seq}: {m}"), low_light=low_light,
+                                     rematch=args.ba_rematch, pass_features=learned,
+                                     pass_match=args.ba_pass_match, temperature=temperature)
                 try:
-                    trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
-                                           ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
-                                           args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
-                                           low_light=low_light, rematch=args.ba_rematch, pass_features=learned,
-                                           pass_match=args.ba_pass_match, pass_args=pass_args,
-                                           temperature=temperature)
+                    if args.ba_stereo_compare:
+                        baseline_work = work / "ba_baseline"
+                        baseline = run_chain(*chain_args, baseline_work, work / "ba_baseline.tum",
+                                             **chain_options, keep_matches=True)
+                        log_dir = args.log_dir / seq
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        for source, name in ((baseline, "baseline_estimate.txt"),
+                                             (baseline_work / "ba2.tum", "baseline_ba2_estimate.txt")):
+                            run([python, estimate_converter, "--in-tum", source,
+                                 "--out-estimate", log_dir / name], check=True)
+                        share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
+                    trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
+                                           **chain_options, pass_args=pass_args)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
+                    if args.ba_stereo_compare:
+                        raise
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
-                before = work / "ba" / "ba2.tum"
-                if args.ba_rematch and args.log_dir and (work / "ba" / "ba3.tum").is_file() and before.is_file():
-                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)  # to score the rematch against
+                before = ba_work / "ba2.tum"
+                if args.ba_rematch and args.log_dir and (ba_work / "ba3.tum").is_file() and before.is_file():
+                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
                     run([python, estimate_converter, "--in-tum", before,
                          "--out-estimate", args.log_dir / seq / "ba2_estimate.txt"], check=True)
 
@@ -753,11 +789,13 @@ def main() -> int:
                 log(f"{seq}: FAIL estimate conversion")
         except Exception as error:  # keep the loop going across sequences
             log(f"{seq}: EXCEPTION {error!r}")
+            comparison_failed |= args.ba_stereo_compare
         finally:
             if args.log_dir:
-                for step_log in sorted((work / "ba").glob("*.log")):
-                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(step_log, args.log_dir / seq / step_log.name)
+                for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_")):
+                    for diagnostic in sorted([*directory.glob("*.log"), *directory.glob("*_summary.json")]):
+                        (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(diagnostic, args.log_dir / seq / (prefix + diagnostic.name))
             # Always reclaim the sequence's download/extract work so a failure
             # cannot accumulate disk across the whole track.
             if not args.keep_data:
@@ -768,7 +806,7 @@ def main() -> int:
         for estimate in sorted(args.slam_dir.glob("*.txt")):
             archive.write(estimate, f"slam/{estimate.name}")
     log(f"packaged {submission} with {len(list(args.slam_dir.glob('*.txt')))} estimates")
-    return 0
+    return int(comparison_failed)
 
 
 if __name__ == "__main__":

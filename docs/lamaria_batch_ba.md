@@ -3063,8 +3063,13 @@ LaMAria control-point scores for this variant are pending.
 To compare with the default chain, run the same training sequence with
 `--ba-chain` and then with `--ba-chain --ba-stereo-reference=0`, using
 separate `--work-dir` and `--slam-dir` values. The submission driver enables
-the model in the batch passes with approximately 5 s segments. For an
-existing VIO trajectory, use `lamaria_ba_chain.py
+the model in the batch passes with approximately 5 s segments. Add
+`--ba-stereo-compare --log-dir DIR` to run both variants in one invocation
+with the same VIO, online trajectory and initial matches. Compare
+`baseline_ba2_estimate.txt` with `ba2_estimate.txt` to measure the change
+before each variant's trajectory guides its own rematch. With rematch
+enabled, compare `baseline_estimate.txt` with the final estimate as well.
+For an existing VIO trajectory, use `lamaria_ba_chain.py
 --pass-args="--stereo-reference 0 --ext-seg-seconds 5"` and a fresh
 `--work` directory. The chain reuses completed passes when their output
 files already exist.

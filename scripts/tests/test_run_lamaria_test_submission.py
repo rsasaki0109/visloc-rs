@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -95,6 +96,25 @@ class PassFeaturesTests(unittest.TestCase):
             (Path(d) / "sequence_1_1_factory_calib.json").write_text('{"Serial": "1WM093701G1276"}')
             self.assertEqual(submission.device_serial(Path(d), "sequence_1_1"), "1WM093701G1276")
 
+
+
+class SharedBatchInputsTests(unittest.TestCase):
+    def test_comparison_reuses_inputs_and_leaves_batch_outputs_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source, target = Path(temp) / "baseline", Path(temp) / "stereo"
+            (source / "aliked").mkdir(parents=True)
+            for directory in (source, source / "aliked"):
+                for name in ("features.npz", "matches.npz", "match.done", "loops.npz"):
+                    (directory / name).touch()
+            for name in ("online.tum", "online.done", "ba2.tum", "ba2.done"):
+                (source / name).touch()
+            submission.share_ba_inputs(source, target, "aliked")
+            submission.share_ba_inputs(source, target, "aliked")
+            self.assertEqual((target / "online.tum").resolve(), source / "online.tum")
+            self.assertEqual((target / "aliked" / "matches.npz").resolve(), source / "aliked" / "matches.npz")
+            self.assertFalse((target / "ba2.done").exists())
+            (target / "matches.npz").unlink()
+            self.assertTrue((source / "matches.npz").is_file())
 
 
 class DivergenceTests(unittest.TestCase):

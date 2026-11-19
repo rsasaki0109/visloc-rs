@@ -163,7 +163,7 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=True, fina
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
               pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False, final=False,
-              temperature=None):
+              temperature=None, keep_matches=False):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -187,8 +187,9 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         if done.suffix == ".done":
             done.touch()
         log(f"{name}: {time.time() - t0:.0f} s")
-    for matches in {work / "matches.npz", pw / "matches.npz", pw / "rematch" / "matches.npz"}:
-        matches.unlink(missing_ok=True)  # 0.2 GB, not needed once the chain has run
+    if not keep_matches:
+        for matches in {work / "matches.npz", pw / "matches.npz", pw / "rematch" / "matches.npz"}:
+            matches.unlink(missing_ok=True)  # 0.2 GB, not needed once the chain has run
     shutil.copyfile(result(work, track, low_light, rematch, low_light_pass, final), out)
     return Path(out)
 
