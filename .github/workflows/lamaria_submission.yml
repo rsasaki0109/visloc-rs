@@ -59,25 +59,32 @@ jobs:
         shell: bash
         run: docker build --progress=plain -t slam-dunk-benchmark upstream
 
-      - name: Prepare once and refine with four public configurations
+      - name: Prepare one shared frontend packet
         shell: bash
         run: |
           mkdir -p results metrics
-          container=(
-            docker run --rm --network none --user "$(id -u):$(id -g)"
-            --cpus 4 --memory 8g --memory-swap 8g --read-only --tmpfs /tmp:rw,exec,size=512m
-            -v "$PWD/data/$SEQUENCE:/recording:ro"
-            -v "$PWD/results:/results"
-          )
           start=$SECONDS
-          "${container[@]}" slam-dunk-benchmark prepare /recording /results/frontend
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --cpus 4 --memory 8g --memory-swap 8g --read-only --tmpfs /tmp:rw,exec,size=512m \
+            -v "$PWD/data/$SEQUENCE:/recording:ro" -v "$PWD/results:/results" \
+            slam-dunk-benchmark prepare /recording /results/frontend | tee results/prepare.log
+          packet="$(awk '/^\/results\/frontend($|\/)/ { path=$0 } END { print path }' results/prepare.log)"
+          test -n "$packet"
+          test -e "$PWD$packet"
+          printf 'SLAM_DUNK_PACKET=%s\n' "$packet" >> "$GITHUB_ENV"
           printf '%s\n' "$(( SECONDS - start ))" > metrics/frontend_seconds.txt
-          test -e results/frontend
+
+      - name: Refine the shared packet with four public configurations
+        shell: bash
+        run: |
           for name in baseline camera_only gyro_only full; do
             printf 'Refining with %s\n' "$name"
             start=$SECONDS
-            "${container[@]}" -v "$PWD/results/frontend:/results/frontend:ro" \
-              slam-dunk-benchmark refine --config "configs/$name.json" /results/frontend "/results/$name"
+            docker run --rm --network none --user "$(id -u):$(id -g)" \
+              --cpus 4 --memory 8g --memory-swap 8g --read-only --tmpfs /tmp:rw,exec,size=512m \
+              -v "$PWD/data/$SEQUENCE:/recording:ro" -v "$PWD/results:/results" \
+              -v "$PWD/results/frontend:/results/frontend:ro" slam-dunk-benchmark \
+              refine --config "configs/$name.json" "$SLAM_DUNK_PACKET" "/results/$name"
             printf '%s\n' "$(( SECONDS - start ))" > "metrics/${name}_seconds.txt"
             test -s "results/$name/estimate/trajectory.txt"
           done
