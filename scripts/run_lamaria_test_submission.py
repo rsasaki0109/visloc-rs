@@ -574,7 +574,14 @@ def main() -> int:
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
     parser.add_argument("--ba-stereo-reference", type=int, choices=(0, 1),
                         help="--ba-chain: in the batch pass, fix this camera's IMU transform and estimate the "
-                             "other camera's rotation and translation in approximately 5 s segments")
+                             "other camera's rotation and translation in timestamp-based 5 s segments")
+    parser.add_argument("--ba-stereo-fixed-translation", action="store_true",
+                        help="with --ba-stereo-reference, keep the factory stereo translation")
+    parser.add_argument("--ba-stereo-paper-priors", action="store_true",
+                        help="with --ba-stereo-reference, use SLAM Dunk's 1 mrad rotation and "
+                             "0.035 px focal-length random walks")
+    parser.add_argument("--ba-est-gyro-m", action="store_true",
+                        help="estimate the full gyroscope response matrix in the experimental batch pass")
     parser.add_argument("--ba-stereo-compare", action="store_true",
                         help="also run the default batch pass from the same inputs and save its estimates "
                              "under --log-dir (requires --ba-chain and --ba-stereo-reference)")
@@ -614,6 +621,8 @@ def main() -> int:
     args = parser.parse_args()
     if not (args.slam_exe or args.vio_exe):
         parser.error("one of --slam-exe or --vio-exe is required")
+    if (args.ba_stereo_fixed_translation or args.ba_stereo_paper_priors) and args.ba_stereo_reference is None:
+        parser.error("--ba-stereo-fixed-translation and --ba-stereo-paper-priors need --ba-stereo-reference")
     if args.ba_stereo_compare and not (args.ba_chain and args.ba_stereo_reference is not None and args.log_dir):
         parser.error("--ba-stereo-compare requires --ba-chain, --ba-stereo-reference and --log-dir")
 
@@ -627,8 +636,15 @@ def main() -> int:
     converter = args.repo / "scripts" / "lamaria_to_basalt_calib.py"
     estimate_converter = args.repo / "scripts" / "basalt_tum_to_lamaria_estimate.py"
     python = sys.executable
-    pass_args = () if args.ba_stereo_reference is None else (
-        "--stereo-reference", str(args.ba_stereo_reference), "--ext-seg-seconds", "5")
+    pass_args = []
+    if args.ba_stereo_reference is not None:
+        pass_args += ["--stereo-reference", str(args.ba_stereo_reference), "--ext-seg-seconds", "5"]
+    if args.ba_stereo_fixed_translation:
+        pass_args.append("--fix-stereo-translation")
+    if args.ba_stereo_paper_priors:
+        pass_args += ["--ext-seg-sigma", "0.0572957795", "--focal-seg-sigma-px", "0.035"]
+    if args.ba_est_gyro_m:
+        pass_args.append("--est-gyro-m")
 
     log(f"{len(sequences)} sequences: {sequences[0]} .. {sequences[-1]}")
     comparison_failed = False
@@ -750,7 +766,8 @@ def main() -> int:
                         log(f"{seq}: WARN no camera temperature ({error!r})")
                 log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass" if learned else "")
                     + (", the temperature" if temperature else "")
-                    + (f", stereo reference cam{args.ba_stereo_reference}" if pass_args else "") + ")")
+                    + (f", stereo reference cam{args.ba_stereo_reference}" if args.ba_stereo_reference is not None else "")
+                    + (", gyro matrix" if args.ba_est_gyro_m else "") + ")")
                 ba_work = work / "ba"
                 chain_args = (inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv", ba_calib, track)
                 chain_options = dict(jobs=args.ba_jobs, threads=args.ba_threads, python=python,

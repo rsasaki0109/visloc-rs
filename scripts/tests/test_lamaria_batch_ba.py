@@ -234,6 +234,18 @@ class SegmentPriorTest(unittest.TestCase):
         np.testing.assert_allclose(h, h_num, atol=0.01 * w)  # Gauss-Newton: exact up to O(|e0|)
 
 
+class CameraSegmentsTest(unittest.TestCase):
+    def test_timestamp_chunks_survive_a_gap_and_save_load(self):
+        timestamps = 1_000_000_010_000_000_000 + np.array([0, 4, 5, 6, 11, 20]) * 1_000_000_000
+        count, assignment = lb.camera_segments(timestamps, 8, 5.0, time_chunks=True)
+        self.assertEqual(count, 5)
+        np.testing.assert_array_equal(assignment, [0, 0, 1, 1, 2, 4])
+        self.assertEqual(lb.saved_camera_segments({"ext_segments": count, "seg_of_kf": assignment}, timestamps)[0], 5)
+        np.testing.assert_array_equal(lb.saved_camera_segments({"ext_segments": count, "seg_of_kf": assignment},
+                                                               timestamps)[1], assignment)
+        np.testing.assert_array_equal(lb.saved_camera_segments({"ext_segments": 2}, timestamps)[1], [0, 0, 0, 1, 1, 1])
+
+
 class StereoTranslationPriorTest(unittest.TestCase):
     def test_normal_equations_match_finite_differences(self):
         t_ref = np.array([0.04, -0.06, 0.02])

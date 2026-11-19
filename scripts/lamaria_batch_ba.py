@@ -1628,6 +1628,31 @@ def fisheye_corrected(xy, offsets, cams, aria_calib, eps):
     return xy
 
 
+def camera_segments(kf_ns, count, seconds=0.0, time_chunks=False):
+    """Return the segment count and each keyframe's camera segment."""
+    n = len(kf_ns)
+    if not np.isfinite(seconds):
+        raise SystemExit("--ext-seg-seconds must be finite")
+    if seconds > 0:
+        if time_chunks:
+            chunk_ns = round(seconds * 1e9)
+            if chunk_ns < 1:
+                raise SystemExit("--ext-seg-seconds must span at least one nanosecond")
+            seg = (kf_ns - kf_ns[0]) // chunk_ns
+            return int(seg[-1]) + 1, seg
+        count = int(np.ceil((kf_ns[-1] - kf_ns[0]) * 1e-9 / seconds))
+    count = max(count, 1)
+    return count, np.arange(n) * count // n
+
+
+def saved_camera_segments(states, kf_ns):
+    """Use the saved assignment, with the original equal-keyframe assignment for older states."""
+    count = int(states["ext_segments"]) if "ext_segments" in states else 1
+    if "seg_of_kf" in states:
+        return count, states["seg_of_kf"]
+    return camera_segments(kf_ns, count)
+
+
 def cmd_solve(a):
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
@@ -1688,6 +1713,9 @@ def cmd_solve(a):
           f"{time.time() - t0:.0f} s", flush=True)
     chosen_cams = phys_est = [int(ch) for ch in a.est_extrinsic]
     reference = getattr(a, "stereo_reference", None)
+    fix_translation = getattr(a, "fix_stereo_translation", False)
+    if fix_translation and reference is None:
+        raise SystemExit("--fix-stereo-translation needs --stereo-reference")
     if reference is not None:
         if 1 - reference not in phys_est:
             raise SystemExit("--stereo-reference requires the other camera in --est-extrinsic")
@@ -1695,9 +1723,8 @@ def cmd_solve(a):
             raise SystemExit("stereo prior sigmas must be finite and positive")
         if not a.est_focal:
             phys_est = [1 - reference]
-    est_cams, n_seg = phys_est, max(a.ext_segments, 1)
-    if a.ext_seg_seconds > 0:  # segments of about this length instead of a fixed count
-        n_seg = max(int(np.ceil((kf_ns[-1] - kf_ns[0]) * 1e-9 / a.ext_seg_seconds)), 1)
+    est_cams = phys_est
+    n_seg, seg_of_kf = camera_segments(kf_ns, a.ext_segments, a.ext_seg_seconds, time_chunks=reference is not None)
     fixed = None  # the calibration a solve before ended with (--init-states), held as it is with --fix-calib
     if getattr(a, "init_states_file", None):
         st = np.load(a.init_states_file)
@@ -1712,12 +1739,12 @@ def cmd_solve(a):
             if not np.array_equal(fixed["kf_ns"], kf_ns):
                 raise SystemExit("--fix-calib needs the states of a solve over the same keyframes")
             # nothing of the calibration is estimated; the time segments are the states' own
-            phys_est, est_cams, n_seg = [], [], fixed["n_seg"]
+            phys_est, est_cams = [], []
+            n_seg, seg_of_kf = saved_camera_segments(st, kf_ns)
             a.est_focal = a.est_gyro_m = a.est_accel_m = a.est_gyro_bias_temp = a.est_gyro_scale_temp = False
     elif getattr(a, "fix_calib", False):
         raise SystemExit("--fix-calib needs --init-states")
     obs_kf, obs_cam = np.concatenate(obs_kf), np.concatenate(obs_cam)
-    seg_of_kf = np.minimum(np.arange(len(kf_ns)) * n_seg // len(kf_ns), n_seg - 1)
     if n_seg > 1:
         # an IMU-camera rotation per time segment: camera c in segment s becomes camera c * n_seg + s
         obs_cam = obs_cam * n_seg + seg_of_kf[obs_kf]
@@ -1725,7 +1752,7 @@ def cmd_solve(a):
         est_cams = [c * n_seg + s for c in phys_est for s in range(n_seg)]
         print(f"  {n_seg} time segments per camera rotation", flush=True)
     ref_cams = [] if reference is None else list(range(reference * n_seg, (reference + 1) * n_seg))
-    trans_cams = [] if reference is None or fixed is not None else list(
+    trans_cams = [] if reference is None or fixed is not None or fix_translation else list(
         range((1 - reference) * n_seg, (2 - reference) * n_seg))
     rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
                       obs_sigma, a.huber, a.band, est_focal=a.est_focal,
@@ -1819,7 +1846,7 @@ def cmd_solve(a):
             segment = slice(c_ * n_seg, (c_ + 1) * n_seg)
             if c_ != reference:
                 r_ic[segment] = init["r_ic"][last]
-            if reference is not None and c_ != reference and init.get("t_ic") is not None:
+            if rp.est_trans[c_ * n_seg] and init.get("t_ic") is not None:
                 t_ic[segment] = init["t_ic"][last]
             if a.est_focal:
                 rp.foc[c_ * n_seg:(c_ + 1) * n_seg] = init["foc"][last]
@@ -1839,7 +1866,14 @@ def cmd_solve(a):
     # the rotation's three parameters within each camera's slot of the border
     rot_idx = (np.arange(rp.n_ext)[:, None] * npar + np.arange(3)[None, :]).ravel()
     foc_pair_w = 1.0 / a.focal_seg_sigma ** 2
-    if a.focal_seg_sigma_cams:
+    focal_seg_sigma_px = getattr(a, "focal_seg_sigma_px", None)
+    if focal_seg_sigma_px is not None:
+        if not np.isfinite(focal_seg_sigma_px) or focal_seg_sigma_px <= 0 or a.focal_seg_sigma_cams:
+            raise SystemExit("--focal-seg-sigma-px needs a positive finite value and excludes --focal-seg-sigma-cams")
+        # Each axis contributes its pixel prior to the shared log scale at the factory focal lengths.
+        foc_pair_w = np.array([np.sum(np.diag(cams[ca]["K"])[:2] ** 2) / focal_seg_sigma_px ** 2
+                               for ca, _ in seg_pairs])
+    elif a.focal_seg_sigma_cams:
         sig = dict(zip(phys_est, (float(v) for v in a.focal_seg_sigma_cams.split(","))))
         foc_pair_w = np.array([1.0 / sig[ca // n_seg] ** 2 for ca, _ in seg_pairs])
     foc_w = (foc_pair_w, 1.0 / a.focal_sigma ** 2,
@@ -2136,7 +2170,8 @@ def cmd_solve(a):
         "gyro_scale_per_degree": gm[21:24].tolist(),
         "seconds": time.time() - t0,
     }
-    if trans_cams or (fixed is not None and not np.array_equal(t_ic, t_factory)):
+    if reference is not None or (fixed is not None and not np.array_equal(t_ic, t_factory)):
+        summary["stereo_segment_keyframes"] = np.bincount(seg_of_kf, minlength=n_seg).tolist()
         offsets = t_ic[n_seg:] - t_ic[:n_seg]
         summary["stereo_baseline_mm"] = (1000 * np.linalg.norm(offsets, axis=1)).tolist()
         summary["stereo_offset_change_imu_mm"] = (1000 * (offsets - (t_factory[n_seg:] - t_factory[:n_seg]))).tolist()
@@ -2150,7 +2185,8 @@ def cmd_solve(a):
     if a.save_states:  # what loop-correct needs: keyframe poses, landmarks and their observations
         # Camera extrinsics are ordered by camera, then by time segment.
         np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic, t_ic=t_ic,
-                 ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
+                 ext_segments=n_seg, seg_of_kf=seg_of_kf, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg,
+                 obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber, gm=gm)
     return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "t_ic": t_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
             "gyro_m": gm[:9].copy(), "accel_m": gm[9:18].copy(), "gyro_temp": gm[18:24].copy()}
@@ -2394,9 +2430,8 @@ def cmd_loop_correct(a):
     cams, _ = load_calib(a.calib)
     k0, kf_ns, r_wi, t_wi, r_ic, pts = (st[k] for k in ("k0", "kf_ns", "r_wi", "t_wi", "r_ic", "pts"))
     k0, n = int(k0), len(kf_ns)
-    n_seg = int(st["ext_segments"]) if "ext_segments" in st else 1
+    n_seg, seg_of_kf = saved_camera_segments(st, kf_ns)
     t_ic = saved_camera_translations(st, cams, n_seg)
-    seg_of_kf = np.minimum(np.arange(n) * n_seg // n, n_seg - 1)  # as in solve
     foc = st["foc"] if "foc" in st else np.zeros(2 * n_seg)  # focal length scales of solve --est-focal
     act = st["active"]
     okf, ocam, olm, oz = st["obs_kf"][act], st["obs_cam"][act], st["obs_lm"][act], st["obs_z"][act]
@@ -2561,7 +2596,8 @@ def main():
                        help="estimate each such rotation in this many equal time segments of the keyframes "
                             "(1: one rotation per camera)")
         s.add_argument("--ext-seg-seconds", type=float, default=0.0,
-                       help="time segments of about this many seconds instead of --ext-segments (0: off)")
+                       help="segment duration in seconds (0: use --ext-segments); with --stereo-reference, "
+                            "boundaries follow keyframe timestamps")
         s.add_argument("--ext-seg-sigma", type=float, default=0.05,
                        help="prior on the rotation change between consecutive segments (deg)")
         s.add_argument("--ext-seg-sigma-cams", default="",
@@ -2569,6 +2605,8 @@ def main():
         s.add_argument("--stereo-reference", type=int, choices=(0, 1),
                        help="fix this camera's transform to the IMU and estimate the other camera's rotation "
                             "and translation in each segment (both focal scales can still vary with --est-focal)")
+        s.add_argument("--fix-stereo-translation", action="store_true",
+                       help="with --stereo-reference, keep the factory translation while allowing rotation drift")
         s.add_argument("--stereo-walk-sigma", type=float, default=0.0005,
                        help="stereo translation random-walk sigma per segment (m)")
         s.add_argument("--stereo-baseline-sigma", type=float, default=0.0005,
@@ -2588,6 +2626,8 @@ def main():
                        help="also estimate each estimated camera's focal length scale, per time segment")
         s.add_argument("--focal-seg-sigma", type=float, default=0.0005,
                        help="prior on the focal length change between consecutive segments (relative)")
+        s.add_argument("--focal-seg-sigma-px", type=float,
+                       help="focal drift sigma in pixels per segment, converted to the log-scale prior")
         s.add_argument("--focal-sigma", type=float, default=0.01, help="prior on each focal length scale (relative)")
         s.add_argument("--focal-mean-sigma", type=float, default=0.0,
                        help="prior on the mean of each camera's focal length scales over the segments (0: none); "

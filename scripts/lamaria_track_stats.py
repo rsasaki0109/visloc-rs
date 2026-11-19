@@ -23,7 +23,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lamaria_batch_ba import load_calib, saved_camera_translations  # noqa: E402
+from lamaria_batch_ba import load_calib, saved_camera_segments, saved_camera_translations  # noqa: E402
 
 
 def lengths_table(name, v):
@@ -59,8 +59,7 @@ def main():
         res = np.array(json.load(f)["value0"]["resolution"], np.float64)  # [[w, h], [w, h]]
     k0, kf_ns, r_wi, t_wi, r_ic, pts = (st[k] for k in ("k0", "kf_ns", "r_wi", "t_wi", "r_ic", "pts"))
     k0, n = int(k0), len(kf_ns)
-    n_seg = int(st["ext_segments"]) if "ext_segments" in st else 1
-    seg_of_kf = np.minimum(np.arange(n) * n_seg // n, n_seg - 1)  # as in solve
+    n_seg, seg_of_kf = saved_camera_segments(st, kf_ns)
     foc = st["foc"] if "foc" in st else np.zeros(2 * n_seg)
     t_ic = saved_camera_translations(st, cams, n_seg)
     kcal = np.array([[c["K"][0, 0], c["K"][1, 1], c["K"][0, 2], c["K"][1, 2]] for c in cams])

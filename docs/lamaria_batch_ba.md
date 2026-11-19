@@ -3053,18 +3053,25 @@ translation in each segment. With a fixed reference, the isotropic
 translation random walk can be applied in the IMU frame. The defaults from
 Table 5 of the paper give the walk and the factory baseline-length prior
 a sigma of 0.5 mm each (`--stereo-walk-sigma` and
-`--stereo-baseline-sigma` are in metres). The solver uses its existing
-approximately equal-length keyframe segments and one focal scale per
-camera for the rectified pinhole images. The solve summary reports the
-estimated baseline length and the change in the stereo offset, in mm.
+`--stereo-baseline-sigma` are in metres). The boundaries follow the
+keyframe timestamps. The solver uses one focal scale per camera on the
+rectified pinhole images. The solve summary reports the keyframe count per
+segment, the estimated baseline length, and the change in stereo offset
+in mm. Use `--fix-stereo-translation` to test what rotation and focal
+drift achieve with the factory baseline vector held fixed.
 `loop-correct` and `solve --fix-calib` use the saved translations.
 LaMAria control-point scores for this variant are pending.
 
 To compare with the default chain, run the same training sequence with
 `--ba-chain` and then with `--ba-chain --ba-stereo-reference=0`, using
 separate `--work-dir` and `--slam-dir` values. The submission driver enables
-the model in the batch passes with approximately 5 s segments. Add
-`--ba-stereo-compare --log-dir DIR` to run both variants in one invocation
+the model in the batch passes with 5 s segments. Add
+`--ba-stereo-paper-priors` to use the paper's 1 mrad rotational and 0.035 px
+focal-length walks. The pixel prior is converted to the existing log
+focal scale at the factory focal lengths. `--ba-est-gyro-m` estimates
+the recording-wide gyroscope matrix in the same passes, and
+`--ba-stereo-fixed-translation` holds the factory translation.
+Add `--ba-stereo-compare --log-dir DIR` to run both variants in one invocation
 with the same VIO, online trajectory and initial matches. Compare
 `baseline_ba2_estimate.txt` with `ba2_estimate.txt` to measure the change
 before each variant's trajectory guides its own rematch. With rematch
