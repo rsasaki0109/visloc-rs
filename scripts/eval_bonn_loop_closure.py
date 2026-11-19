@@ -15,7 +15,8 @@ from eval_bonn_map_changes import INTRINSICS, Sequence, evaluate_map, select_fra
 from loop_depth_gate import audit_loop, score_validation_depth, se3, select_depth_variant, validation_pairs
 
 
-def compare_poses(pair, sequences, work, tools, separation, level_from_depth, leave_one_out=False):
+def compare_poses(pair, sequences, work, tools, separation, level_from_depth, leave_one_out=False,
+                  compare_removals=False):
     visits, scoring_samples = [], []
     for visit in pair["visits"]:
         sequence = sequences[visit["sequence"]]
@@ -28,7 +29,8 @@ def compare_poses(pair, sequences, work, tools, separation, level_from_depth, le
     runs = [export_visit(seq, frames, INTRINSICS, work / f"visit_{i}", tools / "tum_rgbd_save_map",
                          level_from_depth=level_from_depth)
             for i, (seq, frames) in enumerate(visits)]
-    result = {"mocap": evaluate_map(pair, sequences, work, 0.07, 0.10, 2, diagnostics=True)}
+    evaluation = {"diagnostics": True, "compare_removals": compare_removals}
+    result = {"mocap": evaluate_map(pair, sequences, work, 0.07, 0.10, 2, **evaluation)}
     poses_by_variant = {}
 
     def score_variant(variant, **options):
@@ -36,7 +38,7 @@ def compare_poses(pair, sequences, work, tools, separation, level_from_depth, le
             visits, runs, work / variant, tools / "basalt_map_merge", **options,
         )
         poses_by_variant[variant] = poses
-        score = evaluate_map(pair, sequences, work, 0.07, 0.10, 2, diagnostics=True, poses=poses)
+        score = evaluate_map(pair, sequences, work, 0.07, 0.10, 2, poses=poses, **evaluation)
         score["scoring_pose_errors"] = [pose_rmse(sample, visit_poses)
                                          for sample, visit_poses in zip(scoring_samples, poses, strict=True)]
         score["alignment"] = alignment
@@ -111,6 +113,7 @@ def main():
     parser.add_argument("--annotations", type=Path, action="append", required=True)
     parser.add_argument("--map-tools", type=Path, required=True)
     parser.add_argument("--leave-one-out", action="store_true")
+    parser.add_argument("--compare-removals", action="store_true")
     parser.add_argument("--pair", help="run one named annotation pair")
     parser.add_argument("--level-from-depth", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
@@ -126,7 +129,8 @@ def main():
             sequences = {name: Sequence(args.data / f"rgbd_bonn_{name}") for name in names}
             for pair in pairs:
                 result[pair["name"]] = compare_poses(pair, sequences, work / pair["name"],
-                                                     args.map_tools, 0.15, args.level_from_depth, args.leave_one_out)
+                                                     args.map_tools, 0.15, args.level_from_depth,
+                                                     args.leave_one_out, args.compare_removals)
     if not result:
         parser.error("no annotation pair matched")
     args.out.parent.mkdir(parents=True, exist_ok=True)

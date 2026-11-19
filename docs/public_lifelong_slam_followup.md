@@ -46,6 +46,8 @@ ROVER Garden Small provides summer and snowy winter captures on 2023-08-18 and 2
 
 The verifier accepted all three same-season controls with 67–136 inliers and rejected all ten season-crossing pairs. The strongest cross-season pair had nine inliers on the house facade. This experiment reached correspondence verification. A seasonal pose-graph or map-update score requires metric cross-season alignment and change labels. The public total-station files give prism positions with empty orientation values. [ROVER download and calibration](https://iis-esslingen.github.io/rover/pages/download/) · [Public archive mirror](https://huggingface.co/datasets/iis-esslingen/ROVER) · [ROVER sample labels and results](../benchmarks/rover/seasonal_results.json)
 
+A subsequent evaluation adds a learned matcher, reconstructs the facade across both seasons, and tests saved-map clearance with observation history. [Seasonal alignment and map clearance](seasonal_alignment_and_map_clearance.md)
+
 ## Reproduce
 
 Use the dependencies and two-window extraction from the [LILocBench corridor evaluation](lilocbench_map_changes.md). Build the map tools with the `image-io` feature.

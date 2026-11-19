@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation, Slerp
 
 from bonn_estimated_poses import loop_closed_poses
-from openloris_map_changes import classify, surface_voxels, visibility
+from openloris_map_changes import classify, protected_clearance, surface_voxels, visibility
 from rgbd_map_cloud import nearest, read_stamped
 
 
@@ -349,7 +349,8 @@ def explain_map_misses(truth, found, changed, hits, free, evidence, min_views, e
     return reasons
 
 
-def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, diagnostics=False, poses=None, intrinsics=INTRINSICS):
+def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, diagnostics=False, poses=None,
+                 intrinsics=INTRINSICS, compare_removals=False):
     samples, labels, occupancy, missing = [], [], [], []
     for visit in pair["visits"]:
         sequence = sequences[visit["sequence"]]
@@ -397,7 +398,18 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, d
     cleared_in_second = (free[1] >= min_views) & (free[1] >= 2 * hits[1])
     expected_direction = pair["direction"] == "removal"
     correct_direction = (cleared_in_second == expected_direction) & changed
+    removals = {}
+    if compare_removals and expected_direction:
+        removable = seen[0] & changed & cleared_in_second
+        removals["baseline_removal"] = precision_recall(truth, removable)
+        for policy, baseline_m in (("patch", 0.0), ("separated", 0.25)):
+            confirmed = removable.copy()
+            confirmed[removable] = protected_clearance(
+                gt_points[removable], samples[1], intrinsics, min_baseline_m=baseline_m,
+            )
+            removals[f"{policy}_removal"] = precision_recall(truth, confirmed)
     return {
+        **removals,
         "name": pair["name"],
         "direction": pair["direction"],
         "held_out_frames": [len(visit["labels"]) for visit in pair["visits"]],

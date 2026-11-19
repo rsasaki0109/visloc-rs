@@ -59,10 +59,15 @@ def surface_voxels(observations, intrinsics, stride, voxel, masks):
     return occupied
 
 
-def visibility(points, observations, intrinsics, tolerance, masks=None, *, evidence=None):
+def visibility(points, observations, intrinsics, tolerance, masks=None, *, evidence=None,
+               free_margin=None, free_patch_radius=1, free_baseline_m=0.0):
     fx, fy, cx, cy = intrinsics
     hits = np.zeros(len(points), dtype=np.uint32)
     free = np.zeros_like(hits)
+    margin = tolerance if free_margin is None else free_margin
+    offsets = range(-free_patch_radius, free_patch_radius + 1)
+    free_history = []
+    diverse_free = np.zeros(len(points), dtype=bool)
     if evidence is not None:
         evidence.update({key: np.zeros_like(hits) for key in ("projected", "valid_center", "center_free", "occluded")})
     for pose, path in observations:
@@ -74,10 +79,7 @@ def visibility(points, observations, intrinsics, tolerance, masks=None, *, evide
         v = np.rint(fy * y / z + cy).astype(int)
         valid = (u > 0) & (v > 0) & (u < depth.shape[1] - 1) & (v < depth.shape[0] - 1)
         ids, u, v, z = ids[valid], u[valid], v[valid], z[valid]
-        # Require a fully valid 3x3 neighbourhood before voting for free space.
-        # A depth discontinuity or a nearer surface can hide the candidate.
-        patch = np.stack([depth[v + dy, u + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)])
-        center = patch[4]
+        center = depth[v, u]
         valid_center = (center >= 0.3) & (center <= 4)
         hits[ids[valid_center & (np.abs(center - z) <= tolerance)]] += 1
         if evidence is not None:
@@ -85,8 +87,31 @@ def visibility(points, observations, intrinsics, tolerance, masks=None, *, evide
             evidence["valid_center"][ids[valid_center]] += 1
             evidence["center_free"][ids[valid_center & (center > z + tolerance)]] += 1
             evidence["occluded"][ids[valid_center & (center < z - tolerance)]] += 1
-        free[ids[(patch.min(axis=0) > z + tolerance) & (patch.max(axis=0) <= 4)]] += 1
+        # Only vote for clearance when the entire patch has valid depth beyond the point.
+        r = free_patch_radius
+        inside = (u >= r) & (v >= r) & (u < depth.shape[1] - r) & (v < depth.shape[0] - r)
+        u, v, z = u[inside], v[inside], z[inside]
+        patch = np.stack([depth[v + dy, u + dx] for dy in offsets for dx in offsets])
+        clear_ids = ids[inside][(patch.min(axis=0) > z + margin) & (patch.max(axis=0) <= 4)]
+        free[clear_ids] += 1
+        if free_baseline_m > 0:
+            origin = pose[:3, 3]
+            for prior_origin, prior_clear in free_history:
+                if np.linalg.norm(origin - prior_origin) >= free_baseline_m:
+                    diverse_free[clear_ids] |= prior_clear[clear_ids]
+            clear = np.zeros(len(points), dtype=bool)
+            clear[clear_ids] = True
+            free_history.append((origin, clear))
+    if free_baseline_m > 0:
+        free[~diverse_free] = 0
     return hits, free
+
+
+def protected_clearance(points, observations, intrinsics, *, min_baseline_m=0.0):
+    """Require free space across a wider patch and optionally separated camera origins."""
+    hits, free = visibility(points, observations, intrinsics, 0.10, free_margin=0.15,
+                            free_patch_radius=2, free_baseline_m=min_baseline_m)
+    return (free >= 2) & (free >= 2 * hits)
 
 
 def classify(hits, free, min_views):

@@ -1,0 +1,271 @@
+{
+  "rgb_offset_seconds": [
+    [
+      311,
+      313,
+      314,
+      315,
+      316,
+      317
+    ],
+    [
+      101,
+      103,
+      104,
+      105,
+      106,
+      107
+    ]
+  ],
+  "accepted_edges": [
+    {
+      "images": [
+        2,
+        3
+      ],
+      "matches": 1012,
+      "cross_season": false
+    },
+    {
+      "images": [
+        2,
+        4
+      ],
+      "matches": 131,
+      "cross_season": false
+    },
+    {
+      "images": [
+        2,
+        8
+      ],
+      "matches": 190,
+      "cross_season": true
+    },
+    {
+      "images": [
+        2,
+        9
+      ],
+      "matches": 117,
+      "cross_season": true
+    },
+    {
+      "images": [
+        3,
+        4
+      ],
+      "matches": 500,
+      "cross_season": false
+    },
+    {
+      "images": [
+        3,
+        5
+      ],
+      "matches": 223,
+      "cross_season": false
+    },
+    {
+      "images": [
+        3,
+        6
+      ],
+      "matches": 863,
+      "cross_season": false
+    },
+    {
+      "images": [
+        3,
+        8
+      ],
+      "matches": 286,
+      "cross_season": true
+    },
+    {
+      "images": [
+        3,
+        9
+      ],
+      "matches": 55,
+      "cross_season": true
+    },
+    {
+      "images": [
+        4,
+        5
+      ],
+      "matches": 1771,
+      "cross_season": false
+    },
+    {
+      "images": [
+        4,
+        6
+      ],
+      "matches": 180,
+      "cross_season": false
+    },
+    {
+      "images": [
+        4,
+        9
+      ],
+      "matches": 528,
+      "cross_season": true
+    },
+    {
+      "images": [
+        4,
+        10
+      ],
+      "matches": 738,
+      "cross_season": true
+    },
+    {
+      "images": [
+        4,
+        11
+      ],
+      "matches": 900,
+      "cross_season": true
+    },
+    {
+      "images": [
+        5,
+        6
+      ],
+      "matches": 70,
+      "cross_season": false
+    },
+    {
+      "images": [
+        5,
+        10
+      ],
+      "matches": 629,
+      "cross_season": true
+    },
+    {
+      "images": [
+        5,
+        11
+      ],
+      "matches": 749,
+      "cross_season": true
+    },
+    {
+      "images": [
+        5,
+        12
+      ],
+      "matches": 385,
+      "cross_season": true
+    },
+    {
+      "images": [
+        8,
+        9
+      ],
+      "matches": 1001,
+      "cross_season": false
+    },
+    {
+      "images": [
+        9,
+        10
+      ],
+      "matches": 1991,
+      "cross_season": false
+    },
+    {
+      "images": [
+        9,
+        11
+      ],
+      "matches": 1525,
+      "cross_season": false
+    },
+    {
+      "images": [
+        9,
+        12
+      ],
+      "matches": 835,
+      "cross_season": false
+    },
+    {
+      "images": [
+        10,
+        11
+      ],
+      "matches": 2522,
+      "cross_season": false
+    },
+    {
+      "images": [
+        10,
+        12
+      ],
+      "matches": 1141,
+      "cross_season": false
+    },
+    {
+      "images": [
+        11,
+        12
+      ],
+      "matches": 1049,
+      "cross_season": false
+    }
+  ],
+  "models": [
+    {
+      "registered_images": [
+        5,
+        5
+      ],
+      "registered_image_ids": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "points": 1487,
+      "cross_season_tracks": 1010,
+      "mean_reprojection_error_px": 0.7774795652915538,
+      "summer": {
+        "prism_distance_pairs": 10,
+        "prism_distance_rmse_m": 0.07144613574427974
+      },
+      "winter": {
+        "prism_distance_pairs": 10,
+        "prism_distance_rmse_m": 0.04903214496048576
+      },
+      "meters_per_model_unit": 0.1455350868689371,
+      "winter_anchor_from_summer_anchor": {
+        "image_ids": [
+          4,
+          10
+        ],
+        "quaternion_xyzw": [
+          -0.014181060111473206,
+          0.0737095621686269,
+          -0.004400500517968768,
+          0.9971692101013828
+        ],
+        "translation_m": [
+          -0.44595928769040893,
+          -0.12991685384967436,
+          0.4255206537913537
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,274 @@
+{
+  "revisit_days": 148,
+  "confusion": {
+    "tp": 0,
+    "fp": 0,
+    "fn": 4,
+    "tn": 6
+  },
+  "pairs": [
+    {
+      "summer_s": 75,
+      "winter_s": 210,
+      "overlap": true,
+      "landmark": "garden chain-link fence",
+      "summer_timestamp": 1692361731.7826734,
+      "winter_timestamp": 1705134076.7464728,
+      "mutual_matches": 0,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 130,
+        "epipolar_inliers": 19,
+        "covered_cells": [
+          8,
+          6
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 120,
+      "winter_s": 0,
+      "overlap": true,
+      "landmark": "gap between shed and house",
+      "summer_timestamp": 1692361776.7783666,
+      "winter_timestamp": 1705133866.7526305,
+      "mutual_matches": 5,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 379,
+        "epipolar_inliers": 131,
+        "covered_cells": [
+          11,
+          11
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 150,
+      "winter_s": 165,
+      "overlap": true,
+      "landmark": "red shed corner",
+      "summer_timestamp": 1692361806.7777555,
+      "winter_timestamp": 1705134031.74217,
+      "mutual_matches": 2,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 291,
+        "epipolar_inliers": 126,
+        "covered_cells": [
+          9,
+          9
+        ],
+        "accepted": true
+      }
+    },
+    {
+      "summer_s": 315,
+      "winter_s": 105,
+      "overlap": true,
+      "landmark": "two windows on the white wall",
+      "summer_timestamp": 1692361971.800888,
+      "winter_timestamp": 1705133971.746668,
+      "mutual_matches": 12,
+      "epipolar_inliers": 9,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 1012,
+        "epipolar_inliers": 758,
+        "covered_cells": [
+          13,
+          12
+        ],
+        "accepted": true
+      }
+    },
+    {
+      "summer_s": 60,
+      "winter_s": 165,
+      "overlap": false,
+      "summer_timestamp": 1692361716.773252,
+      "winter_timestamp": 1705134031.74217,
+      "mutual_matches": 5,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 76,
+        "epipolar_inliers": 18,
+        "covered_cells": [
+          7,
+          8
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 75,
+      "winter_s": 60,
+      "overlap": false,
+      "summer_timestamp": 1692361731.7826734,
+      "winter_timestamp": 1705133926.7473383,
+      "mutual_matches": 1,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 51,
+        "epipolar_inliers": 12,
+        "covered_cells": [
+          7,
+          6
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 105,
+      "winter_s": 165,
+      "overlap": false,
+      "summer_timestamp": 1692361761.8003807,
+      "winter_timestamp": 1705134031.74217,
+      "mutual_matches": 1,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 33,
+        "epipolar_inliers": 12,
+        "covered_cells": [
+          7,
+          7
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 120,
+      "winter_s": 105,
+      "overlap": false,
+      "summer_timestamp": 1692361776.7783666,
+      "winter_timestamp": 1705133971.746668,
+      "mutual_matches": 7,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 56,
+        "epipolar_inliers": 15,
+        "covered_cells": [
+          5,
+          5
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 150,
+      "winter_s": 75,
+      "overlap": false,
+      "summer_timestamp": 1692361806.7777555,
+      "winter_timestamp": 1705133941.7566218,
+      "mutual_matches": 5,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 138,
+        "epipolar_inliers": 20,
+        "covered_cells": [
+          4,
+          5
+        ],
+        "accepted": false
+      }
+    },
+    {
+      "summer_s": 315,
+      "winter_s": 210,
+      "overlap": false,
+      "summer_timestamp": 1692361971.800888,
+      "winter_timestamp": 1705134076.7464728,
+      "mutual_matches": 2,
+      "epipolar_inliers": 0,
+      "accepted": false,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 31,
+        "epipolar_inliers": 12,
+        "covered_cells": [
+          6,
+          6
+        ],
+        "accepted": false
+      }
+    }
+  ],
+  "same_season_controls": [
+    {
+      "capture": "summer",
+      "first_s": 60,
+      "second_s": 270,
+      "landmark": "white facade next to the total station",
+      "first_timestamp": 1692361716.773252,
+      "second_timestamp": 1692361926.7997222,
+      "mutual_matches": 114,
+      "epipolar_inliers": 111,
+      "accepted": true,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 1216,
+        "epipolar_inliers": 878,
+        "covered_cells": [
+          14,
+          12
+        ],
+        "accepted": true
+      }
+    },
+    {
+      "capture": "summer",
+      "first_s": 120,
+      "second_s": 225,
+      "landmark": "gap between shed and house",
+      "first_timestamp": 1692361776.7783666,
+      "second_timestamp": 1692361881.7908776,
+      "mutual_matches": 149,
+      "epipolar_inliers": 136,
+      "accepted": true,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 1480,
+        "epipolar_inliers": 1168,
+        "covered_cells": [
+          15,
+          12
+        ],
+        "accepted": true
+      }
+    },
+    {
+      "capture": "winter",
+      "first_s": 0,
+      "second_s": 135,
+      "landmark": "gap between shed and house",
+      "first_timestamp": 1705133866.7526305,
+      "second_timestamp": 1705134001.76559,
+      "mutual_matches": 76,
+      "epipolar_inliers": 67,
+      "accepted": true,
+      "efficient_loftr": {
+        "confidence_filtered_matches": 944,
+        "epipolar_inliers": 636,
+        "covered_cells": [
+          9,
+          10
+        ],
+        "accepted": true
+      }
+    }
+  ],
+  "model_sha256": "e6478683562e0e4052af3a0bfdbc20dd08bfbd907ec8e4e5eff83a1adfca5fcf",
+  "efficient_loftr_confusion": {
+    "tp": 2,
+    "fp": 0,
+    "fn": 2,
+    "tn": 6
+  }
+}
