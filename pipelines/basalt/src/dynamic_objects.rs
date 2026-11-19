@@ -104,6 +104,7 @@ pub(crate) struct DynamicObjectFilter {
     pub params: DynamicObjectParams,
     boxes: BTreeMap<i64, Vec<ObjectBox>>,
     last_moving_ns: HashMap<u64, i64>,
+    pub recorded_boxes: Option<BTreeMap<i64, Vec<ObjectBox>>>,
     pub stats: DynamicObjectStats,
 }
 
@@ -164,6 +165,9 @@ impl DynamicObjectFilter {
                 .is_some_and(|&last| timestamp_ns - last <= params.hold_ns);
             if moving {
                 self.stats.moving_boxes += 1;
+                if let Some(recorded) = &mut self.recorded_boxes {
+                    recorded.entry(timestamp_ns).or_default().push(*b);
+                }
                 dropped.extend(inside().map(|o| o.track_id));
             }
         }
@@ -273,10 +277,14 @@ mod tests {
 
     #[test]
     fn a_moving_object_is_dropped_and_a_parked_one_kept() {
-        let mut filter = DynamicObjectFilter::default();
+        let mut filter = DynamicObjectFilter {
+            recorded_boxes: Some(BTreeMap::new()),
+            ..Default::default()
+        };
         let dropped = filter.moving_tracks(0, &[object(200.0)], &frame(0.5, 8, 6.0));
         assert_eq!(dropped.len(), 9);
         assert!(dropped.contains(&999) && dropped.contains(&100));
+        assert_eq!(filter.recorded_boxes.unwrap()[&0], [object(200.0)]);
         let mut filter = DynamicObjectFilter::default();
         assert!(filter
             .moving_tracks(0, &[object(200.0)], &frame(0.5, 8, 0.6))

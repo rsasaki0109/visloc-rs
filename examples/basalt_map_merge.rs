@@ -31,6 +31,8 @@
 
 #[path = "basalt_map/global_alignment.rs"]
 mod global_alignment;
+#[path = "basalt_map/keyframe_alignment.rs"]
+mod keyframe_alignment;
 #[path = "basalt_map/loop_inspection.rs"]
 mod loop_inspection;
 #[path = "basalt_map/map_files.rs"]
@@ -59,6 +61,8 @@ struct Args {
     out: PathBuf,
     config: MapMergeConfig,
     mode: Mode,
+    refine_keyframes: bool,
+    moving_boxes: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Args {
@@ -67,7 +71,7 @@ impl Args {
          [--min-inliers N] [--min-keyframes N] [--max-hamming N] \
          [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N] \
          [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M] \
-         [--inspect-loops | --optimize-sessions]"
+         [--inspect-loops | --optimize-sessions [--refine-keyframes] [--moving-boxes MAP_DIR CSV]...]"
             .into()
     }
 
@@ -82,6 +86,8 @@ impl Args {
             add: Vec::new(),
             out: PathBuf::new(),
             mode: Mode::Sequential,
+            refine_keyframes: false,
+            moving_boxes: Vec::new(),
             config: MapMergeConfig {
                 threads: std::thread::available_parallelism().map_or(1, usize::from),
                 ..MapMergeConfig::default()
@@ -107,6 +113,8 @@ impl Args {
                 "--out" => out = Some(PathBuf::from(value()?)),
                 "--inspect-loops" if args.mode != Mode::Optimize => args.mode = Mode::Inspect,
                 "--optimize-sessions" if args.mode != Mode::Inspect => args.mode = Mode::Optimize,
+                "--refine-keyframes" => args.refine_keyframes = true,
+                "--moving-boxes" => args.moving_boxes.push((value()?.into(), value()?.into())),
                 "--inspect-loops" | "--optimize-sessions" => {
                     return Err("choose either --inspect-loops or --optimize-sessions".into());
                 }
@@ -124,6 +132,9 @@ impl Args {
         }
         args.base = base.ok_or_else(|| format!("--base is required\n\n{}", Self::usage()))?;
         args.out = out.ok_or_else(|| format!("--out is required\n\n{}", Self::usage()))?;
+        if args.mode != Mode::Optimize && (args.refine_keyframes || !args.moving_boxes.is_empty()) {
+            return Err("--refine-keyframes and --moving-boxes require --optimize-sessions".into());
+        }
         if args.add.is_empty() {
             return Err(format!(
                 "at least one --add is required\n\n{}",
@@ -184,7 +195,27 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         original_maps = map_files::load_original_maps(&paths)?;
-        Some(global_alignment::solve(&original_maps, &args.config)?)
+        let mut masked = std::collections::HashSet::new();
+        let mut filter_reports = Vec::new();
+        for (map_path, csv) in &args.moving_boxes {
+            let identity = map_path.canonicalize()?;
+            let index = paths
+                .iter()
+                .position(|path| path.canonicalize().is_ok_and(|p| p == identity))
+                .ok_or_else(|| format!("{} is not an input map", map_path.display()))?;
+            if !masked.insert(index) {
+                return Err(format!("duplicate moving boxes for {}", map_path.display()).into());
+            }
+            let boxes = visloc_basalt::dynamic_objects::read_object_boxes_csv(csv)?;
+            let removed = map_files::exclude_moving_tracks(&mut original_maps[index], &boxes);
+            filter_reports.push(json!({"session": index, "removed_landmarks": removed}));
+        }
+        let (alignment, mut report) =
+            global_alignment::solve(&mut original_maps, &args.config, args.refine_keyframes)?;
+        if !filter_reports.is_empty() {
+            report["moving_box_filter"] = json!(filter_reports);
+        }
+        Some((alignment, report))
     } else {
         None
     };
@@ -389,6 +420,70 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> Result<Args, String> {
         Args::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+    }
+
+    #[test]
+    fn motion_confirmed_boxes_remove_tracks_and_their_descriptors() {
+        use nalgebra::{Point2, Point3};
+        use std::collections::BTreeMap;
+        use visloc_basalt::dynamic_objects::ObjectBox;
+        use visloc_core::types::{
+            Frame, Keyframe, Landmark, LandmarkDescriptorStore, Observation, VisualMap,
+        };
+
+        let mut saved = map_files::SavedMap {
+            map: VisualMap::new(),
+            descriptors: LandmarkDescriptorStore::new(),
+            extra_descriptors: Vec::new(),
+            imu_from_camera: Vec::new(),
+            max_points: 0,
+            frontend: Default::default(),
+            summary: Value::Null,
+            images: Vec::new(),
+        };
+        let mut observations = Vec::new();
+        for (id, x) in [(1, 20.0), (2, 100.0)] {
+            let observation = Observation {
+                frame_id: 1,
+                landmark_id: id,
+                keypoint_index: observations.len(),
+                xy: Point2::new(x, 20.0),
+            };
+            let mut landmark = Landmark::new(id, Point3::new(0.0, 0.0, 1.0));
+            landmark.observations.push(observation.clone());
+            saved.map.landmarks.insert(id, landmark);
+            saved.descriptors.insert(id, vec![0.0; 32]);
+            observations.push(observation);
+        }
+        saved.map.keyframes.insert(
+            1,
+            Keyframe {
+                frame: Frame::new(1, 1),
+                observations,
+            },
+        );
+        saved.images.push(map_files::ImageRow {
+            image_id: 1,
+            frame_id: 1,
+            cam_id: 0,
+            timestamp_ns: Some(123),
+            session: 0,
+        });
+        let boxes = BTreeMap::from([(
+            123,
+            vec![ObjectBox {
+                object_id: 7,
+                x_min: 10.0,
+                y_min: 10.0,
+                x_max: 30.0,
+                y_max: 30.0,
+            }],
+        )]);
+        assert_eq!(map_files::exclude_moving_tracks(&mut saved, &boxes), 1);
+        assert!(!saved.map.landmarks.contains_key(&1));
+        assert!(!saved.descriptors.contains(1));
+        assert!(saved.descriptors.contains(2));
+        assert_eq!(saved.map.keyframes[&1].observations[0].landmark_id, 2);
     }
 
     #[test]

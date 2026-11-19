@@ -287,6 +287,93 @@ For the pair matrix, use `--inspect-loops` with all seven maps and repeat
 with the full input order reversed, including the base. Repeat for each
 combination of ORB input and minimum inlier count in the table.
 
+## Keyframe refinement and long-term map layers
+
+`basalt_map_merge --optimize-sessions --refine-keyframes` first aligns the
+sessions and then adds cross-session constraints to a sparse rig-keyframe
+pose graph. A session pair with an independent path must agree with the
+transform composed along that path within 25 cm and 5°. An image constraint
+must agree with its pair registration, have at least six shared inlier
+landmarks in the chosen base image (or half of `--min-inliers`, whichever
+is larger), have at most 2 px mean reprojection error, and agree within
+12 cm and 4° with the session placement. Each accepted pair requires at
+least two constraints separated by 35 cm in both sessions.
+
+Consecutive rig keyframes retain odometry constraints. The solver keeps
+the reference frame anchored, preserves rig extrinsics, and projects
+rotation corrections onto yaw about gravity. It applies the result when
+the projected update lowers the graph cost. It retriangulates landmarks
+with suitable multi-view geometry and uses the original camera-local
+point estimates for the remaining tracks. The merged COLMAP images
+contain the refined poses. `sessions[].base_from_session` describes the
+underlying rigid alignment, and `session_alignment.keyframe_refinement`
+records the selected source images, costs, and corrections.
+
+On the seven equalized office sessions, 13 keyframe constraints passed
+the checks and 8,079 landmarks were retriangulated. The dawn bridge
+supported rigid placement and had insufficient spatial spread for
+keyframe refinement.
+
+| Position RMSE with fixed office1-2 mocap alignment | Rigid | Keyframe refinement |
+|---|---:|---:|
+| All 1,331 camera-0 keyframes associated with mocap | 5.25 cm | 5.10 cm |
+| 1,074 keyframes more than 1 s from a selected loop endpoint in their session | 5.15 cm | 4.96 cm |
+| office1-2 alone | 1.51 cm | 2.70 cm |
+| office1-6 alone | 6.25 cm | 7.09 cm |
+
+On the 880 common timestamps of the held-out raw office1-7 revisit, VIO
+plus map fixes scored 2.96 cm with sequential merge, 3.75 cm with rigid
+session alignment, and 3.49 cm with keyframe refinement. The three maps
+produced 880, 889, and 880 poses out of 1,140 frames, respectively.
+
+### Motion-confirmed visual tracks
+
+Supply detector or tracker boxes to `basalt_euroc_vio_demo --object-boxes`
+and export the VIO motion filter's accepted boxes with
+`--export-moving-boxes FILE`. The detector boxes and map keyframes must
+share camera-0 pixel coordinates and timestamps. Pass each session's
+export to the joint merge with `--moving-boxes MAP_DIR FILE`. The merge
+removes a landmark and its descriptor before loop matching and fusion
+when at least half of its timestamped camera-0 observations fall in
+motion-confirmed boxes. The filter's decision and track removal were
+checked on synthetic observations.
+
+### RGB-D visibility and changes
+
+```bash
+target/release/examples/basalt_map_merge --optimize-sessions --refine-keyframes \
+  --min-inliers 10 --base runs/o12e_map --add runs/o11e_map \
+  --add runs/o13e_map --add runs/o14e_map --add runs/o15e_map \
+  --add runs/o16e_map --add runs/o17e_map --out runs/office_refined
+python scripts/openloris_map_changes.py --map runs/office_refined \
+  --session 1 rgbd/office1-1 --session 5 rgbd/office1-6 \
+  --out runs/office_changes.npz
+```
+
+The indices refer to `map.json` and the RGB-D inputs supply
+`aligned_depth/`, `aligned_depth.txt`, `sensors.yaml` and
+`trans_matrix.yaml`. The script projects surface voxels into depth frames
+using the merged map's poses. It records occupied and free-space view
+counts by session. A nearer surface, missing depth, a mask, or a point
+outside the image contributes no free-space vote. Use
+`--moving-masks INDEX DIR` for optional single-channel motion masks on
+the aligned depth grid, using the depth image filenames. The NPZ contains
+the voxel centers, session indices, and labels for unknown (0), stable
+(1), changed (2), and intermittent (3) geometry. Stable candidates
+require occupied evidence from at least two sessions. The output retains
+the evidence for each session so it can be recomputed with later visits.
+
+With the refined map and office1-1 plus office1-6 depth (34 and 38 frames),
+there were 5,606 stable, 3,140 changed, 3,754 intermittent, and 24,222
+unknown voxels. In 42 held-out office1-7 depth frames, among voxels with
+decisive visibility evidence, free-space evidence contradicted 611 of
+1,469 stable candidates (41.6%) and 3,272 of 5,958 voxels across all
+labels (54.9%). The stable layer contained 858 of the 2,686 voxels
+supported as occupied by held-out depth (31.9%). This measures held-out
+depth agreement. The sequences
+have no voxel-level change labels for measuring static retention or
+transient-object recall directly.
+
 ## Results
 
 Each query is localized against a map built from another session, with

@@ -7,11 +7,13 @@ use visloc_rs::localization::{
 use super::map_files::{self, SavedMap};
 
 pub(super) fn solve(
-    maps: &[SavedMap],
+    maps: &mut [SavedMap],
     config: &MapMergeConfig,
+    refine_keyframes: bool,
 ) -> Result<(SessionAlignment, Value), Box<dyn std::error::Error>> {
     let mut constraints = Vec::new();
     let mut pair_reports = Vec::new();
+    let mut directions = Vec::new();
     let mut failed_pairs = Vec::new();
     let register = |base_id: usize, other_id: usize| {
         let base = &maps[base_id];
@@ -60,6 +62,7 @@ pub(super) fn solve(
                         other: other_id,
                         base_from_other: registration.base_from_other,
                     });
+                    directions.push((measurement_base, measurement_query));
                 }
                 Err((error, reverse_error)) => {
                     println!("{base_id} <- {other_id}: {error}");
@@ -98,7 +101,7 @@ pub(super) fn solve(
         alignment.cost_after,
         alignment.iterations,
     );
-    let report = json!({
+    let mut report = json!({
         "anchor_session": 0,
         "session_count": maps.len(),
         "mode": "gravity_aligned_yaw_translation",
@@ -110,6 +113,15 @@ pub(super) fn solve(
         "pairs": pair_reports,
         "failed_pairs": failed_pairs,
     });
+    if refine_keyframes {
+        report["keyframe_refinement"] = super::keyframe_alignment::refine(
+            maps,
+            &alignment.reference_from_session,
+            &constraints,
+            &directions,
+            config,
+        )?;
+    }
     Ok((alignment, report))
 }
 

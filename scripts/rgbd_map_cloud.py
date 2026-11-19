@@ -90,17 +90,20 @@ def nearest(stamps: np.ndarray, t: float) -> int:
     return i - 1 if abs(stamps[i - 1] - t) < abs(stamps[i] - t) else i
 
 
-def keyframe_poses(map_dir: Path):
+def keyframe_poses(map_dir: Path, session: int | None = None):
     """(time in s, world <- camera 0 as 4x4) for each camera-0 keyframe, in time order."""
     cams = {}
     for line in (map_dir / "images.csv").read_text().splitlines()[1:]:
         f = line.split(",")
-        if len(f) >= 4 and f[3]:
+        if len(f) >= 4 and f[3] and (session is None or int(f[4] if len(f) > 4 else 0) == session):
             cams[int(f[0])] = (int(f[2]), int(f[3]) * 1e-9)
-    lines = [l for l in (map_dir / "sparse" / "images.txt").read_text().splitlines()
-             if l and not l.startswith("#")]
+    lines = iter(line for line in (map_dir / "sparse" / "images.txt").read_text().splitlines()
+                 if not line.lstrip().startswith("#"))
     out = []
-    for line in lines[::2]:
+    for line in lines:
+        if not line.strip():
+            continue
+        next(lines, None)  # The points2D row can be empty.
         f = line.split()
         image_id = int(f[0])
         if cams.get(image_id, (1,))[0] != 0:
