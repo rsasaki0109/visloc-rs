@@ -1,0 +1,146 @@
+{
+  "approach": {
+    "samples_per_season": [
+      13,
+      13
+    ],
+    "target_submaps": [
+      [
+        0,
+        "4"
+      ],
+      [
+        1,
+        "0"
+      ]
+    ],
+    "local_models": [
+      {
+        "registered_offsets_s": [
+          [],
+          [
+            132,
+            135
+          ]
+        ],
+        "shared_frames": [
+          0,
+          2
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      },
+      {
+        "registered_offsets_s": [
+          [
+            111
+          ],
+          [
+            128
+          ]
+        ],
+        "shared_frames": [
+          1,
+          0
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      }
+    ]
+  },
+  "transfer": {
+    "samples_per_season": [
+      57,
+      0
+    ],
+    "target_submaps": [
+      [
+        0,
+        "2"
+      ],
+      [
+        0,
+        "4"
+      ]
+    ],
+    "local_models": [
+      {
+        "registered_offsets_s": [
+          [
+            60,
+            63,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            73
+          ],
+          []
+        ],
+        "shared_frames": [
+          5,
+          0
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      },
+      {
+        "registered_offsets_s": [
+          [
+            110,
+            111,
+            112,
+            113,
+            114,
+            115,
+            116,
+            117,
+            120,
+            123,
+            126
+          ],
+          []
+        ],
+        "shared_frames": [
+          0,
+          6
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      },
+      {
+        "registered_offsets_s": [
+          [
+            85,
+            86,
+            87,
+            88,
+            89,
+            90
+          ],
+          []
+        ],
+        "shared_frames": [
+          0,
+          0
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      },
+      {
+        "registered_offsets_s": [
+          [
+            103,
+            104,
+            105,
+            106
+          ],
+          []
+        ],
+        "shared_frames": [
+          0,
+          0
+        ],
+        "enough_shared_frames_for_sim3_test": false
+      }
+    ]
+  }
+}

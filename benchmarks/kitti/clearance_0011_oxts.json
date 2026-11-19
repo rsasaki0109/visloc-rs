@@ -1,0 +1,59 @@
+{
+  "registration": null,
+  "scene_voxels_in_initial_map": 3880,
+  "scene_voxels_after_update": 3443,
+  "label_target_voxels": 138,
+  "target_voxels_present_in_map": 134,
+  "stationary_track_voxels_present_in_map": {
+    "28": 62,
+    "35": 55
+  },
+  "stationary_voxels_present_in_map": 117,
+  "occupancy_difference": {
+    "tp": 134,
+    "fp": 56,
+    "fn": 0,
+    "precision": 0.7052631578947368,
+    "recall": 1.0
+  },
+  "ray_only": {
+    "tp": 119,
+    "fp": 53,
+    "fn": 15,
+    "precision": 0.6918604651162791,
+    "recall": 0.8880597014925373
+  },
+  "saved_clearance_with_occupied_veto": {
+    "tp": 119,
+    "fp": 47,
+    "fn": 15,
+    "precision": 0.7168674698795181,
+    "recall": 0.8880597014925373
+  },
+  "insertion": {
+    "labeled_static_voxels": 109,
+    "labeled_moving_voxels": 332,
+    "all_new_returns": {
+      "tp": 92,
+      "fp": 168,
+      "fn": 17,
+      "precision": 0.35384615384615387,
+      "recall": 0.8440366972477065
+    },
+    "two_scan_insertions": {
+      "tp": 69,
+      "fp": 46,
+      "fn": 40,
+      "precision": 0.6,
+      "recall": 0.6330275229357798
+    },
+    "saved_insertions_without_free_evidence": {
+      "tp": 54,
+      "fp": 11,
+      "fn": 55,
+      "precision": 0.8307692307692308,
+      "recall": 0.4954128440366973
+    },
+    "scene_voxels_inserted": 2265
+  }
+}

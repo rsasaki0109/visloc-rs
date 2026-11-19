@@ -97,6 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--facade-window", type=Path, help="also fetch the facade evaluation offsets")
+    parser.add_argument("--dense-windows", type=Path, help="also fetch offsets from the dense bridge protocol")
     parser.add_argument("--workers", type=int, default=7)
     args = parser.parse_args()
     if args.workers < 1:
@@ -105,6 +106,10 @@ def main():
     with urlopen(url, timeout=25) as response:
         listing = json.load(response)
     windows = json.loads(args.facade_window.read_text()) if args.facade_window else ([], [])
+    if args.dense_windows:
+        dense = json.loads(args.dense_windows.read_text())
+        windows = [sorted(set(offsets).union(*(window["seconds"][i] for window in dense.values())))
+                   for i, offsets in enumerate(windows)]
     for sequence, extra in zip(SEQUENCES, windows, strict=True):
         sample_sequence(sequence, listing, args.out, args.workers, extra)
 

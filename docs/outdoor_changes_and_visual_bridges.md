@@ -58,3 +58,5 @@ python scripts/eval_ahn_building_change.py --data runs/rotterdam \
   --annotations benchmarks/ahn/rotterdam_changes.json \
   --maps-out runs/rotterdam_updated --out runs/rotterdam_results.json
 ```
+
+The follow-up scores full 3D occupancy updates with KITTI ground LiDAR and measures whether denser image sampling can extend the ROVER visual bridge. [Ground LiDAR and dense visual windows](ground_lidar_and_dense_visual_windows.md)
