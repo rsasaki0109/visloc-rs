@@ -814,6 +814,45 @@ over all mapper keyframes. This uses a single alignment to ground truth
 fitted using only MH_01's mapper keyframe trajectory, then applies the
 reported session transforms before scoring MH_02 and MH_03.
 
+### Joint session alignment before fusion
+
+```bash
+target/release/examples/basalt_map_merge --optimize-sessions \
+  --base runs/mh01_map --add runs/mh02_map --add runs/mh03_map \
+  --out runs/mh_aligned
+```
+
+This mode runs the existing rigid registration on every pair of original,
+gravity-aligned session maps. The base session fixes the coordinate frame.
+Each successful pair contributes one yaw and translation measurement, so
+repeated images from one pair do not give that pair extra weight. The
+solver initializes placements along a spanning tree and jointly minimizes
+the pair residuals using a Huber loss scaled by 25 cm and 2°. If a session
+has no path to the base, the command reports it as disconnected and stops
+before fusion. Added maps are ordered by canonical path.
+
+The solver applies one rigid transform to each session before fusing
+landmarks. The merged map uses the existing COLMAP layout. In `map.json`,
+`sessions[].base_from_session` stores the final transforms, and
+`session_alignment` records the initialization and final costs, detected
+pair registrations, residuals, and failed pairs.
+
+On the same three Machine Hall maps, the normalized graph cost fell from
+0.001682 to 0.000561 in two iterations. The three pair translation
+residuals were each 4.8 mm after alignment. Reversing the two `--add`
+arguments produced byte-identical output.
+
+| Position RMSE (MH_01 alignment to ground truth) | Sequential merge | Joint session alignment |
+|---|---:|---:|
+| MH_01 | 1.45 cm | 1.45 cm |
+| MH_02 | 2.55 cm | 2.61 cm |
+| MH_03 | 3.00 cm | 2.99 cm |
+| All mapper keyframes | 2.35 cm | 2.37 cm |
+
+The pair measurements were already consistent to centimetre scale.
+Joint alignment distributed their disagreement across the graph, while
+the aggregate ground-truth RMSE increased by about 0.2 mm.
+
 ### Lifelong use: appending each session
 
 A robot that maps each session (the SLAM's `--save-map`) and merges it into

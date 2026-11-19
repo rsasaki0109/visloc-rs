@@ -1,7 +1,7 @@
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::iter;
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use visloc_core::geometry::SE3;
@@ -10,33 +10,11 @@ use visloc_rs::localization::{inspect_map_registration, MapLoopCandidate};
 use super::{map_files, Args};
 
 pub(super) fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let paths: Vec<_> = iter::once(&args.base).chain(&args.add).collect();
-    let mut input_paths = HashSet::new();
-    let mut maps = Vec::with_capacity(paths.len());
-    for path in &paths {
-        if !input_paths.insert(path.canonicalize()?) {
-            return Err(format!("{}: repeated input map", path.display()).into());
-        }
-        let map = map_files::load(path)?;
-        if map.images.iter().any(|image| image.session != 0)
-            || map.summary["sessions"]
-                .as_array()
-                .is_some_and(|sessions| sessions.len() > 1)
-        {
-            return Err(format!("{}: expected an original session map", path.display()).into());
-        }
-        if maps
-            .first()
-            .is_some_and(|base: &map_files::SavedMap| base.frontend != map.frontend)
-        {
-            return Err(format!(
-                "{}: inconsistent feature extraction settings",
-                path.display()
-            )
-            .into());
-        }
-        maps.push(map);
-    }
+    let paths: Vec<_> = iter::once(&args.base)
+        .chain(&args.add)
+        .map(PathBuf::as_path)
+        .collect();
+    let maps = map_files::load_original_maps(&paths)?;
 
     let mut pairs = Vec::new();
     let mut transforms = vec![vec![None; maps.len()]; maps.len()];
