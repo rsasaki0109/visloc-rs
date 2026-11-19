@@ -33,7 +33,7 @@ jobs:
           git -C evaluator checkout -q --detach FETCH_HEAD
           python -m pip install --quiet --disable-pip-version-check \
             --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ \
-            numpy==2.5.3 scipy==1.18.1 pycolmap==3.13.0.dev0 pyceres==2.6
+            numpy==2.5.3 scipy==1.18.1 pycolmap==3.13.0.dev0 pyceres==2.6 tqdm==4.67.3
 
       - name: Compare saved control-point errors and trajectory errors by time
         shell: bash
