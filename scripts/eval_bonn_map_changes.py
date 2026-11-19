@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import subprocess
+from collections import Counter, defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation, Slerp
 
+from bonn_estimated_poses import loop_closed_poses
 from openloris_map_changes import classify, surface_voxels, visibility
 from rgbd_map_cloud import nearest, read_stamped
 
@@ -128,11 +130,36 @@ def motion_box_masks(rows, x, y):
     return mask
 
 
-def export_motion_boxes(sequence, annotations, basalt, work):
+def write_proposals(path, annotations, frame_stamps, stamps, interpolate):
+    tracks = defaultdict(list)
+    rows = defaultdict(list)
+    for item in annotations:
+        stamp = frame_stamps[item["frame"]]
+        for row in annotation_proposals(item):
+            rows[stamp].append(row)
+            tracks[row[0]].append((stamp, row))
+    if interpolate:
+        for track in tracks.values():
+            for (start, left), (end, right) in zip(track, track[1:]):
+                if end - start > 1_350_000_000:
+                    continue
+                if any(stamp not in (start, end) and start < stamp < end for stamp in frame_stamps.values()):
+                    continue
+                for stamp in stamps[np.searchsorted(stamps, start, side="right"):np.searchsorted(stamps, end)]:
+                    t = (stamp - start) / (end - start)
+                    box = [round(a + (b - a) * t) for a, b in zip(left[3:], right[3:], strict=True)]
+                    rows[stamp].append([*left[:3], *box])
+    with path.open("w") as stream:
+        writer = csv.writer(stream)
+        for stamp, boxes in sorted(rows.items()):
+            writer.writerows([stamp, *row] for row in boxes)
+
+
+def export_motion_boxes(sequence, annotations, basalt, work, interpolate=False, hold_ms=None, diagnostics=False):
     cam = work / "mav0" / "cam0"
-    (cam / "data").mkdir(parents=True)
+    (cam / "data").mkdir(parents=True, exist_ok=True)
     imu = work / "mav0" / "imu0"
-    imu.mkdir()
+    imu.mkdir(exist_ok=True)
     # The rounded timestamp is shared by the RGB manifest and all box CSVs.
     stamps = [int(round((t - sequence.rgb_times[0]) * 1e9)) + 1_000_000_000 for t in sequence.rgb_times]
     # The manifest loader requires two rows. Keep parser padding outside every
@@ -142,9 +169,10 @@ def export_motion_boxes(sequence, annotations, basalt, work):
     with (cam / "data.csv").open("w") as stream:
         writer = csv.writer(stream)
         for stamp, path in zip(stamps, sequence.rgb_paths, strict=True):
-            frame = Image.fromarray(sequence.rectify(path)).convert("L")
             filename = f"{stamp}.png"
-            frame.save(cam / "data" / filename)
+            destination = cam / "data" / filename
+            if not destination.is_file():
+                Image.fromarray(sequence.rectify(path)).convert("L").save(destination)
             writer.writerow([stamp, filename])
     frame_stamps = {}
     for item in annotations:
@@ -154,11 +182,11 @@ def export_motion_boxes(sequence, annotations, basalt, work):
         raise ValueError("multiple annotated depths resolve to the same RGB frame")
     proposal_rows = work / "proposals.csv"
     detected_rows = work / "confirmed.csv"
-    with proposal_rows.open("w") as stream:
-        writer = csv.writer(stream)
-        for item in annotations:
-            for row in annotation_proposals(item):
-                writer.writerow([frame_stamps[item["frame"]], *row])
+    write_proposals(proposal_rows, annotations, frame_stamps, stamps, interpolate)
+    trace_path = work / "decisions.json"
+    flags = ["--object-decisions", str(trace_path)] if diagnostics else []
+    if hold_ms is not None:
+        flags.extend(["--object-continuity-hold-ms", str(hold_ms)])
     # The DS camera with xi=alpha=0 is pinhole. Unused IMU fields retain the
     # repository fixture defaults because the reader requires their schema.
     repo = Path(__file__).resolve().parents[1]
@@ -179,7 +207,7 @@ def export_motion_boxes(sequence, annotations, basalt, work):
         str(basalt.resolve()), "--euroc-dir", str(work), "--calibration", str(calibration_path),
         "--config", str(repo / "configs/basalt/euroc_config_mono_vo.json"),
         "--out-dir", str(run_dir), "--mono-vo", "--threads", "1", "--no-trace", "--no-marg-data",
-        "--object-boxes", str(proposal_rows), "--export-moving-boxes", str(detected_rows),
+        "--object-boxes", str(proposal_rows), "--export-moving-boxes", str(detected_rows), *flags,
     ], capture_output=True, text=True)
     if completed.returncode:
         raise RuntimeError(f"Basalt replay failed: {completed.stderr}")
@@ -189,18 +217,29 @@ def export_motion_boxes(sequence, annotations, basalt, work):
         for row in csv.reader(stream):
             if not row or row[0] == "timestamp_ns":
                 continue
-            by_frame[by_stamp[int(row[0])]].append([float(v) for v in row[1:]])
+            frame = by_stamp.get(int(row[0]))
+            if frame is not None:
+                by_frame[frame].append([float(v) for v in row[1:]])
     summary = dict(line.split("=", 1) for line in (run_dir / "summary.txt").read_text().splitlines() if "=" in line)
     if summary.get("camera_mode") != "mono_visual_only" or summary.get("imu_samples_delivered") != "0":
         raise ValueError("expected a visual-only replay without any delivered IMU samples")
-    return by_frame, {key: int(summary[key]) for key in (
+    decisions = defaultdict(list)
+    if diagnostics:
+        for row in json.loads(trace_path.read_text()):
+            frame = by_stamp.get(row["timestamp_ns"])
+            if frame is not None:
+                decisions[frame].append(row)
+    return by_frame, decisions, {key: int(summary[key]) for key in (
         "frames_processed", "imu_samples_delivered", "object_box_frames", "object_boxes", "moving_object_boxes",
         "undecided_object_boxes", "moving_object_dropped_observations",
     )}
 
 
-def evaluate_motion(sequence, annotations, basalt, work):
-    confirmed, replay_stats = export_motion_boxes(sequence, annotations, basalt, work)
+def evaluate_motion(sequence, annotations, basalt, work, interpolate=False, hold_ms=None, diagnostics=False):
+    confirmed, decisions, replay_stats = export_motion_boxes(
+        sequence, annotations, basalt, work, interpolate, hold_ms, diagnostics,
+    )
+    missed = Counter()
     y, x = np.mgrid[:480, :640]
     # Conservative silhouettes are scored outside a 10 px band at hand-drawn
     # edges. The image border is omitted because of lens rectification.
@@ -223,14 +262,21 @@ def evaluate_motion(sequence, annotations, basalt, work):
         for name, prediction in output.items():
             predictions[name].append(prediction[valid])
         confirmed_ids = sorted(int(row[0]) for row in confirmed[item["frame"]])
+        if diagnostics:
+            by_id = {row["object_id"]: row for row in decisions[item["frame"]]}
+            for object_id in item["object_ids"][:len(item["moving"])]:
+                if object_id not in confirmed_ids:
+                    missed[by_id.get(object_id, {}).get("evidence", "not_evaluated")] += 1
         frame_scores.append({
             "frame": item["frame"], "proposed_object_ids": item["object_ids"],
             "confirmed_object_ids": confirmed_ids,
+            **({"decisions": decisions[item["frame"]]} if diagnostics else {}),
             **{name: precision_recall(truth[valid], output[name][valid]) for name in variants},
         })
     combined = np.concatenate(truths)
     return {
         "replay": replay_stats, "labeled_frames": frame_scores,
+        **({"missed_moving_proposals": dict(missed)} if diagnostics else {}),
         **{name: precision_recall(combined, np.concatenate(predictions[name])) for name in variants},
     }
 
@@ -277,7 +323,31 @@ def select_frames(window, holdout):
     return [frame for frame in range(window[0], window[1] + 1, 5) if frame not in holdout]
 
 
-def evaluate_map(pair, sequences, work, voxel, margin, min_views):
+def explain_map_misses(truth, found, changed, hits, free, evidence, min_views, expected_direction):
+    occupied_visit = 0 if expected_direction else 1
+    clear_visit = 1 - occupied_visit
+    occupied = (hits[occupied_visit] >= min_views) & (hits[occupied_visit] >= 2 * free[occupied_visit])
+    occupied_detail, clear_detail = evidence[occupied_visit], evidence[clear_visit]
+    remaining = truth & ~changed
+    reasons = {}
+    for name, condition in (
+        ("missing_surface_candidate", ~found),
+        ("outside_occupied_view", occupied_detail["projected"] < min_views),
+        ("invalid_occupied_depth", occupied_detail["valid_center"] < min_views),
+        ("insufficient_occupied_votes", ~occupied),
+        ("outside_clear_view", clear_detail["projected"] < min_views),
+        ("invalid_clear_depth", clear_detail["valid_center"] < min_views),
+        ("patch_rejected_clearance", (free[clear_visit] < min_views) & (clear_detail["center_free"] >= min_views)),
+        ("occluded_in_clear_visit", (free[clear_visit] < min_views) & (clear_detail["occluded"] >= min_views)),
+        ("insufficient_clear_votes", free[clear_visit] < min_views),
+        ("conflicting_clear_votes", np.ones_like(truth)),
+    ):
+        reasons[name] = int(np.count_nonzero(remaining & condition))
+        remaining &= ~condition
+    return reasons
+
+
+def evaluate_map(pair, sequences, work, voxel, margin, min_views, *, stride=8, diagnostics=False, poses=None):
     samples, labels, occupancy, missing = [], [], [], []
     for visit in pair["visits"]:
         sequence = sequences[visit["sequence"]]
@@ -288,10 +358,13 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views):
             raise ValueError(f"{pair['name']}: label frames must be within each visit's window")
         missing.append([frame for frame in frames if not (sequence.root / sequence.depth_paths[frame]).is_file()])
         sample = list(sequence.observations(frames, work / sequence.root.name))
+        if poses is not None:
+            visit_poses = poses[len(samples)]
+            sample = [(visit_poses[int(path.stem)], path) for _, path in sample]
         if len(sample) < min_views:
             raise ValueError(f"{pair['name']}: insufficient synchronized frames")
         samples.append(sample)
-        occupancy.append(surface_voxels(sample, INTRINSICS, 8, voxel, None))
+        occupancy.append(surface_voxels(sample, INTRINSICS, stride, voxel, None))
         labels.append(labeled_voxels(sequence, visit["labels"], voxel))
 
     box = labels[0]["box"] | labels[1]["box"]
@@ -309,7 +382,9 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views):
     truth = np.array([key in box for key in gt_keys])
     gt_occluded = np.array([key in occluded for key in gt_keys])
     seen = np.array([[key in occupied for key in gt_keys] for occupied in occupancy])
-    votes = [visibility(gt_points, sample, INTRINSICS, margin) for sample in samples]
+    evidence = [{}, {}] if diagnostics else [None, None]
+    votes = [visibility(gt_points, sample, INTRINSICS, margin, evidence=detail)
+             for sample, detail in zip(samples, evidence, strict=True)]
     hits, free = (np.stack(v) for v in zip(*votes))
     found = seen.any(axis=0)
     # In the production CLI, an annotation outside the generated candidates would be missing.
@@ -334,6 +409,8 @@ def evaluate_map(pair, sequences, work, voxel, margin, min_views):
         "occupancy_difference": precision_recall(truth, occupancy_difference),
         "occupancy_difference_occluded_false_positives": int(np.count_nonzero(gt_occluded & occupancy_difference)),
         "visibility": precision_recall(truth, changed),
+        **({"missed_changes": explain_map_misses(truth, found, changed, hits, free, evidence, min_views,
+                                                expected_direction)} if diagnostics else {}),
         "visibility_stable_correct": int(np.count_nonzero(~truth & (classified == 1))),
         "visibility_occluded_false_positives": int(np.count_nonzero(gt_occluded & changed)),
         "visibility_true_positives_with_correct_direction": int(np.count_nonzero(truth & correct_direction)),
@@ -349,9 +426,15 @@ def main():
     parser.add_argument("--voxel", type=float, default=0.07)
     parser.add_argument("--depth-margin", type=float, default=0.10)
     parser.add_argument("--min-views", type=int, default=2)
+    parser.add_argument("--map-repeats", type=int, default=1, help="independent Basalt map merge trials")
+    parser.add_argument("--map-tools", type=Path, help="directory with tum_rgbd_save_map and basalt_map_merge")
+    parser.add_argument("--map-ablation", action="store_true", help="diagnose changes across candidate strides and depth margins")
+    parser.add_argument("--motion-ablation", action="store_true", help="diagnose and compare motion hold modes")
     args = parser.parse_args()
     if not np.isfinite([args.voxel, args.depth_margin]).all() or min(args.voxel, args.depth_margin, args.min_views) <= 0:
         parser.error("thresholds must be finite and positive")
+    if args.map_repeats < 1:
+        parser.error("--map-repeats must be positive")
     annotations = json.loads(args.annotations.read_text())
     names = {annotations["motion"]["sequence"]}
     names.update(visit["sequence"] for pair in annotations["maps"] for visit in pair["visits"])
@@ -359,9 +442,51 @@ def main():
     with TemporaryDirectory(prefix="visloc-bonn-") as directory:
         work = Path(directory)
         motion = evaluate_motion(sequences[annotations["motion"]["sequence"]], annotations["motion"]["labels"],
-                                 args.basalt, work / "motion")
-        maps = [evaluate_map(pair, sequences, work, args.voxel, args.depth_margin, args.min_views)
-                for pair in annotations["maps"]]
+                                 args.basalt, work / "motion", diagnostics=args.motion_ablation)
+        if args.motion_ablation:
+            motion["interpolated"] = evaluate_motion(
+                sequences[annotations["motion"]["sequence"]], annotations["motion"]["labels"],
+                args.basalt, work / "motion", interpolate=True, diagnostics=True,
+            )
+            motion["interpolated_continuity_hold"] = evaluate_motion(
+                sequences[annotations["motion"]["sequence"]], annotations["motion"]["labels"],
+                args.basalt, work / "motion", interpolate=True, hold_ms=2000, diagnostics=True,
+            )
+        maps = [evaluate_map(pair, sequences, work, args.voxel, args.depth_margin, args.min_views,
+                             diagnostics=args.map_ablation) for pair in annotations["maps"]]
+        if args.map_ablation:
+            for pair, metrics in zip(annotations["maps"], maps, strict=True):
+                metrics["ablation"] = {
+                    "stride_4": evaluate_map(pair, sequences, work, args.voxel, args.depth_margin, args.min_views,
+                                             stride=4, diagnostics=True),
+                    "margin_7cm": evaluate_map(pair, sequences, work, args.voxel, 0.07, args.min_views,
+                                               diagnostics=True),
+                    "margin_13cm": evaluate_map(pair, sequences, work, args.voxel, 0.13, args.min_views,
+                                                diagnostics=True),
+                }
+        if args.map_tools:
+            for pair, metrics in zip(annotations["maps"], maps, strict=True):
+                visits = []
+                for visit in pair["visits"]:
+                    sequence = sequences[visit["sequence"]]
+                    held_out = {item["frame"] for item in visit["labels"]}
+                    scoring_frames = select_frames(visit["window"], held_out)
+                    support_frames = select_frames(visit.get("tracking_window", visit["window"]), held_out)
+                    frames = sorted(set(scoring_frames) | set(support_frames))
+                    visits.append((sequence, list(sequence.observations(frames, work / sequence.root.name))))
+                metrics["estimated_pose_trials"] = []
+                trials = loop_closed_poses(
+                    visits, INTRINSICS, work / pair["name"],
+                    args.map_tools / "tum_rgbd_save_map", args.map_tools / "basalt_map_merge",
+                    args.map_repeats,
+                )
+                for poses, metadata in trials:
+                    estimated = evaluate_map(
+                        pair, sequences, work, args.voxel, args.depth_margin, args.min_views,
+                        diagnostics=args.map_ablation, poses=poses,
+                    )
+                    estimated["alignment"] = metadata
+                    metrics["estimated_pose_trials"].append(estimated)
     result = {"voxel_m": args.voxel, "depth_margin_m": args.depth_margin, "min_views": args.min_views,
               "motion": motion, "maps": maps}
     args.out.parent.mkdir(parents=True, exist_ok=True)

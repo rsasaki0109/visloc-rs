@@ -37,6 +37,8 @@ For addition, 25 and 24 synchronized depth frames produced predictions. Visibili
 
 The sample covers one room, one moving-object recording, two kinds of box changes and a single annotator. The pixel counts describe these frames, whose observations are correlated. The motion results are conditional on sparse manual box proposals and visual-only tracking. They do not measure detector recall, inertial VIO or sparse-map landmark removal during session merge. The map numbers isolate classification given mocap poses. Evaluating registration error, long gaps between revisits, or persistent map writes needs a separate experiment.
 
+The follow-up evaluates diagnostic reasons, motion propagation, depth margins and estimated poses on the original and three additional Bonn recordings. [Follow-up evaluation](bonn_map_followup.md)
+
 ## Reproduce
 
 Download and extract `rgbd_bonn_moving_obstructing_box.zip`, `rgbd_bonn_placing_nonobstructing_box.zip` and `rgbd_bonn_removing_nonobstructing_box.zip` from the dataset page into the same directory. The evaluation used the following archive SHA-256 hashes. [Dataset downloads](https://www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/index.html)

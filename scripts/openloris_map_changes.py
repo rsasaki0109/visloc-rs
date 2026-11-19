@@ -59,10 +59,12 @@ def surface_voxels(observations, intrinsics, stride, voxel, masks):
     return occupied
 
 
-def visibility(points, observations, intrinsics, tolerance, masks=None):
+def visibility(points, observations, intrinsics, tolerance, masks=None, *, evidence=None):
     fx, fy, cx, cy = intrinsics
     hits = np.zeros(len(points), dtype=np.uint32)
     free = np.zeros_like(hits)
+    if evidence is not None:
+        evidence.update({key: np.zeros_like(hits) for key in ("projected", "valid_center", "center_free", "occluded")})
     for pose, path in observations:
         depth = load_depth(path, masks)
         local = (points - pose[:3, 3]) @ pose[:3, :3]
@@ -76,7 +78,13 @@ def visibility(points, observations, intrinsics, tolerance, masks=None):
         # A depth discontinuity or a nearer surface can hide the candidate.
         patch = np.stack([depth[v + dy, u + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)])
         center = patch[4]
-        hits[ids[(center >= 0.3) & (center <= 4) & (np.abs(center - z) <= tolerance)]] += 1
+        valid_center = (center >= 0.3) & (center <= 4)
+        hits[ids[valid_center & (np.abs(center - z) <= tolerance)]] += 1
+        if evidence is not None:
+            evidence["projected"][ids] += 1
+            evidence["valid_center"][ids[valid_center]] += 1
+            evidence["center_free"][ids[valid_center & (center > z + tolerance)]] += 1
+            evidence["occluded"][ids[valid_center & (center < z - tolerance)]] += 1
         free[ids[(patch.min(axis=0) > z + tolerance) & (patch.max(axis=0) <= 4)]] += 1
     return hits, free
 

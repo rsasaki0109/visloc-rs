@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use nalgebra::Point2;
+use serde::Serialize;
 
 use crate::TrackId;
 
@@ -60,6 +61,8 @@ pub struct DynamicObjectParams {
     pub background_ratio: f64,
     /// An object stays moving this long after its last moving decision (0.5 s).
     pub hold_ns: i64,
+    /// Optional maximum age of a confirmation carried through consecutive undecided proposals.
+    pub continuity_hold_ns: Option<i64>,
 }
 
 impl Default for DynamicObjectParams {
@@ -70,6 +73,7 @@ impl Default for DynamicObjectParams {
             min_residual_px: 2.0,
             background_ratio: 3.0,
             hold_ns: 500_000_000,
+            continuity_hold_ns: None,
         }
     }
 }
@@ -98,12 +102,44 @@ pub(crate) struct ScoredObservation {
     pub residual_px: Option<f64>,
 }
 
+/// One candidate decision as recorded by the motion diagnostics.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DynamicObjectDecision {
+    pub timestamp_ns: i64,
+    pub object_id: u64,
+    pub object_samples: usize,
+    pub background_samples: usize,
+    pub object_median_px: Option<f64>,
+    pub background_median_px: Option<f64>,
+    pub evidence: MotionEvidence,
+    pub moving: bool,
+    pub continuity_hold: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotionEvidence {
+    MissingObjectAndBackground,
+    MissingObject,
+    MissingBackground,
+    BelowThreshold,
+    Moving,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MotionHistory {
+    last_confirmation_ns: i64,
+    last_proposal_ns: i64,
+    continuous: bool,
+}
+
 /// Per-sequence state: the boxes, each object's last moving time, statistics.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DynamicObjectFilter {
     pub params: DynamicObjectParams,
     boxes: BTreeMap<i64, Vec<ObjectBox>>,
-    last_moving_ns: HashMap<u64, i64>,
+    history: HashMap<u64, MotionHistory>,
+    pub decisions: Option<Vec<DynamicObjectDecision>>,
     pub recorded_boxes: Option<BTreeMap<i64, Vec<ObjectBox>>>,
     pub stats: DynamicObjectStats,
 }
@@ -134,35 +170,68 @@ impl DynamicObjectFilter {
         observations: &[ScoredObservation],
     ) -> BTreeSet<TrackId> {
         let params = self.params;
-        let background = median(
-            observations
-                .iter()
-                .filter(|o| !boxes.iter().any(|b| b.contains(&o.pixel)))
-                .filter_map(|o| o.residual_px)
-                .collect(),
-            params.min_background_points,
-        );
+        let background_residuals: Vec<_> = observations
+            .iter()
+            .filter(|o| !boxes.iter().any(|b| b.contains(&o.pixel)))
+            .filter_map(|o| o.residual_px)
+            .collect();
+        let background_samples = background_residuals.len();
+        let background = median(background_residuals, params.min_background_points);
         self.stats.frames_with_boxes += 1;
         let mut dropped = BTreeSet::new();
         for b in boxes {
             self.stats.boxes += 1;
             let inside = || observations.iter().filter(|o| b.contains(&o.pixel));
-            let own = median(
-                inside().filter_map(|o| o.residual_px).collect(),
-                params.min_points,
-            );
-            match (own, background) {
-                (Some(own), Some(background)) => {
-                    if own > params.min_residual_px && own > params.background_ratio * background {
-                        self.last_moving_ns.insert(b.object_id, timestamp_ns);
-                    }
+            let residuals: Vec<_> = inside().filter_map(|o| o.residual_px).collect();
+            let object_samples = residuals.len();
+            let own = median(residuals, params.min_points);
+            let evidence = match (own, background) {
+                (Some(own), Some(background))
+                    if own > params.min_residual_px
+                        && own > params.background_ratio * background =>
+                {
+                    self.history.insert(
+                        b.object_id,
+                        MotionHistory {
+                            last_confirmation_ns: timestamp_ns,
+                            last_proposal_ns: timestamp_ns,
+                            continuous: true,
+                        },
+                    );
+                    MotionEvidence::Moving
                 }
-                _ => self.stats.undecided_boxes += 1,
+                (Some(_), Some(_)) => MotionEvidence::BelowThreshold,
+                (None, Some(_)) => MotionEvidence::MissingObject,
+                (Some(_), None) => MotionEvidence::MissingBackground,
+                (None, None) => MotionEvidence::MissingObjectAndBackground,
+            };
+            let undecided = own.is_none() || background.is_none();
+            self.stats.undecided_boxes += u64::from(undecided);
+            let mut continuity_hold = false;
+            let moving = self.history.get_mut(&b.object_id).is_some_and(|history| {
+                let age = timestamp_ns - history.last_confirmation_ns;
+                history.continuous &= evidence != MotionEvidence::BelowThreshold
+                    && timestamp_ns - history.last_proposal_ns <= params.hold_ns;
+                history.last_proposal_ns = timestamp_ns;
+                continuity_hold = age > params.hold_ns
+                    && undecided
+                    && history.continuous
+                    && params.continuity_hold_ns.is_some_and(|limit| age <= limit);
+                age <= params.hold_ns || continuity_hold
+            });
+            if let Some(decisions) = &mut self.decisions {
+                decisions.push(DynamicObjectDecision {
+                    timestamp_ns,
+                    object_id: b.object_id,
+                    object_samples,
+                    background_samples,
+                    object_median_px: own,
+                    background_median_px: background,
+                    evidence,
+                    moving,
+                    continuity_hold,
+                });
             }
-            let moving = self
-                .last_moving_ns
-                .get(&b.object_id)
-                .is_some_and(|&last| timestamp_ns - last <= params.hold_ns);
             if moving {
                 self.stats.moving_boxes += 1;
                 if let Some(recorded) = &mut self.recorded_boxes {
@@ -304,6 +373,49 @@ mod tests {
         assert!(filter
             .moving_tracks(0, &[object(200.0)], &frame(1.5, 8, 3.0))
             .is_empty());
+    }
+
+    #[test]
+    fn continuity_hold_ends_at_a_gap_negative_decision_or_age_limit() {
+        for (interruption, evidence) in
+            [(600_000_000, None), (400_000_000, Some(frame(0.5, 8, 0.5)))]
+        {
+            let mut filter = DynamicObjectFilter {
+                params: DynamicObjectParams {
+                    continuity_hold_ns: Some(2_000_000_000),
+                    ..Default::default()
+                },
+                decisions: Some(Vec::new()),
+                ..Default::default()
+            };
+            let boxes = [object(200.0)];
+            filter.moving_tracks(0, &boxes, &frame(0.5, 8, 6.0));
+            let undecided = frame(0.5, 2, 6.0);
+            filter.moving_tracks(
+                interruption,
+                &boxes,
+                evidence.as_ref().unwrap_or(&undecided),
+            );
+            assert!(filter
+                .moving_tracks(800_000_000, &boxes, &undecided)
+                .is_empty());
+            filter.moving_tracks(900_000_000, &boxes, &frame(0.5, 8, 6.0));
+            for time in [
+                1_300_000_000,
+                1_700_000_000,
+                2_100_000_000,
+                2_500_000_000,
+                2_900_000_000,
+            ] {
+                assert!(!filter.moving_tracks(time, &boxes, &undecided).is_empty());
+            }
+            let last = filter.decisions.as_ref().unwrap().last().unwrap();
+            assert_eq!(last.evidence, MotionEvidence::MissingObject);
+            assert!(last.continuity_hold);
+            assert!(filter
+                .moving_tracks(3_000_000_000, &boxes, &undecided)
+                .is_empty());
+        }
     }
 
     #[test]

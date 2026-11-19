@@ -135,6 +135,8 @@ struct Args {
     /// moving-object filter (`visloc_basalt::dynamic_objects`). Off by default.
     object_boxes: Option<PathBuf>,
     export_moving_boxes: Option<PathBuf>,
+    object_decisions: Option<PathBuf>,
+    object_continuity_hold_ns: Option<i64>,
 }
 
 const NATIVE_COMPANION_BINDING_SCHEMA: &str = "basalt.rust.native_companion_binding.v1";
@@ -256,11 +258,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             boxes.len(),
             path.display()
         );
-        adapter
-            .estimator
-            .set_object_boxes(boxes, Default::default());
+        adapter.estimator.set_object_boxes(
+            boxes,
+            visloc_basalt::dynamic_objects::DynamicObjectParams {
+                continuity_hold_ns: args.object_continuity_hold_ns,
+                ..Default::default()
+            },
+        );
         if args.export_moving_boxes.is_some() {
             adapter.estimator.record_moving_boxes();
+        }
+        if args.object_decisions.is_some() {
+            adapter.estimator.record_dynamic_object_decisions();
         }
     }
     let frame_limit = args
@@ -517,6 +526,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fs::write(path, csv)?;
+    }
+
+    if let Some(path) = &args.object_decisions {
+        let decisions = adapter
+            .estimator
+            .dynamic_object_decisions()
+            .unwrap_or_default();
+        let mut writer = BufWriter::new(fs::File::create(path)?);
+        serde_json::to_writer(&mut writer, decisions)?;
+        writer.flush()?;
     }
 
     if visual_only {
@@ -997,6 +1016,8 @@ impl Args {
         let mut dump_tracks = None;
         let mut object_boxes = None;
         let mut export_moving_boxes = None;
+        let mut object_decisions = None;
+        let mut object_continuity_hold_ns = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let option = argument.to_string_lossy();
@@ -1035,6 +1056,25 @@ impl Args {
                 }
                 "--export-moving-boxes" => {
                     export_moving_boxes = Some(next_path(&mut arguments, &option)?);
+                }
+                "--object-decisions" => {
+                    object_decisions = Some(next_path(&mut arguments, &option)?);
+                }
+                "--object-continuity-hold-ms" => {
+                    let value = arguments
+                        .next()
+                        .ok_or("--object-continuity-hold-ms requires a value")?;
+                    let ms: i64 = value
+                        .to_string_lossy()
+                        .parse()
+                        .map_err(|error| format!("invalid --object-continuity-hold-ms: {error}"))?;
+                    object_continuity_hold_ns = Some(
+                        ms.checked_mul(1_000_000)
+                            .filter(|ns| *ns > 500_000_000)
+                            .ok_or(
+                            "--object-continuity-hold-ms must exceed 500 and fit in nanoseconds",
+                        )?,
+                    );
                 }
                 "--no-marg-data" => no_marg_data = true,
                 "--retained-marg-diagnostics" => retained_marg_diagnostics = true,
@@ -1093,6 +1133,11 @@ impl Args {
         if export_moving_boxes.is_some() && object_boxes.is_none() {
             return Err("--export-moving-boxes requires --object-boxes".into());
         }
+        if (object_decisions.is_some() || object_continuity_hold_ns.is_some())
+            && object_boxes.is_none()
+        {
+            return Err("object decision options require --object-boxes".into());
+        }
         Ok(Self {
             euroc_dir,
             calibration,
@@ -1112,11 +1157,13 @@ impl Args {
             dump_tracks,
             object_boxes,
             export_moving_boxes,
+            object_decisions,
+            object_continuity_hold_ns,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE] [--object-boxes FILE [--export-moving-boxes FILE]]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE] [--object-boxes FILE [--export-moving-boxes FILE] [--object-decisions FILE] [--object-continuity-hold-ms MS]]".into()
     }
 }
 
