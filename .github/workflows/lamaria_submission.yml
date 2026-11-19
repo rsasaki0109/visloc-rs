@@ -1,41 +1,14 @@
-# The LaMAria submission (scripts/run_lamaria_test_submission.py --ba-chain), one job per sequence.
-#
-# Each job extracts its sequence from the ETH server over HTTP range requests (up to 29 GB of images,
-# no zip stored), runs the VIO and the BA chain and uploads `slam/<sequence>.txt`; the last job zips
-# them into the submission. Run it by hand (Actions > LaMAria submission > Run workflow): a training
-# sequence to check a run against the evaluator, or the test split (sequences left empty: all 63).
-# Uploading the zip to https://lamaria.ethz.ch stays by hand. On sequence_1_20 a job takes 38 min
-# (extraction, VIO and the chain) and scores 86.21, as on a workstation (86.20).
-name: LaMAria submission
+name: visloc-rs paired gyroscope matrix benchmark
 
 on:
-  workflow_dispatch:
-    inputs:
-      split:
-        description: Dataset split
-        type: choice
-        options: [training, test]
-        default: training
-      sequences:
-        description: Sequence names, space-separated (empty with the test split = all 63; e.g. sequence_1_20 for a training check)
-        type: string
-        default: ""
-      max_parallel:
-        description: Sequences at a time (spares the ETH server)
-        type: number
-        default: 8
-      driver_args:
-        description: Extra arguments for the driver (e.g. --platform-tracks 5)
-        type: string
-        default: ""
+  push:
+    branches: [benchmark/visloc-gyro-matrix]
 
-      score_control_points:
-        description: Score estimates against the official training control points
-        type: boolean
-        default: false
+permissions:
+  contents: read
 
 env:
-  SPLIT: ${{ inputs.split }}
+  SPLIT: training
 
 jobs:
   plan:
@@ -54,7 +27,7 @@ jobs:
       - id: plan
         name: Sequences
         env:
-          SEQUENCES: ${{ inputs.sequences }}
+          SEQUENCES: sequence_1_19 sequence_3_17
         run: |
           python -m pip install --quiet --disable-pip-version-check numpy==2.5.3
           python - <<'EOF' >> "$GITHUB_OUTPUT"
@@ -100,7 +73,7 @@ jobs:
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel || '8') }}  # a number, also when dispatched as text
+      max-parallel: 2
       matrix:
         sequence: ${{ fromJSON(needs.plan.outputs.sequences) }}
     steps:
@@ -137,19 +110,17 @@ jobs:
           path: bin
 
       - name: Run ${{ matrix.sequence }}
-        env:
-          DRIVER_ARGS: ${{ inputs.driver_args }}
         run: |
           chmod +x bin/basalt_euroc_vio_demo
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences ${{ matrix.sequence }} --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
-            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs $DRIVER_ARGS
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs \
+            --ba-est-gyro-m --ba-compare --no-ba-temperature --no-ba-rematch
           test -s out/slam/${{ matrix.sequence }}.txt
 
       - name: Score control points
         shell: bash
-        if: inputs.score_control_points && inputs.split == 'training'
         env:
           SEQUENCE: ${{ matrix.sequence }}
         run: |
@@ -171,10 +142,10 @@ jobs:
             printf '### %s control-point evaluation\n\n' "$SEQUENCE"
             printf '| Estimate | CP score | Recall at 1 m (%%) |\n|---|---:|---:|\n'
           } >> "$GITHUB_STEP_SUMMARY"
-          for estimate in "out/slam/$SEQUENCE.txt" "$results/baseline_estimate.txt" "$results/free_translation_estimate.txt"; do
+          for estimate in "out/slam/$SEQUENCE.txt" "$results/baseline_estimate.txt"; do
             if [ ! -f "$estimate" ]; then continue; fi
             label=$(basename "$estimate" .txt)
-            if [ "$estimate" = "out/slam/$SEQUENCE.txt" ]; then label=selected_setting; fi
+            if [ "$estimate" = "out/slam/$SEQUENCE.txt" ]; then label=gyro_matrix; fi
             log="$results/cp_$label.log"
             python "$evaluator/evaluate_wrt_control_points.py" --estimate "$estimate" \
               --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
@@ -185,6 +156,73 @@ jobs:
             test -n "$recall"
             printf '| %s | %s | %s |\n' "$label" "$score" "$recall" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: Score paired position RMSE against the public pseudo-ground truth
+        shell: bash
+        env:
+          SEQUENCE: ${{ matrix.sequence }}
+        run: |
+          results="out/logs/$SEQUENCE"
+          reference="$RUNNER_TEMP/$SEQUENCE-pgt.txt"
+          curl -fsSL --retry 3 \
+            "https://cvg-data.inf.ethz.ch/lamaria/ground_truth/pseudo_dense/$SEQUENCE.txt" -o "$reference"
+          python - "$reference" "$results" "out/slam/$SEQUENCE.txt" <<'PY' | tee "$results/gyro_ablation.json"
+          import json
+          import sys
+          from pathlib import Path
+
+          import numpy as np
+
+          def poses(path):
+              samples = np.loadtxt(path, usecols=(0, 1, 2, 3), ndmin=2)
+              if len(samples) < 3 or not np.isfinite(samples).all():
+                  raise ValueError(f"Invalid position samples: {path}")
+              times, indices = np.unique(samples[:, 0], return_index=True)
+              return times, samples[indices, 1:]
+
+          def interpolate(times, points, target):
+              right = np.clip(np.searchsorted(times, target), 1, len(times) - 1)
+              left = right - 1
+              span = times[right] - times[left]
+              valid = (target >= times[0]) & (target <= times[-1]) & (span <= 100_000_000)
+              weight = (target - times[left]) / span
+              return points[left] + weight[:, None] * (points[right] - points[left]), valid
+
+          def rigid_rmse(estimate, reference):
+              x = estimate - estimate.mean(axis=0)
+              y = reference - reference.mean(axis=0)
+              u, _, vh = np.linalg.svd(x.T @ y)
+              rotation = u @ np.diag([1, 1, np.linalg.det(u @ vh)]) @ vh
+              return float(np.sqrt(np.mean(np.sum((x @ rotation - y) ** 2, axis=1))))
+
+          reference_times, reference_points = poses(sys.argv[1])
+          results = Path(sys.argv[2])
+          baseline, baseline_valid = interpolate(*poses(results / "baseline_estimate.txt"), reference_times)
+          corrected, corrected_valid = interpolate(*poses(sys.argv[3]), reference_times)
+          valid = baseline_valid & corrected_valid
+          if valid.sum() < 3 or valid.mean() < 0.5:
+              raise ValueError(f"Insufficient common temporal coverage: {valid.sum()}/{len(valid)}")
+
+          baseline_matrix = np.array(json.loads((results / "baseline_ba2_summary.json").read_text())["gyro_m"])
+          corrected_matrix = np.array(json.loads((results / "ba2_summary.json").read_text())["gyro_m"])
+          if (baseline_matrix.shape != (3, 3) or corrected_matrix.shape != (3, 3)
+                  or baseline_matrix.any() or not np.isfinite(corrected_matrix).all()):
+              raise ValueError("Unexpected gyroscope matrices in the paired solve summaries")
+          print(json.dumps({
+              "matched_reference_poses": int(valid.sum()),
+              "total_reference_poses": len(valid),
+              "baseline_se3_rmse_m": rigid_rmse(baseline[valid], reference_points[valid]),
+              "gyro_matrix_se3_rmse_m": rigid_rmse(corrected[valid], reference_points[valid]),
+              "gyro_response_error_matrix": corrected_matrix.tolist(),
+          }, indent=2))
+          PY
+          {
+            printf '\n| Estimate | SE(3) position RMSE (m) |\n|---|---:|\n'
+            jq -r '"| Baseline | \(.baseline_se3_rmse_m) |\n| Gyro matrix | \(.gyro_matrix_se3_rmse_m) |"' \
+              "$results/gyro_ablation.json"
+            jq -r '"\nCommon reference poses: \(.matched_reference_poses) / \(.total_reference_poses)."' \
+              "$results/gyro_ablation.json"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the estimate
         if: always()
@@ -197,28 +235,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  package:
-    needs: sequence
-    if: always() && needs.sequence.result != 'skipped'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download the estimates
-        uses: actions/download-artifact@v8
-        with:
-          pattern: estimate-*
-          path: estimates
-
-      - name: Zip slam/<sequence>.txt
-        run: |
-          mkdir slam
-          find estimates -path '*/slam/*.txt' -exec cp {} slam/ \;
-          ls slam | wc -l
-          zip -q -r submission.zip slam
-
-      - name: Upload the submission
-        uses: actions/upload-artifact@v7
-        with:
-          name: submission
-          path: submission.zip
-          if-no-files-found: error
-          retention-days: 30
