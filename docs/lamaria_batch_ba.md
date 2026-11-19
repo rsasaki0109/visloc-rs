@@ -3107,6 +3107,31 @@ Pass `--pass-args="--imu /path/to/imu_fused.csv"` to
 seed and online trajectory. The factory calibration JSON is extracted by
 `aria_factory_imu_rectify.py extract`, as for the existing rectification.
 
+### Short paired run on sequence_3_17
+
+The first 182.45 s were decoded from the VRS and reprojected with the
+released pinhole intrinsics. The 3,650 stereo pairs were matched to
+within 76 µs. The four runs shared the Basalt initialization, online
+trajectory, SIFT keypoints, initial matches and temperature model.
+They used the batch output before rematching. The stereo variants used
+5 s chunks with cam0 fixed to the IMU. The fused-input variant used
+the default camera model and changed only the batch accelerometer input.
+
+| Batch setting | Position RMSE (m) | Final 60 s RMSE (m) |
+|---|---:|---:|
+| Default | 0.228 | 0.202 |
+| Time-varying stereo rotation, translation and focal scales | 0.201 | 0.187 |
+| Time-varying rotation and focal scales, stereo translation fixed | 0.193 | 0.177 |
+| Fused accelerometers | 0.216 | 0.195 |
+
+Each trajectory was Sim(3)-aligned once to the same 664 pseudo-ground-truth
+poses. The final 60 s use that same alignment. None of the four control
+points visible in this prefix has a surveyed height. The official CP
+evaluator requires at least three control points with heights for its
+initial alignment. The two full-sequence comparisons were started on
+[sequence_3_17](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426102598)
+and [sequence_1_19](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426858799).
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
