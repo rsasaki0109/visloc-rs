@@ -3060,7 +3060,7 @@ segment, the estimated baseline length, and the change in stereo offset
 in mm. Use `--fix-stereo-translation` to test what rotation and focal
 drift achieve with the factory baseline vector held fixed.
 `loop-correct` and `solve --fix-calib` use the saved translations.
-LaMAria control-point scores for this variant are pending.
+The full-sequence control-point comparison is in progress.
 
 To compare with the default chain, run the same training sequence with
 `--ba-chain` and then with `--ba-chain --ba-stereo-reference=0`, using
@@ -3131,6 +3131,25 @@ evaluator requires at least three control points with heights for its
 initial alignment. The two full-sequence comparisons were started on
 [sequence_3_17](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426102598)
 and [sequence_1_19](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426858799).
+
+### Short paired run on sequence_1_19
+
+The first 319.90 s were decoded from the VRS and reprojected to the released
+pinhole calibration. The two runs shared all 3,200 stereo pairs (10 Hz),
+the VIO, online trajectory, initial matches and temperature input.
+Both were scored before rematching. The experimental batch used
+`--ba-stereo-reference=0 --ba-stereo-paper-priors --ba-est-gyro-m`.
+
+| Batch setting | CP score | CP recall at 1 m |
+|---|---:|---:|
+| Default | 83.04 | 100% |
+| Time-varying stereo calibration with paper walk priors and gyro matrix | 80.70 | 100% |
+
+The official evaluator scored the six control points visible in the
+prefix. The larger batch model reduced the CP score by 2.34 points in
+this prefix. The corresponding
+[full-sequence comparison](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426858799)
+uses the ASL image stream.
 
 ## Usage
 
