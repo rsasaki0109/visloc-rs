@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from bonn_estimated_poses import export_visit, merge_trial, pose_rmse
+from change_loop_gate import select_by_local_change
 from eval_bonn_map_changes import INTRINSICS, Sequence, evaluate_map, select_frames
 from loop_depth_gate import audit_loop, score_validation_depth, se3, select_depth_variant, validation_pairs
 
@@ -91,6 +92,12 @@ def compare_poses(pair, sequences, work, tools, separation, level_from_depth, le
         result["validation_depth"] = {
             "frame_pairs": pairs, "mean_agreement": scores, "preferred": select_depth_variant(scores, len(pairs)),
         }
+        local_options = ("session_alignment", "short_baseline_loops")
+        depth_paths = [{int(path.stem): path for _, path in samples} for _, samples in visits]
+        result["local_change_selection"] = select_by_local_change(
+            pairs, {name: poses_by_variant[name] for name in local_options}, depth_paths, INTRINSICS,
+            {name: scores[name] for name in local_options},
+        )
     if level_from_depth:
         result["depth_floor_support"] = [
             json.loads((run[0].parent / "depth_floor.json").read_text()) for run in runs

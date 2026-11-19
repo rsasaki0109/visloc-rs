@@ -13,6 +13,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation, Slerp
 import yaml
 
+from change_loop_gate import select_by_local_change
 from bonn_estimated_poses import export_visit, merge_trial, pose_rmse
 from eval_bonn_map_changes import evaluate_map, select_frames
 from loop_depth_gate import score_validation_depth, select_depth_variant, validation_pairs
@@ -182,6 +183,8 @@ def compare(pair, root, tools, work):
                   for name, poses in by_variant.items()}
     result["selection"] = {"frame_pairs": pairs, "mean_agreement": agreements,
                            "preferred": select_depth_variant(agreements, len(pairs))}
+    paths = [{int(path.stem): path for _, path in samples} for _, samples in visits]
+    result["change_selection"] = select_by_local_change(pairs, by_variant, paths, intrinsics, agreements)
     return result
 
 

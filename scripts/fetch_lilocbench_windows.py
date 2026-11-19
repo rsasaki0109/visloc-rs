@@ -17,7 +17,8 @@ import numpy as np
 from rgbd_map_cloud import nearest
 
 ROOT_URL = "https://www.ipb.uni-bonn.de/html/projects/localization_benchmark/data"
-ARCHIVE_BYTES = {"mapping": 18271426492, "lt_changes_0": 10008762359}
+ARCHIVE_BYTES = {"mapping": 18271426492, "lt_changes_0": 10008762359,
+                 "lt_changes_dynamics_0": 12940694854}
 CAMERA = "camera_front"
 CALIBRATION = (
     "transformations.yaml", f"{CAMERA}/color/intrinsics.yaml", f"{CAMERA}/depth/intrinsics.yaml",

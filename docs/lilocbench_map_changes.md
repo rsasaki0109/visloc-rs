@@ -44,3 +44,5 @@ OPENBLAS_NUM_THREADS=1 python scripts/eval_lilocbench_changes.py \
   --data /path/to/liloc --annotations benchmarks/lilocbench/corridor_labels.json \
   --map-tools target/release/examples --out runs/lilocbench_corridor.json
 ```
+
+The follow-up compares local change confirmation on LILocBench and Bonn, reopens an updated map on a third visit, and measures person exclusion and cross-season correspondence. [Public revisit follow-up](public_lifelong_slam_followup.md)

@@ -1,0 +1,21 @@
+{
+  "captures": ["2023-08-18", "2024-01-13"],
+  "camera": "realsense_D435i",
+  "pairs": [
+    {"summer_s": 75, "winter_s": 210, "overlap": true, "landmark": "garden chain-link fence"},
+    {"summer_s": 120, "winter_s": 0, "overlap": true, "landmark": "gap between shed and house"},
+    {"summer_s": 150, "winter_s": 165, "overlap": true, "landmark": "red shed corner"},
+    {"summer_s": 315, "winter_s": 105, "overlap": true, "landmark": "two windows on the white wall"},
+    {"summer_s": 60, "winter_s": 165, "overlap": false},
+    {"summer_s": 75, "winter_s": 60, "overlap": false},
+    {"summer_s": 105, "winter_s": 165, "overlap": false},
+    {"summer_s": 120, "winter_s": 105, "overlap": false},
+    {"summer_s": 150, "winter_s": 75, "overlap": false},
+    {"summer_s": 315, "winter_s": 210, "overlap": false}
+  ],
+  "same_season_controls": [
+    {"capture": "summer", "first_s": 60, "second_s": 270, "landmark": "white facade next to the total station"},
+    {"capture": "summer", "first_s": 120, "second_s": 225, "landmark": "gap between shed and house"},
+    {"capture": "winter", "first_s": 0, "second_s": 135, "landmark": "gap between shed and house"}
+  ]
+}

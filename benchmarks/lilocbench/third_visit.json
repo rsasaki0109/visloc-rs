@@ -1,0 +1,10 @@
+{
+  "maps": [
+    {
+      "name": "corridor_box",
+      "visits": [
+        {"sequence": "lt_changes_dynamics_0", "capture_seconds": [79, 91]}
+      ]
+    }
+  ]
+}

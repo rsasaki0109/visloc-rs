@@ -1,0 +1,503 @@
+{
+  "visits": [
+    "mapping",
+    "lt_changes_0",
+    "lt_changes_dynamics_0"
+  ],
+  "capture_start_s": [
+    1733376456.6759636,
+    1733413895.5836532,
+    1733492006.1362622
+  ],
+  "saved_update": {
+    "initial_voxels": 18247,
+    "updated_voxels": 18006,
+    "additions": 749,
+    "removals": 990,
+    "annotated_stable_voxels_added": 2,
+    "annotated_stable_voxels_removed": 197
+  },
+  "registration": {
+    "anchor_session": 0,
+    "cost_after": 0.0,
+    "cost_before": 0.0,
+    "failed_pairs": [],
+    "iterations": 0,
+    "keyframe_refinement": {
+      "applied": true,
+      "excluded_loops": [],
+      "gravity_projected_cost": 0.00020093486518787398,
+      "initial_cost": 0.0003405674136639906,
+      "max_keyframe_correction_m": 0.009623706366121556,
+      "min_separation_m": 0.35,
+      "pairs": [
+        {
+          "anchored_candidates": 36,
+          "base": 0,
+          "image_pairs": [
+            [
+              34,
+              31
+            ],
+            [
+              2,
+              4
+            ],
+            [
+              20,
+              17
+            ],
+            [
+              27,
+              25
+            ],
+            [
+              7,
+              9
+            ],
+            [
+              16,
+              13
+            ]
+          ],
+          "localized_queries": 36,
+          "measurements": [
+            {
+              "anchor_inliers": 36,
+              "base_image": 34,
+              "mean_reprojection_error_px": 1.0903914395757281,
+              "pnp_inliers": 57,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9984348726223331,
+                  -0.0007218550080969888,
+                  -0.05590922652360042,
+                  -0.0012010189444543462
+                ],
+                "translation": [
+                  0.09381180033579839,
+                  -0.00649432143067874,
+                  0.18061916467997108
+                ]
+              },
+              "query_image": 31
+            },
+            {
+              "anchor_inliers": 20,
+              "base_image": 2,
+              "mean_reprojection_error_px": 0.8868446279956601,
+              "pnp_inliers": 29,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9998279658747291,
+                  0.001197454455917707,
+                  -0.01777017852788737,
+                  -0.005179335161468984
+                ],
+                "translation": [
+                  -0.260026788717465,
+                  0.008919836353142863,
+                  -0.27142856551097516
+                ]
+              },
+              "query_image": 4
+            },
+            {
+              "anchor_inliers": 18,
+              "base_image": 20,
+              "mean_reprojection_error_px": 1.3502238776769968,
+              "pnp_inliers": 26,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9999479129738107,
+                  0.005094118671791548,
+                  -0.008787369675166967,
+                  -0.001001712768483043
+                ],
+                "translation": [
+                  -0.24017250349134622,
+                  -0.034860561679340485,
+                  0.22380749113225917
+                ]
+              },
+              "query_image": 17
+            },
+            {
+              "anchor_inliers": 18,
+              "base_image": 27,
+              "mean_reprojection_error_px": 1.8203008827993687,
+              "pnp_inliers": 42,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9903699772262842,
+                  -0.003059766581124612,
+                  -0.1384001432382324,
+                  -0.0018293137824637595
+                ],
+                "translation": [
+                  -0.03340298508670703,
+                  0.006978208513956696,
+                  0.08625312742957547
+                ]
+              },
+              "query_image": 25
+            },
+            {
+              "anchor_inliers": 16,
+              "base_image": 7,
+              "mean_reprojection_error_px": 1.342429888044453,
+              "pnp_inliers": 29,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9999222780314098,
+                  0.0046324567799460314,
+                  -0.008722745954035271,
+                  -0.007608675553535532
+                ],
+                "translation": [
+                  -0.24756476764599178,
+                  -0.0065675151339403826,
+                  -0.23950100475994596
+                ]
+              },
+              "query_image": 9
+            },
+            {
+              "anchor_inliers": 6,
+              "base_image": 16,
+              "mean_reprojection_error_px": 1.0809067910876111,
+              "pnp_inliers": 14,
+              "query_camera_from_base_camera": {
+                "quaternion_wxyz": [
+                  -0.9999642346329822,
+                  0.0031288457901899602,
+                  -0.00612110139983732,
+                  -0.004926651656965958
+                ],
+                "translation": [
+                  -0.23039110044002697,
+                  -0.02124907236418272,
+                  0.33477766172851986
+                ]
+              },
+              "query_image": 13
+            }
+          ],
+          "pose_consistent": 36,
+          "query": 1,
+          "query_frames": 37,
+          "rejected": {
+            "spatial_separation": 30
+          },
+          "selected": 6,
+          "spatially_separated": 6
+        }
+      ],
+      "retriangulated": 1058,
+      "selected_loops": 6,
+      "solver_cost": 0.0001566092980684408
+    },
+    "mode": "gravity_aligned_yaw_translation",
+    "pairs": [
+      {
+        "agreeing_keyframes": 36,
+        "base_from_other": {
+          "quaternion_wxyz": [
+            0.08388168984467255,
+            0.0,
+            0.0,
+            0.9964757207823993
+          ],
+          "translation": [
+            180.15791022650274,
+            -203.07907926260725,
+            -0.004884939797763919
+          ]
+        },
+        "base_session": 0,
+        "final_residual": {
+          "translation_m": 0.0,
+          "weight": 1.0,
+          "yaw_deg": 0.0
+        },
+        "forward_error": null,
+        "keyframe_rms_m": 0.02427824132001659,
+        "keyframes": 37,
+        "localized_keyframes": 36,
+        "measurement_base_session": 0,
+        "measurement_query_session": 1,
+        "other_session": 1
+      }
+    ],
+    "session_count": 2,
+    "translation_scale_m": 0.25,
+    "yaw_scale_deg": 2.0
+  },
+  "third_visit": {
+    "initial": {
+      "attempts": 49,
+      "localized": 15,
+      "translation_rmse_m": 0.01625104707880407,
+      "rotation_rmse_deg": 0.3530756895465141,
+      "geometry": {
+        "reloaded_surface_voxels": 18247,
+        "known_visit_two_box_voxels_stored": 0,
+        "known_visit_two_box_voxels_now_observed_free": 0,
+        "stored_stable_voxels": 1834,
+        "stable_voxels_falsely_observed_free": 293
+      }
+    },
+    "updated": {
+      "attempts": 49,
+      "localized": 12,
+      "translation_rmse_m": 0.019995011506135647,
+      "rotation_rmse_deg": 0.3981040578245704,
+      "geometry": {
+        "reloaded_surface_voxels": 18006,
+        "known_visit_two_box_voxels_stored": 47,
+        "known_visit_two_box_voxels_now_observed_free": 16,
+        "stored_stable_voxels": 1639,
+        "stable_voxels_falsely_observed_free": 130
+      }
+    },
+    "updated_with_wheel_fallback": {
+      "reloaded_surface_voxels": 18006,
+      "known_visit_two_box_voxels_stored": 47,
+      "known_visit_two_box_voxels_now_observed_free": 47,
+      "stored_stable_voxels": 1639,
+      "stable_voxels_falsely_observed_free": 118
+    }
+  },
+  "third_visit_reference_pose_geometry": {
+    "reloaded_surface_voxels": 18006,
+    "known_visit_two_box_voxels_stored": 47,
+    "known_visit_two_box_voxels_now_observed_free": 43,
+    "stored_stable_voxels": 1639,
+    "stable_voxels_falsely_observed_free": 112
+  },
+  "occlusion_motion": {
+    "summary": {
+      "visual_only": {
+        "labeled_frames_with_pose": 2,
+        "precision": 0.980009519276535,
+        "recall": 0.4079489618006023,
+        "f1": 0.5760890853641476,
+        "localized": 12,
+        "translation_rmse_m": 0.019995011506135647,
+        "rotation_rmse_deg": 0.3981040578245704
+      },
+      "visual_with_wheel_fallback": {
+        "labeled_frames_with_pose": 8,
+        "precision": 0.7304337435774884,
+        "recall": 0.9689332699318434,
+        "f1": 0.8329472680201663,
+        "localized": 49,
+        "translation_rmse_m": 0.022319168413025652,
+        "rotation_rmse_deg": 0.48984796321963486
+      },
+      "reference_poses": {
+        "labeled_frames_with_pose": 8,
+        "precision": 0.7062920927012878,
+        "recall": 0.9703399904897765,
+        "f1": 0.8175239748608247,
+        "localized": 49,
+        "translation_rmse_m": 9.579756833596251e-16,
+        "rotation_rmse_deg": 2.149424549271057e-16
+      }
+    },
+    "frames": {
+      "4": {
+        "target": "walking",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": true,
+            "tp": 14434,
+            "fp": 342,
+            "fn": 1568
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 14434,
+            "fp": 342,
+            "fn": 1568
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 14505,
+            "fp": 366,
+            "fn": 1497
+          }
+        },
+        "scored_depth_pixels": 32100
+      },
+      "8": {
+        "target": "walking",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": true,
+            "tp": 6156,
+            "fp": 78,
+            "fn": 0
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 6156,
+            "fp": 78,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 6156,
+            "fp": 84,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 15264
+      },
+      "12": {
+        "target": "walking",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 2636
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 2636,
+            "fp": 293,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 2636,
+            "fp": 399,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 7776
+      },
+      "16": {
+        "target": "walking",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 770
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 770,
+            "fp": 395,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 770,
+            "fp": 392,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 6571
+      },
+      "20": {
+        "target": "standing",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 963
+      },
+      "28": {
+        "target": "standing",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 3009
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 3009,
+            "fp": 2677,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 3009,
+            "fp": 2873,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 11461
+      },
+      "36": {
+        "target": "standing",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 6113
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 6113,
+            "fp": 5983,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 6113,
+            "fp": 6116,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 19777
+      },
+      "44": {
+        "target": "standing",
+        "outcomes": {
+          "visual_only": {
+            "has_pose": false,
+            "tp": 0,
+            "fp": 0,
+            "fn": 15786
+          },
+          "visual_with_wheel_fallback": {
+            "has_pose": true,
+            "tp": 15786,
+            "fp": 8280,
+            "fn": 0
+          },
+          "reference_poses": {
+            "has_pose": true,
+            "tp": 15786,
+            "fp": 10136,
+            "fn": 0
+          }
+        },
+        "scored_depth_pixels": 29219
+      }
+    }
+  }
+}
