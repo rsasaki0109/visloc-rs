@@ -316,7 +316,7 @@ keyframe refinement.
 
 | Position RMSE with fixed office1-2 mocap alignment | Rigid | Keyframe refinement |
 |---|---:|---:|
-| All 1,345 camera-0 keyframes | 5.25 cm | 5.10 cm |
+| All 1,331 camera-0 keyframes associated with mocap | 5.25 cm | 5.10 cm |
 | 1,074 keyframes more than 1 s from a selected loop endpoint in their session | 5.15 cm | 4.96 cm |
 | office1-2 alone | 1.51 cm | 2.70 cm |
 | office1-6 alone | 6.25 cm | 7.09 cm |
