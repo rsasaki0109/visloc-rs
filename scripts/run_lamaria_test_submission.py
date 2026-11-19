@@ -608,6 +608,9 @@ def main() -> int:
     parser.add_argument("--ba-compare", "--ba-stereo-compare", dest="ba_compare", action="store_true",
                         help="also run the default batch pass from the same VIO, online trajectory and initial "
                              "matches, and save its estimates under --log-dir")
+    parser.add_argument("--ba-compare-camera-gyro", action="store_true",
+                        help="with --ba-compare, --ba-stereo-reference and --ba-est-gyro-m, also run the "
+                             "camera-only and gyro-only batch passes from the shared inputs")
     parser.add_argument("--ba-compare-stereo-translation", action="store_true",
                         help="with --ba-compare and --ba-stereo-fixed-translation, also estimate translation "
                              "with the same stereo settings and save the trajectory under --log-dir")
@@ -655,6 +658,11 @@ def main() -> int:
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m
                                      or args.ba_fuse_accelerometers)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
+    if args.ba_compare_camera_gyro and not (
+            args.ba_compare and args.ba_stereo_reference is not None and args.ba_est_gyro_m
+            and not args.ba_fuse_accelerometers):
+        parser.error("--ba-compare-camera-gyro requires --ba-compare, --ba-stereo-reference and --ba-est-gyro-m, "
+                     "without --ba-fuse-accelerometers")
     if args.ba_compare_stereo_translation and not (args.ba_compare and args.ba_stereo_fixed_translation):
         parser.error("--ba-compare-stereo-translation needs --ba-compare and --ba-stereo-fixed-translation")
 
@@ -831,6 +839,17 @@ def main() -> int:
                         share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
                                            **chain_options, pass_args=sequence_pass_args)
+                    if args.ba_compare_camera_gyro:
+                        camera_options = sequence_pass_args.copy()
+                        camera_options.remove("--est-gyro-m")
+                        for name, options in (("camera_only", camera_options), ("gyro_only", ["--est-gyro-m"])):
+                            variant_work = work / f"ba_{name}"
+                            share_ba_inputs(baseline_work, variant_work, None if low_light else learned)
+                            log(f"{seq}: {name} batch pass")
+                            variant = run_chain(*chain_args, variant_work, work / f"ba_{name}.tum",
+                                                **chain_options, pass_args=options)
+                            run([python, estimate_converter, "--in-tum", variant,
+                                 "--out-estimate", log_dir / f"{name}_estimate.txt"], check=True)
                     if args.ba_compare_stereo_translation:
                         free_work = work / "ba_free_translation"
                         share_ba_inputs(baseline_work, free_work, None if low_light else learned)
@@ -864,7 +883,9 @@ def main() -> int:
         finally:
             if args.log_dir:
                 for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_"),
-                                          (work / "ba_free_translation", "free_translation_")):
+                                          (work / "ba_free_translation", "free_translation_"),
+                                          (work / "ba_camera_only", "camera_only_"),
+                                          (work / "ba_gyro_only", "gyro_only_")):
                     for diagnostic in sorted([*directory.glob("*.log"), *directory.glob("*_summary.json")]):
                         (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(diagnostic, args.log_dir / seq / (prefix + diagnostic.name))
