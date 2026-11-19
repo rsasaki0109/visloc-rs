@@ -39,7 +39,8 @@ pub use correspondence::{
 };
 pub use keyframe_retrieval::KeyframeRetrieval;
 pub use map_merge::{
-    merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
+    inspect_map_registration, merge_maps, register_map, MapLoopCandidate, MapMergeConfig,
+    MapMergeError, MapRegistration, MapRegistrationInspection, MergedMap,
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
 pub use wheel_calibration::{

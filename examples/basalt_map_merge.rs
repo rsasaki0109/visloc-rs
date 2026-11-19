@@ -23,7 +23,12 @@
 //! world and how it was registered; `images.csv` says which session each image
 //! came from. A merged map can be the `--base` (or an `--add`) of another
 //! merge.
+//!
+//! With `--inspect-loops`, inspect registration between the original maps
+//! and write `loop_inspection.json` to the output directory without merging.
 
+#[path = "basalt_map/loop_inspection.rs"]
+mod loop_inspection;
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
 
@@ -40,6 +45,7 @@ struct Args {
     add: Vec<PathBuf>,
     out: PathBuf,
     config: MapMergeConfig,
+    inspect_loops: bool,
 }
 
 impl Args {
@@ -47,7 +53,8 @@ impl Args {
         "usage: basalt_map_merge --base DIR --add DIR [--add DIR ...] --out DIR \
          [--min-inliers N] [--min-keyframes N] [--max-hamming N] \
          [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N] \
-         [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M]"
+         [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M] \
+         [--inspect-loops]"
             .into()
     }
 
@@ -61,6 +68,7 @@ impl Args {
             base: PathBuf::new(),
             add: Vec::new(),
             out: PathBuf::new(),
+            inspect_loops: false,
             config: MapMergeConfig {
                 threads: std::thread::available_parallelism().map_or(1, usize::from),
                 ..MapMergeConfig::default()
@@ -84,6 +92,7 @@ impl Args {
                 "--base" => base = Some(PathBuf::from(value()?)),
                 "--add" => args.add.push(PathBuf::from(value()?)),
                 "--out" => out = Some(PathBuf::from(value()?)),
+                "--inspect-loops" => args.inspect_loops = true,
                 "--min-inliers" => config.min_inliers = number(&option, value()?)?,
                 "--retrieval-keyframes" => config.retrieval_keyframes = number(&option, value()?)?,
                 "--retrieval-bits" => config.retrieval_bits = number(&option, value()?)?,
@@ -132,6 +141,10 @@ fn same_rig(lhs: &[SE3], rhs: &[SE3]) -> bool {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.inspect_loops {
+        return loop_inspection::run(args);
+    }
+
     let mut merged = map_files::load(&args.base)?;
     let mut sessions = map_sessions(&merged, &args.base);
     let mut images = merged.images.clone();

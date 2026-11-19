@@ -765,6 +765,35 @@ against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
 better than the constraints a deformation would use. Where they do not
 (MH_04's far end), there is nothing to fit.
 
+### Inspecting cross-session loop candidates
+
+Run inspection on the original per-session maps before any landmark fusion:
+
+```bash
+target/release/examples/basalt_map_merge --inspect-loops \
+  --base runs/mh01_map --add runs/mh02_map --add runs/mh03_map \
+  --out runs/mh_loop_inspection
+python scripts/render_map_loop_inspection.py \
+  runs/mh_loop_inspection/loop_inspection.json --out runs/mh_loop_inspection/support.png
+```
+
+`loop_inspection.json` lists the input sessions and reports each map pair.
+Each PnP candidate names both image IDs (look them up in the corresponding
+`images.csv`), the transform from the base camera into the other camera,
+its inlier count, and mean reprojection error in pixels. PnP uses the
+candidate landmarks across the base map or retrieval shortlist. The base
+endpoint is the posed image observing the most distinct inliers, and the
+report records that image's support separately.
+
+Use the candidate camera centres and the span of the agreeing centres
+to inspect where the matches came from. The span is the maximum distance
+between those centres in the query session's frame. Each triangle with
+three registered pairs reports the translation and rotation difference
+between direct registration and the transform composed via the third map.
+A candidate that agrees with the rigid registration still needs loop
+verification before graph optimization. Pair failures are included in the
+report, and inspection leaves the input maps untouched.
+
 ### Lifelong use: appending each session
 
 A robot that maps each session (the SLAM's `--save-map`) and merges it into
