@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 import cv2
 import numpy as np
 from PIL import Image
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 
 from bonn_estimated_poses import rgbd_pose
 from eval_bonn_map_changes import (
@@ -46,7 +46,7 @@ def background_poses(sequence, recorded, proposals):
     detector = cv2.SIFT_create(nfeatures=1200)
     matcher = cv2.BFMatcher(cv2.NORM_L2)
     y, x = np.mgrid[:480, :640]
-    poses, status, history = {}, {}, []
+    poses, status, history, features = {}, {}, [], {}
     for frame in recorded:
         time = sequence.times[frame]
         try:
@@ -57,6 +57,7 @@ def background_poses(sequence, recorded, proposals):
         gray = cv2.cvtColor(sequence.rectify(sequence.rgb_paths[rgb_id]), cv2.COLOR_RGB2GRAY)
         available = ~motion_box_masks(proposals.get(frame, []), x, y)
         current = detector.detectAndCompute(gray, available.astype(np.uint8) * 255)
+        features[frame] = current
         measured = None
         if current[1] is not None:
             if not history:
@@ -89,7 +90,83 @@ def background_poses(sequence, recorded, proposals):
         if prediction is not None:
             poses[frame] = prediction
         status[frame] = "predicted" if prediction is not None else "unavailable"
-    return poses, status
+    return poses, status, history, features
+
+
+def bridge_pose_gaps(sequence, poses, status):
+    """Offline reprocessing after the background becomes visible again."""
+    estimates = dict(poses)
+    sources = dict(status)
+    anchors = [i for i in sorted(poses) if status[i] == "measured"]
+    for left, right in zip(anchors, anchors[1:]):
+        start, end = sequence.times[[left, right]]
+        before, after = poses[left], poses[right]
+        delta = Rotation.from_matrix(before[:3, :3].T @ after[:3, :3])
+        if end - start > 5.0 or np.linalg.norm(after[:3, 3] - before[:3, 3]) > 0.5 or delta.magnitude() > np.deg2rad(45):
+            continue
+        orientations = Slerp([start, end], Rotation.from_matrix([before[:3, :3], after[:3, :3]]))
+        for frame in sorted(set(status) & set(range(left + 1, right))):
+            time = sequence.times[frame]
+            alpha = (time - start) / (end - start)
+            pose = np.eye(4)
+            pose[:3, :3] = orientations(time).as_matrix()
+            pose[:3, 3] = (1 - alpha) * before[:3, 3] + alpha * after[:3, 3]
+            estimates[frame] = pose
+            sources[frame] = "bridged"
+    return estimates, sources
+
+
+def relocalize_missing(sequence, estimates, sources, history, features, targets):
+    """Recover poses against two consistent background views after reprocessing."""
+    poses, states = dict(estimates), dict(sources)
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    for frame in targets:
+        query = features.get(frame)
+        if query is None or query[1] is None or sources.get(frame) == "measured":
+            continue
+        time = sequence.times[frame]
+        recent = sorted(history, key=lambda h: abs(h[0] - time))[:12]
+        accepted = []
+        for stamp, pose, reference, depth in recent:
+            try:
+                relative, support = rgbd_pose(reference, query, depth, INTRINSICS, matcher)
+            except (ValueError, cv2.error):
+                continue
+            if support < 15:
+                continue
+            hypothesis = pose @ relative
+            for previous_stamp, previous in accepted:
+                offset = np.linalg.inv(previous) @ hypothesis
+                if (abs(previous_stamp - stamp) >= 0.15 and np.linalg.norm(offset[:3, 3]) <= 0.04
+                        and Rotation.from_matrix(offset[:3, :3]).magnitude() <= np.deg2rad(2)):
+                    poses[frame] = hypothesis
+                    states[frame] = "relocalized"
+                    break
+            if states.get(frame) == "relocalized":
+                break
+            accepted.append((stamp, hypothesis))
+    return poses, states
+
+
+def motion_pose_quality(pose_sources, rgbd, status, targets):
+    anchor_frame = next((i for i in sorted(rgbd) if status[i] == "measured"), None)
+    if anchor_frame is None:
+        return {}
+    reference = {i: pose for i, (pose, _) in rgbd.items()}
+    anchor = reference[anchor_frame] @ np.linalg.inv(pose_sources["estimated"][anchor_frame])
+    result = {}
+    for name, poses in pose_sources.items():
+        if name == "mocap":
+            continue
+        available = sorted(targets & poses.keys() & reference.keys())
+        deltas = [np.linalg.inv(reference[i]) @ anchor @ poses[i] for i in available]
+        result[name] = {
+            "frames": available,
+            "translation_error_m": [float(np.linalg.norm(delta[:3, 3])) for delta in deltas],
+            "rotation_error_deg": [float(np.degrees(Rotation.from_matrix(delta[:3, :3]).magnitude()))
+                                   for delta in deltas],
+        }
+    return result
 
 
 def background_rows(sequence, work, required, proposals):
@@ -132,9 +209,19 @@ def evaluate(sequence, labels, baseline, work):
         raise ValueError("the Basalt report does not match the supplied labels")
     proposals = {i: list(annotation_proposals(item)) for i, item in labels.items()}
     rgbd, ref_frames, mask_dir = background_rows(sequence, work, set(labels), proposals)
-    estimated, status = background_poses(sequence, sorted(rgbd), proposals)
+    eligible = {
+        frame: {d["object_id"] for d in row["decisions"]
+                if not d["moving"] and d["evidence"] in ("missing_background", "missing_object_and_background")}
+        for frame, row in frames.items()
+    }
+    targets = {i for i, ids in eligible.items() if ids}
+    estimated, status, history, features = background_poses(sequence, sorted(rgbd), proposals)
+    bridged, bridge_status = bridge_pose_gaps(sequence, estimated, status)
+    recovered, recovered_status = relocalize_missing(sequence, bridged, bridge_status, history, features, targets)
     pose_sources = {
         "estimated": estimated,
+        "offline_bridged": bridged,
+        "offline_relocalized": recovered,
         "mocap": {i: pose for i, (pose, _) in rgbd.items()},
     }
     y, x = np.mgrid[:480:DEPTH_STRIDE, :640:DEPTH_STRIDE]
@@ -148,13 +235,12 @@ def evaluate(sequence, labels, baseline, work):
         valid &= ~polygon_mask(item.get("ignore", []))[y, x]
         truth.append((mask[y, x] != 0)[valid])
         base = motion_box_masks([r for r in proposals[frame] if r[0] in row["confirmed_object_ids"]], x, y)
-        fallback_ids = {d["object_id"] for d in row["decisions"]
-                        if not d["moving"] and d["evidence"] in ("missing_background", "missing_object_and_background")}
+        fallback_ids = eligible[frame]
         candidate = motion_box_masks([r for r in proposals[frame] if r[0] in fallback_ids], x, y) & ~base
         prior = [i for i in ref_frames if 0 < sequence.times[frame] - sequence.times[i] <= REFERENCE_AGE]
         outputs["baseline"].append(base[valid])
         detail = {"frame": frame, "fallback_proposals": sorted(fallback_ids), "estimated_pose": status.get(frame),
-                  "results": {}}
+                  "offline_pose": bridge_status.get(frame), "relocalized_pose": recovered_status.get(frame), "results": {}}
         for name, poses in pose_sources.items():
             # Use measured poses for the reference map. Extrapolation serves only at the query.
             references = [(poses[i], rgbd[i][1]) for i in prior
@@ -171,7 +257,9 @@ def evaluate(sequence, labels, baseline, work):
             }
         details.append(detail)
     return {"sequence": sequence.root.name, "stride_px": DEPTH_STRIDE, "clear_margin_m": CLEAR_MARGIN_M,
-            "estimated_pose_coverage": dict(Counter(status.values())), "frames": details,
+            "estimated_pose_coverage": dict(Counter(status.values())),
+            "offline_pose_coverage": dict(Counter(bridge_status.values())),
+            "fallback_pose_quality": motion_pose_quality(pose_sources, rgbd, status, targets), "frames": details,
             "scores": {name: precision_recall(np.concatenate(truth), np.concatenate(prediction))
                        for name, prediction in outputs.items()}}
 

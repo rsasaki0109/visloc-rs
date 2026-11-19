@@ -46,6 +46,8 @@ With inferred poses, every fallback target was unlocalized on the development se
 
 [Development pixel counts](../benchmarks/bonn/development_depth_motion_results.json) · [Holdout pixel counts](../benchmarks/bonn/holdout_depth_motion_results.json)
 
+The follow-up measures the contribution of each loop, tests depth-based solution selection on OpenLORIS, and tries offline motion pose recovery. [Loop influence and motion poses](loop_influence_and_motion_pose.md)
+
 ## Reproduce
 
 Use the archives and dependencies listed in the previous Bonn evaluation. Build the map exporter and the map merge example. [Input hashes and downloads](bonn_map_followup.md#reproduce)

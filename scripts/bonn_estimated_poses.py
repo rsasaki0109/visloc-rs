@@ -161,10 +161,12 @@ def loop_closed_poses(visits, intrinsics, work, map_builder, map_merge, repeats)
         yield merge_trial(visits, runs, work / f"merged_{trial}", map_merge)
 
 
-def merge_trial(visits, runs, merged, map_merge, *, refine=True, separation=None):
+def merge_trial(visits, runs, merged, map_merge, *, refine=True, separation=None, exclude=()):
     flags = ["--refine-keyframes"] if refine else []
     if separation is not None:
         flags.extend(["--keyframe-loop-min-separation-m", str(separation)])
+    for key in exclude:
+        flags.extend(["--exclude-keyframe-loop", ":".join(map(str, key))])
     run_binary(
         map_merge, "--base", runs[0][0], "--add", runs[1][0], "--out", merged,
         "--optimize-sessions", "--threads", "1", "--min-inliers", "10", *flags,

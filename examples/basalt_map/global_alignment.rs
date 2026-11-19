@@ -10,6 +10,7 @@ pub(super) fn solve(
     maps: &mut [SavedMap],
     config: &MapMergeConfig,
     keyframe_loop_min_separation_m: Option<f64>,
+    excluded_keyframe_loops: &std::collections::BTreeSet<[u64; 4]>,
 ) -> Result<(SessionAlignment, Value), Box<dyn std::error::Error>> {
     let mut constraints = Vec::new();
     let mut pair_reports = Vec::new();
@@ -121,6 +122,7 @@ pub(super) fn solve(
             &directions,
             config,
             min_separation_m,
+            excluded_keyframe_loops,
         )?;
     }
     Ok((alignment, report))

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use serde_json::{json, Value};
@@ -53,6 +53,7 @@ pub(super) fn refine(
     directions: &[(usize, usize)],
     config: &MapMergeConfig,
     min_separation_m: f64,
+    excluded_loops: &BTreeSet<[u64; 4]>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let mut graph = PoseGraph::new();
     let mut frames = Vec::new();
@@ -119,6 +120,7 @@ pub(super) fn refine(
     }
 
     let mut selected = 0;
+    let mut matched_exclusions = BTreeSet::new();
     let mut pairs = Vec::new();
     let mut refined_sessions = vec![false; maps.len()];
     for (edge_index, &(base, query)) in directions.iter().enumerate() {
@@ -149,6 +151,7 @@ pub(super) fn refine(
         });
         let mut chosen: Vec<PoseGraphEdge> = Vec::new();
         let mut image_pairs = Vec::new();
+        let mut measurements = Vec::new();
         let mut rejected = BTreeMap::<&str, usize>::new();
         let mut pose_consistent = 0;
         for candidate in &candidates {
@@ -212,27 +215,51 @@ pub(super) fn refine(
                 information: None,
             });
             image_pairs.push([candidate.base_keyframe_id, candidate.other_keyframe_id]);
+            measurements.push(json!({
+                "base_image": candidate.base_keyframe_id,
+                "query_image": candidate.other_keyframe_id,
+                "query_camera_from_base_camera": super::map_files::se3_json(&candidate.other_camera_from_base_camera),
+                "anchor_inliers": candidate.base_keyframe_inliers,
+                "pnp_inliers": candidate.inlier_count,
+                "mean_reprojection_error_px": candidate.mean_reprojection_error_px,
+            }));
         }
         let spatially_separated = chosen.len();
-        let count = if chosen.len() >= 2 {
-            let count = chosen.len();
-            graph.edges.extend(chosen);
+        let mut retained = Vec::new();
+        let mut retained_images = Vec::new();
+        for (edge, [a, b]) in chosen.into_iter().zip(image_pairs) {
+            let id = [base as u64, query as u64, a, b];
+            if excluded_loops.contains(&id) {
+                matched_exclusions.insert(id);
+            } else {
+                retained.push(edge);
+                retained_images.push([a, b]);
+            }
+        }
+        let count = if retained.len() >= 2 {
+            let count = retained.len();
+            graph.edges.extend(retained);
             refined_sessions[base] = true;
             refined_sessions[query] = true;
             count
         } else {
-            image_pairs.clear();
+            retained_images.clear();
             0
         };
         selected += count;
         pairs.push(json!({
-            "base": base, "query": query, "selected": count, "image_pairs": image_pairs,
+            "base": base, "query": query, "selected": count, "image_pairs": retained_images, "measurements": measurements,
             "query_frames": query_frames, "localized_queries": localized_queries,
             "anchored_candidates": candidate_count, "pose_consistent": pose_consistent,
             "spatially_separated": spatially_separated, "rejected": rejected,
         }));
     }
-    let mut report = json!({"selected_loops": selected, "pairs": pairs, "retriangulated": 0,
+    if let Some(id) = excluded_loops.difference(&matched_exclusions).next() {
+        return Err(
+            format!("excluded keyframe loop was not present in the selected set: {id:?}").into(),
+        );
+    }
+    let mut report = json!({"excluded_loops": matched_exclusions, "selected_loops": selected, "pairs": pairs, "retriangulated": 0,
                            "min_separation_m": min_separation_m, "applied": false});
     if selected == 0 {
         println!("keyframe refinement: no spatially separated loop measurements");
