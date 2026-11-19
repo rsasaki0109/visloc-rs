@@ -57,7 +57,14 @@ jobs:
 
       - name: Build upstream as published
         shell: bash
-        run: docker build --progress=plain -t slam-dunk-benchmark upstream
+        run: |
+          for attempt in 1 2 3; do
+            if docker build --progress=plain -t slam-dunk-benchmark upstream; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep 30; fi
+          done
+          exit 1
 
       - name: Prepare one shared frontend packet
         shell: bash
