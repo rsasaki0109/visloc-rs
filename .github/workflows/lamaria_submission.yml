@@ -29,6 +29,11 @@ on:
         type: string
         default: ""
 
+      score_control_points:
+        description: Score estimates against the official training control points
+        type: boolean
+        default: false
+
 env:
   SPLIT: ${{ inputs.split }}
 
@@ -141,6 +146,45 @@ jobs:
             --threads 4 --ba-jobs 4 --ba-threads 2 \
             --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs $DRIVER_ARGS
           test -s out/slam/${{ matrix.sequence }}.txt
+
+      - name: Score control points
+        shell: bash
+        if: inputs.score_control_points && inputs.split == 'training'
+        env:
+          SEQUENCE: ${{ matrix.sequence }}
+        run: |
+          evaluator="$RUNNER_TEMP/lamaria-eval"
+          git init -q "$evaluator"
+          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          python -m pip install --quiet --disable-pip-version-check \
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
+
+          results="out/logs/$SEQUENCE"
+          refs="$RUNNER_TEMP/lamaria-reference"
+          mkdir -p "$results" "$refs"
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          curl -fsSL --retry 3 "$data/ground_truth/sparse/$SEQUENCE.json" -o "$refs/control_points.json"
+          curl -fsSL --retry 3 "$data/aria_calibrations/training/$SEQUENCE.json" -o "$refs/calibration.json"
+
+          {
+            printf '### %s control-point evaluation\n\n' "$SEQUENCE"
+            printf '| Estimate | CP score | Recall at 1 m (%%) |\n|---|---:|---:|\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for estimate in "out/slam/$SEQUENCE.txt" "$results/baseline_estimate.txt" "$results/free_translation_estimate.txt"; do
+            if [ ! -f "$estimate" ]; then continue; fi
+            label=$(basename "$estimate" .txt)
+            if [ "$estimate" = "out/slam/$SEQUENCE.txt" ]; then label=selected_setting; fi
+            log="$results/cp_$label.log"
+            python "$evaluator/evaluate_wrt_control_points.py" --estimate "$estimate" \
+              --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
+              --corresponding_sensor imu --output_path "$results/cp_$label" 2>&1 | tee "$log"
+            score=$(sed -n 's/.*CP Score: //p' "$log")
+            recall=$(sed -n 's/.*CP Recall @ 1m: //p' "$log")
+            test -n "$score"
+            test -n "$recall"
+            printf '| %s | %s | %s |\n' "$label" "$score" "$recall" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Upload the estimate
         if: always()

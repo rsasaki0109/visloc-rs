@@ -3076,6 +3076,13 @@ with the same VIO, online trajectory and initial matches. Compare
 `baseline_ba2_estimate.txt` with `ba2_estimate.txt` to measure the change
 before each variant's trajectory guides its own rematch. With rematch
 enabled, compare `baseline_estimate.txt` with the final estimate as well.
+With `--ba-stereo-fixed-translation --ba-compare --ba-compare-stereo-translation`,
+the driver also runs the same 5 s stereo model with free translation and
+saves `free_translation_estimate.txt`. Use `--no-ba-rematch` to compare
+all three from the same initial matches without a separate rematching pass.
+The training workflow's `score_control_points` input publishes CP score and
+1 m recall for each estimate in the Actions summary.
+
 For an existing VIO trajectory, use `lamaria_ba_chain.py
 --pass-args="--stereo-reference 0 --ext-seg-seconds 5"` and a fresh
 `--work` directory. The chain reuses completed passes when their output

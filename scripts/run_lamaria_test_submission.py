@@ -608,6 +608,9 @@ def main() -> int:
     parser.add_argument("--ba-compare", "--ba-stereo-compare", dest="ba_compare", action="store_true",
                         help="also run the default batch pass from the same VIO, online trajectory and initial "
                              "matches, and save its estimates under --log-dir")
+    parser.add_argument("--ba-compare-stereo-translation", action="store_true",
+                        help="with --ba-compare and --ba-stereo-fixed-translation, also estimate translation "
+                             "with the same stereo settings and save the trajectory under --log-dir")
     parser.add_argument("--ba-temperature", action=argparse.BooleanOptionalAction, default=True,
                         help="--ba-chain: on --ba-temperature-tracks by day, fetch the SLAM cameras' temperature "
                              "from the .vrs and let the pass estimate the gyroscope's bias and scale change per "
@@ -652,6 +655,8 @@ def main() -> int:
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m
                                      or args.ba_fuse_accelerometers)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
+    if args.ba_compare_stereo_translation and not (args.ba_compare and args.ba_stereo_fixed_translation):
+        parser.error("--ba-compare-stereo-translation needs --ba-compare and --ba-stereo-fixed-translation")
 
     args.config = args.config or (BA_CHAIN_CONFIG if args.ba_chain else DEFAULT_CONFIG)
     low_light_arg = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
@@ -826,6 +831,17 @@ def main() -> int:
                         share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
                                            **chain_options, pass_args=sequence_pass_args)
+                    if args.ba_compare_stereo_translation:
+                        free_work = work / "ba_free_translation"
+                        share_ba_inputs(baseline_work, free_work, None if low_light else learned)
+                        free_options = sequence_pass_args.copy()
+                        free_options.remove("--fix-stereo-translation")
+                        free = run_chain(*chain_args, free_work, work / "ba_free_translation.tum",
+                                         **chain_options, pass_args=free_options)
+                        for source, name in ((free, "free_translation_estimate.txt"),
+                                             (free_work / "ba2.tum", "free_translation_ba2_estimate.txt")):
+                            run([python, estimate_converter, "--in-tum", source,
+                                 "--out-estimate", log_dir / name], check=True)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     if args.ba_compare or args.ba_fuse_accelerometers:
                         raise
@@ -847,7 +863,8 @@ def main() -> int:
             experiment_failed |= args.ba_compare or args.ba_fuse_accelerometers
         finally:
             if args.log_dir:
-                for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_")):
+                for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_"),
+                                          (work / "ba_free_translation", "free_translation_")):
                     for diagnostic in sorted([*directory.glob("*.log"), *directory.glob("*_summary.json")]):
                         (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(diagnostic, args.log_dir / seq / (prefix + diagnostic.name))
