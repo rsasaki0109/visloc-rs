@@ -1,266 +1,184 @@
-name: visloc-rs camera and gyroscope ablation
+name: Control-point diagnostics for the LaMAria calibration ablation
 
 on:
   push:
-    branches: [benchmark/visloc-camera-gyro]
+    branches: [benchmark/visloc-cp-diagnostics]
 
 permissions:
   contents: read
-
-env:
-  SPLIT: training
+  actions: read
 
 jobs:
-  plan:
+  diagnose:
     runs-on: ubuntu-24.04
-    outputs:
-      sequences: ${{ steps.plan.outputs.sequences }}
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - id: plan
-        name: Sequences
-        env:
-          SEQUENCES: sequence_1_19 sequence_3_17
-        run: |
-          python -m pip install --quiet --disable-pip-version-check numpy==2.5.3
-          python - <<'EOF' >> "$GITHUB_OUTPUT"
-          import json, os, re, sys
-          sys.path.insert(0, "scripts")
-          from run_lamaria_test_submission import TRACK_COUNTS, track_sequences
-          seqs = os.environ["SEQUENCES"].split()
-          if not seqs and os.environ["SPLIT"] == "test":
-              seqs = track_sequences(TRACK_COUNTS)
-          if not seqs or any(not re.fullmatch(r"sequence_[1-5]_\d+", s) for s in seqs):
-              sys.exit(f"bad sequences: {seqs}")
-          print("sequences=" + json.dumps(seqs))
-          EOF
-
-  build:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: lamaria-release-rt
-
-      - name: Build the VIO
-        run: cargo build --locked --profile release-rt --example basalt_euroc_vio_demo
-
-      - name: Upload the VIO
-        uses: actions/upload-artifact@v7
-        with:
-          name: basalt-euroc-vio-demo
-          path: target/release-rt/examples/basalt_euroc_vio_demo
-          if-no-files-found: error
-          retention-days: 7
-
-  sequence:
-    needs: [plan, build]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 355
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        sequence: ${{ fromJSON(needs.plan.outputs.sequences) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Make room
-        # the preinstalled SDKs take about 30 GB; the work goes where most space is left
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
-          df -h / /mnt
-          if [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
-            sudo mkdir -p /mnt/lamaria && sudo chown "$USER" /mnt/lamaria && echo "WORK=/mnt/lamaria" >> "$GITHUB_ENV"
-          else
-            echo "WORK=$RUNNER_TEMP/lamaria" >> "$GITHUB_ENV"
-          fi
-
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install the BA's dependencies
-        run: |
-          python -m pip install --quiet --disable-pip-version-check \
-            numpy==2.5.3 scipy==1.18.1 opencv-python-headless==5.0.0.93 gtsam==4.3.0 numba==0.68.0 \
-            projectaria-tools==2.4.0 zstandard==0.25.0
-
-      - name: Download the VIO
+      - name: Fetch the original sequence_3_17 evaluation
         uses: actions/download-artifact@v8
         with:
-          name: basalt-euroc-vio-demo
-          path: bin
+          name: estimate-sequence_3_17
+          run-id: "44584959211"
+          github-token: ${{ github.token }}
+          path: original
 
-      - name: Run ${{ matrix.sequence }}
-        run: |
-          chmod +x bin/basalt_euroc_vio_demo
-          python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
-            --sequences ${{ matrix.sequence }} --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
-            --threads 4 --ba-jobs 4 --ba-threads 2 \
-            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs \
-            --ba-est-gyro-m --ba-stereo-reference 0 --ba-stereo-paper-priors \
-            --ba-compare --ba-compare-camera-gyro --no-ba-temperature --no-ba-rematch
-          test -s out/slam/${{ matrix.sequence }}.txt
-
-      - name: Score control points
+      - name: Install the pinned official evaluation libraries
         shell: bash
-        env:
-          SEQUENCE: ${{ matrix.sequence }}
         run: |
-          evaluator="$RUNNER_TEMP/lamaria-eval"
-          git init -q "$evaluator"
-          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
-          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          git init -q evaluator
+          git -C evaluator fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C evaluator checkout -q --detach FETCH_HEAD
           python -m pip install --quiet --disable-pip-version-check \
-            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ \
+            numpy==2.5.3 scipy==1.18.1 pycolmap==3.13.0.dev0 pyceres==2.6
 
-          results="out/logs/$SEQUENCE"
-          refs="$RUNNER_TEMP/lamaria-reference"
-          mkdir -p "$results" "$refs"
-          data=https://cvg-data.inf.ethz.ch/lamaria
-          curl -fsSL --retry 3 "$data/ground_truth/sparse/$SEQUENCE.json" -o "$refs/control_points.json"
-          curl -fsSL --retry 3 "$data/aria_calibrations/training/$SEQUENCE.json" -o "$refs/calibration.json"
-
-          {
-            printf '### %s control-point evaluation\n\n' "$SEQUENCE"
-            printf '| Estimate | CP score | Recall at 1 m (%%) |\n|---|---:|---:|\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-          for label in baseline camera_only gyro_only full; do
-            estimate="$results/${label}_estimate.txt"
-            if [ "$label" = full ]; then estimate="out/slam/$SEQUENCE.txt"; fi
-            test -s "$estimate"
-            log="$results/cp_$label.log"
-            python "$evaluator/evaluate_wrt_control_points.py" --estimate "$estimate" \
-              --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
-              --corresponding_sensor imu --output_path "$results/cp_$label" 2>&1 | tee "$log"
-            score=$(sed -n 's/.*CP Score: //p' "$log")
-            recall=$(sed -n 's/.*CP Recall @ 1m: //p' "$log")
-            test -n "$score"
-            test -n "$recall"
-            printf '| %s | %s | %s |\n' "$label" "$score" "$recall" >> "$GITHUB_STEP_SUMMARY"
-          done
-
-      - name: Score position RMSE on common pseudo-ground-truth timestamps
+      - name: Compare saved control-point errors and trajectory errors by time
         shell: bash
-        env:
-          SEQUENCE: ${{ matrix.sequence }}
         run: |
-          results="out/logs/$SEQUENCE"
-          reference="$RUNNER_TEMP/$SEQUENCE-pgt.txt"
-          curl -fsSL --retry 3 \
-            "https://cvg-data.inf.ethz.ch/lamaria/ground_truth/pseudo_dense/$SEQUENCE.txt" -o "$reference"
-          python - "$reference" "$results" "out/slam/$SEQUENCE.txt" <<'PY' | tee "$results/camera_gyro_ablation.json"
+          mkdir -p diagnostic
+          data=https://cvg-data.inf.ethz.ch/lamaria/ground_truth
+          curl -fsSL --retry 3 "$data/sparse/sequence_3_17.json" -o control_points.json
+          curl -fsSL --retry 3 "$data/pseudo_dense/sequence_3_17.txt" -o reference.txt
+          PYTHONPATH="$PWD/evaluator" python - <<'PY'
+          import csv
           import json
-          import re
-          import sys
+          import os
           from pathlib import Path
 
           import numpy as np
 
-          def poses(path):
-              samples = np.loadtxt(path, usecols=(0, 1, 2, 3), ndmin=2)
-              if len(samples) < 3 or not np.isfinite(samples).all():
-                  raise ValueError(f"Invalid position samples: {path}")
-              times, indices = np.unique(samples[:, 0], return_index=True)
-              return times, samples[indices, 1:]
+          from lamaria.structs.sparse_eval import SparseEvalResult
+          from lamaria.utils.metrics import (
+              calculate_control_point_recall,
+              calculate_control_point_score,
+              calculate_error,
+          )
 
-          def interpolate(times, points, target):
-              right = np.clip(np.searchsorted(times, target), 1, len(times) - 1)
+          (metrics_path,) = Path("original").rglob("camera_gyro_ablation.json")
+          results_dir = metrics_path.parent
+          aggregate = json.loads(metrics_path.read_text())
+          paths = {
+              "baseline": results_dir / "baseline_estimate.txt",
+              "camera_only": results_dir / "camera_only_estimate.txt",
+              "gyro_only": results_dir / "gyro_only_estimate.txt",
+              "full": Path("original/slam/sequence_3_17.txt"),
+          }
+
+          def samples(path):
+              values = np.loadtxt(path, usecols=(0, 1, 2, 3), ndmin=2)
+              times, indices = np.unique(values[:, 0], return_index=True)
+              return times, values[indices, 1:]
+
+          start_ns = int(paths["baseline"].read_text().splitlines()[0].split()[0])
+          raw = json.loads(Path("control_points.json").read_text())
+          time_by_image = {
+              name: int(ns)
+              for stream in raw["timestamps"].values()
+              for ns, name in stream.items()
+          }
+          observations = {}
+          for geo_id, info in raw["control_points"].items():
+              times = sorted(set(time_by_image[name] for name in info["image_names"]))
+              for tag in info["tag_id"]:
+                  observations[int(tag)] = (geo_id, times)
+
+          errors = {}
+          scales = {}
+          for name in paths:
+              result = SparseEvalResult.load_from_npy(results_dir / f"cp_{name}" / "sparse_eval_result.npy")
+              expected = aggregate["metrics"][name]
+              if (abs(calculate_control_point_score(result) - expected["cp_score"]) > 0.000051
+                      or abs(calculate_control_point_recall(result) - expected["cp_recall_1m"]) > 0.000051):
+                  raise ValueError(f"The saved control points do not reproduce {name}'s official score")
+              errors[name] = {
+                  int(tag): float(error) if np.isfinite(error) else None
+                  for tag, error in zip(result.cp_summary, calculate_error(result), strict=True)
+              }
+              scales[name] = float(result.alignment.scale)
+          tags = set(errors["baseline"])
+          if any(set(case) != tags for case in errors.values()) or tags != set(observations):
+              raise ValueError("Control-point identifiers differ between the evaluations and the public labels")
+
+          rows = []
+          for tag in sorted(tags, key=lambda tag: (observations[tag][1][0], tag)):
+              geo_id, times = observations[tag]
+              row = {
+                  "tag_id": tag,
+                  "survey_id": geo_id,
+                  "first_detection_s": round((times[0] - start_ns) / 1e9, 2),
+                  "last_detection_s": round((times[-1] - start_ns) / 1e9, 2),
+                  "distinct_detection_timestamps": len(times),
+                  **{name: errors[name][tag] for name in paths},
+              }
+              rows.append(row)
+
+          reference_times, reference_points = samples("reference.txt")
+          positions = {}
+          common = np.ones(len(reference_times), dtype=bool)
+          for name, path in paths.items():
+              times, points = samples(path)
+              right = np.clip(np.searchsorted(times, reference_times), 1, len(times) - 1)
               left = right - 1
               span = times[right] - times[left]
-              valid = (target >= times[0]) & (target <= times[-1]) & (span <= 100_000_000)
-              weight = (target - times[left]) / span
-              return points[left] + weight[:, None] * (points[right] - points[left]), valid
-
-          def rigid_rmse(estimate, reference):
-              x = estimate - estimate.mean(axis=0)
-              y = reference - reference.mean(axis=0)
+              common &= (reference_times >= times[0]) & (reference_times <= times[-1]) & (span <= 100_000_000)
+              weights = (reference_times - times[left]) / span
+              positions[name] = points[left] + weights[:, None] * (points[right] - points[left])
+          if common.sum() != aggregate["matched_reference_poses"]:
+              raise ValueError("The trajectory pairing differs from the original evaluation")
+          elapsed = (reference_times[common] - start_ns) / 1e9
+          target = reference_points[common]
+          squared = {}
+          for name, points in positions.items():
+              estimate = points[common]
+              x, y = estimate - estimate.mean(axis=0), target - target.mean(axis=0)
               u, _, vh = np.linalg.svd(x.T @ y)
               rotation = u @ np.diag([1, 1, np.linalg.det(u @ vh)]) @ vh
-              return float(np.sqrt(np.mean(np.sum((x @ rotation - y) ** 2, axis=1))))
+              squared[name] = np.sum((x @ rotation - y) ** 2, axis=1)
+              expected = aggregate["metrics"][name]["se3_position_rmse_m"]
+              if not np.isclose(np.sqrt(np.mean(squared[name])), expected, atol=1e-9):
+                  raise ValueError(f"Global position RMSE does not reproduce for {name}")
+          periods = []
+          minute_pairs = np.floor(elapsed / 120).astype(int)
+          for period in np.unique(minute_pairs):
+              mask = minute_pairs == period
+              periods.append({
+                  "start_s": int(period) * 120,
+                  "end_s": (int(period) + 1) * 120,
+                  "reference_poses": int(mask.sum()),
+                  **{name: float(np.sqrt(np.mean(values[mask]))) for name, values in squared.items()},
+              })
 
-          reference_times, reference_points = poses(sys.argv[1])
-          results = Path(sys.argv[2])
-          cases = {
-              "baseline": (results / "baseline_estimate.txt", "baseline_"),
-              "camera_only": (results / "camera_only_estimate.txt", "camera_only_"),
-              "gyro_only": (results / "gyro_only_estimate.txt", "gyro_only_"),
-              "full": (Path(sys.argv[3]), ""),
-          }
-          positions = {}
-          valid = np.ones(len(reference_times), dtype=bool)
-          for name, (path, _) in cases.items():
-              positions[name], available = interpolate(*poses(path), reference_times)
-              valid &= available
-          if valid.sum() < 3 or valid.mean() < 0.5:
-              raise ValueError(f"Insufficient common temporal coverage: {valid.sum()}/{len(valid)}")
+          for filename, data in (("control_points.csv", rows), ("position_rmse_by_interval.csv", periods)):
+              with (Path("diagnostic") / filename).open("w", newline="") as file:
+                  writer = csv.DictWriter(file, fieldnames=list(data[0]))
+                  writer.writeheader()
+                  writer.writerows(data)
+          Path("diagnostic/alignment_scales.json").write_text(json.dumps(scales, indent=2) + "\n")
 
-          metrics = {}
-          for name, (_, prefix) in cases.items():
-              summary = json.loads((results / f"{prefix}ba2_summary.json").read_text())
-              matrix = np.array(summary["gyro_m"])
-              has_camera = "stereo_segment_keyframes" in summary
-              has_gyro = name in ("gyro_only", "full")
-              if (matrix.shape != (3, 3) or not np.isfinite(matrix).all()
-                      or (not has_gyro and matrix.any())
-                      or has_camera != (name in ("camera_only", "full"))):
-                  raise ValueError(f"Unexpected solver configuration for {name}")
-              cp_log = (results / f"cp_{name}.log").read_text()
-              cp_score = re.search(r"CP Score: ([\d.]+)", cp_log)
-              cp_recall = re.search(r"CP Recall @ 1m: ([\d.]+)", cp_log)
-              if cp_score is None or cp_recall is None:
-                  raise ValueError(f"Missing control-point evaluation for {name}")
-              metrics[name] = {
-                  "cp_score": float(cp_score.group(1)),
-                  "cp_recall_1m": float(cp_recall.group(1)),
-                  "se3_position_rmse_m": rigid_rmse(positions[name][valid], reference_points[valid]),
-                  "gyro_response_error_matrix": matrix.tolist(),
-              }
-          cp = {name: result["cp_score"] for name, result in metrics.items()}
-          print(json.dumps({
-              "matched_reference_poses": int(valid.sum()),
-              "total_reference_poses": len(valid),
-              "cp_camera_gain": cp["camera_only"] - cp["baseline"],
-              "cp_gyro_gain": cp["gyro_only"] - cp["baseline"],
-              "cp_interaction": cp["full"] - cp["camera_only"] - cp["gyro_only"] + cp["baseline"],
-              "metrics": metrics,
-          }, indent=2))
+          def metres(value):
+              return "missing" if value is None else f"{value:.3f}"
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              print("### sequence_3_17 control-point horizontal errors (m)", file=summary)
+              print("| Tag | Detected after (s) | Baseline | Camera only | Gyro only | Both |", file=summary)
+              print("|---:|---:|---:|---:|---:|---:|", file=summary)
+              for row in rows:
+                  print("|", row["tag_id"], "|", row["first_detection_s"], "–", row["last_detection_s"],
+                        "|", " | ".join(metres(row[name]) for name in paths), "|", file=summary)
+          for row in rows:
+              print("CP_DIAGNOSTIC", json.dumps(row, allow_nan=False), flush=True)
+          for period in periods:
+              print("PERIOD_DIAGNOSTIC", json.dumps(period, allow_nan=False), flush=True)
+          print("ALIGNMENT_SCALES", json.dumps(scales, allow_nan=False), flush=True)
           PY
-          {
-            printf '\n| Estimate | SE(3) position RMSE (m) |\n|---|---:|\n'
-            jq -r '.metrics | to_entries[] | "| \(.key) | \(.value.se3_position_rmse_m) |"' \
-              "$results/camera_gyro_ablation.json"
-            jq -r '"\nCommon reference poses: \(.matched_reference_poses) / \(.total_reference_poses).",
-                   "\nCP interaction (full − camera only − gyro only + baseline): \(.cp_interaction)."' \
-              "$results/camera_gyro_ablation.json"
-          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload the estimate
-        if: always()
+      - name: Save the control-point and trajectory diagnostics
         uses: actions/upload-artifact@v7
         with:
-          name: estimate-${{ matrix.sequence }}
-          path: |
-            out/slam/*.txt
-            out/logs
-          if-no-files-found: warn
+          name: sequence_3_17-control-point-diagnostics
+          path: diagnostic/
+          if-no-files-found: error
           retention-days: 14
-
