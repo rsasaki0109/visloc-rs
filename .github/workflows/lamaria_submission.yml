@@ -1,7 +1,9 @@
-name: SLAM Dunk black-box benchmark
+name: SLAM Dunk camera and gyro ablation
 
 on:
   workflow_dispatch:
+  push:
+    branches: [benchmark/slam-dunk-ablation-1-19]
 
 permissions:
   contents: read
@@ -57,28 +59,110 @@ jobs:
         shell: bash
         run: docker build --progress=plain -t slam-dunk-benchmark upstream
 
-      - name: Run SLAM Dunk full
+      - name: Prepare once and refine with four public configurations
         shell: bash
         run: |
-          mkdir -p results
-          start=$(date +%s)
-          docker run --rm --network none --user "$(id -u):$(id -g)" \
-            --cpus 4 --memory 8g --memory-swap 8g --read-only --tmpfs /tmp:rw,exec,size=512m \
-            -v "$PWD/data/$SEQUENCE:/recording:ro" -v "$PWD/results:/results" \
-            slam-dunk-benchmark run /recording /results/full --config configs/full.json
-          printf '%s\n' "$(( $(date +%s) - start ))" > metrics/inference_seconds.txt
-          test -s results/full/estimate/trajectory.txt
-          df -h .
+          mkdir -p results metrics
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import shlex
+          import subprocess
+          import time
 
-      - name: Get visloc-rs estimates from the prior full-sequence experiment
-        uses: actions/download-artifact@v8
-        with:
-          name: estimate-sequence_1_19
-          run-id: "44426858799"
-          github-token: ${{ github.token }}
-          path: visloc
+          sequence = os.environ["SEQUENCE"]
+          docker = [
+              "docker", "run", "--rm", "--network", "none",
+              "--user", f"{os.getuid()}:{os.getgid()}",
+              "--cpus", "4", "--memory", "8g", "--memory-swap", "8g",
+              "--read-only", "--tmpfs", "/tmp:rw,exec,size=512m",
+              "-v", f"{Path.cwd()}/data/{sequence}:/recording:ro",
+              "-v", f"{Path.cwd()}/results:/results", "slam-dunk-benchmark",
+          ]
 
-      - name: Score both methods with the same evaluator
+          def parse_help(command):
+              help_text = subprocess.check_output([*docker, command, "--help"], text=True)
+              print(help_text, flush=True)
+              usage = help_text.split("\n\n")[0].split(f" {command} ", 1)[-1]
+              optional = re.findall(r"\[([^\[\]]+)\]", usage)
+              positional = re.sub(r"\[[^\[\]]+\]", " ", usage).split()
+              if not positional or any(not re.fullmatch(r"[\w-]+", name) for name in positional):
+                  raise ValueError(f"Cannot identify {command} positional arguments")
+              return positional, optional
+
+          def role(name):
+              name = name.lower().strip("-").replace("-", "_")
+              if "config" in name:
+                  return "config"
+              if any(word in name for word in ("output", "result", "out_dir", "destination")) or name == "out":
+                  return "output"
+              if any(word in name for word in ("frontend", "packet", "prepared", "cache", "artifact", "workdir")):
+                  return "frontend"
+              if any(word in name for word in ("record", "data", "sequence", "dataset")):
+                  return "recording"
+              return None
+
+          def arguments(command, help_result, model):
+              positional, optional = help_result
+              values = {
+                  "output": "/results/frontend" if command == "prepare" else f"/results/{model}",
+                  "recording": "/recording",
+                  "frontend": "/results/frontend",
+                  "config": f"configs/{model}.json",
+              }
+              keys = [role(name) for name in positional]
+              if command == "prepare" and len(keys) == 2:
+                  default = ["recording", "output"]
+              elif command == "refine" and len(keys) == 2:
+                  default = ["frontend", "output"]
+                  if keys[0] == "recording":
+                      keys[0] = "frontend"
+              elif command == "refine" and len(keys) == 3:
+                  default = ["recording", "frontend", "output"]
+              else:
+                  default = [None] * len(keys)
+              keys = [key or fallback for key, fallback in zip(keys, default)]
+              if any(key is None for key in keys) or len(set(keys)) != len(keys):
+                  raise ValueError(f"Cannot map {command} positional arguments: {positional}")
+              required = {"recording", "output"} if command == "prepare" else {"frontend", "output", "config"}
+              args = [values[key] for key in keys]
+              missing = required.difference(keys)
+              for spec in optional:
+                  flag, *metavar = spec.split()
+                  key = role(flag)
+                  if key in missing and flag.startswith("--") and metavar:
+                      args.extend([flag, values[key]])
+                      missing.remove(key)
+              if missing:
+                  raise ValueError(f"Cannot identify {command} arguments for {sorted(missing)}")
+              if command == "prepare" and "config" not in keys and any(
+                  spec.startswith("--config ") for spec in optional
+              ):
+                  args.extend(["--config", values["config"]])
+              return args
+
+          def run(command, args, timing):
+              invocation = [*docker, command, *args]
+              print(shlex.join(invocation), flush=True)
+              start = time.monotonic()
+              subprocess.run(invocation, check=True)
+              Path(f"metrics/{timing}_seconds.txt").write_text(f"{time.monotonic() - start:.3f}\n")
+
+          models = ("baseline", "camera_only", "gyro_only", "full")
+          prepare = parse_help("prepare")
+          refine = parse_help("refine")
+          packet_args = arguments("prepare", prepare, "full")
+          model_args = {model: arguments("refine", refine, model) for model in models}
+          run("prepare", packet_args, "frontend")
+          for model in models:
+              run("refine", model_args[model], model)
+              trajectory = Path(f"results/{model}/estimate/trajectory.txt")
+              if not trajectory.is_file() or not trajectory.stat().st_size:
+                  raise FileNotFoundError(trajectory)
+          PY
+
+      - name: Score all four configurations with the same evaluator
         shell: bash
         run: |
           mkdir -p labels
@@ -88,12 +172,8 @@ jobs:
           python -m venv .venv-cp
           .venv-metrics/bin/pip install --no-cache-dir -r upstream/evaluation/metrics-requirements.lock
           .venv-cp/bin/pip install --no-cache-dir -r upstream/evaluation/official-evaluator-requirements.lock
-          for entry in \
-            "slam_dunk_full:results/full/estimate/trajectory.txt" \
-            "visloc_current:visloc/logs/$SEQUENCE/baseline_estimate.txt" \
-            "visloc_experimental:visloc/slam/$SEQUENCE.txt"; do
-            name=${entry%%:*}
-            estimate=${entry#*:}
+          for name in baseline camera_only gyro_only full; do
+            estimate="results/$name/estimate/trajectory.txt"
             output="metrics/$name/metrics.json"
             mkdir -p "$(dirname "$output")"
             .venv-metrics/bin/python upstream/evaluation/score_lamaria.py \
@@ -104,17 +184,17 @@ jobs:
           {
             printf '### LaMAria %s, full sequence\n\n' "$SEQUENCE"
             printf '| Method | CP score | CP recall at 1 m (%%) | APE RMSE (m) |\n|---|---:|---:|---:|\n'
-            for method in slam_dunk_full visloc_current visloc_experimental; do
+            for method in baseline camera_only gyro_only full; do
               jq -r --arg method "$method" '"| \($method) | \(.cp_score) | \(.cp_recall_1m) | \(.ate_rmse_m) |"' "metrics/$method/metrics.json"
             done
-            printf '\nSLAM Dunk inference wall time on this runner (4 vCPUs): %s s.\n' "$(cat metrics/inference_seconds.txt)"
+            printf '\nShared frontend time on this runner (4 vCPUs): %s s.\n' "$(cat metrics/frontend_seconds.txt)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save numeric benchmark results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: slam-dunk-visloc-metrics-sequence_1_19
+          name: slam-dunk-ablation-metrics-sequence_1_19
           path: |
             metrics/*_seconds.txt
             metrics/*/metrics.json
