@@ -151,7 +151,7 @@ jobs:
               -v "$PWD/results/frontend:/results/frontend:ro" slam-dunk-benchmark \
               refine --config "configs/$name.json" "$SLAM_DUNK_PACKET" "/results/$name"
             printf '%s\n' "$(( SECONDS - start ))" > "metrics/${name}_seconds.txt"
-            test -s "results/$name/estimate/trajectory.txt"
+            test -s "results/$name/trajectory.txt"
           done
 
       - name: Score all four configurations with the same evaluator
@@ -165,7 +165,7 @@ jobs:
           .venv-metrics/bin/pip install --no-cache-dir -r upstream/evaluation/metrics-requirements.lock
           .venv-cp/bin/pip install --no-cache-dir -r upstream/evaluation/official-evaluator-requirements.lock
           for name in baseline camera_only gyro_only full; do
-            estimate="results/$name/estimate/trajectory.txt"
+            estimate="results/$name/trajectory.txt"
             output="metrics/$name/metrics.json"
             mkdir -p "$(dirname "$output")"
             .venv-metrics/bin/python upstream/evaluation/score_lamaria.py \
