@@ -89,6 +89,70 @@ pub struct ImageRow {
     pub session: usize,
 }
 
+/// Remove tracks supported primarily by motion-confirmed camera-0 boxes.
+pub fn exclude_moving_tracks(
+    saved: &mut SavedMap,
+    boxes: &std::collections::BTreeMap<i64, Vec<visloc_basalt::dynamic_objects::ObjectBox>>,
+) -> usize {
+    let stamps: std::collections::HashMap<_, _> = saved
+        .images
+        .iter()
+        .filter_map(|row| {
+            (row.cam_id == 0)
+                .then_some(row.timestamp_ns)
+                .flatten()
+                .map(|stamp| (row.image_id, stamp))
+        })
+        .collect();
+    let removed: HashSet<_> = saved
+        .map
+        .landmarks
+        .iter()
+        .filter_map(|(&id, landmark)| {
+            let mut total = 0;
+            let mut flagged = 0;
+            for obs in &landmark.observations {
+                let Some(stamp) = stamps.get(&obs.frame_id) else {
+                    continue;
+                };
+                total += 1;
+                flagged +=
+                    usize::from(boxes.get(stamp).is_some_and(|regions| {
+                        regions.iter().any(|region| region.contains(&obs.xy))
+                    }));
+            }
+            (flagged > 0 && flagged * 2 >= total).then_some(id)
+        })
+        .collect();
+    if removed.is_empty() {
+        return 0;
+    }
+    for id in &removed {
+        if let Some(landmark) = saved.map.landmarks.remove(id) {
+            for obs in &landmark.observations {
+                saved.map.remove_observation_confidence(obs);
+            }
+        }
+        saved.map.landmark_position_covariances.remove(id);
+    }
+    for keyframe in saved.map.keyframes.values_mut() {
+        keyframe
+            .observations
+            .retain(|obs| !removed.contains(&obs.landmark_id));
+    }
+    saved
+        .map
+        .stereo_observations
+        .retain(|obs| !removed.contains(&obs.landmark_id));
+    saved
+        .extra_descriptors
+        .retain(|(id, _)| !removed.contains(id));
+    saved.descriptors = saved
+        .descriptors
+        .filtered(&saved.map.landmarks.keys().copied().collect::<Vec<_>>());
+    removed.len()
+}
+
 pub fn load_original_maps(paths: &[&Path]) -> Result<Vec<SavedMap>, Box<dyn std::error::Error>> {
     let mut input_paths = HashSet::new();
     let mut maps: Vec<SavedMap> = Vec::with_capacity(paths.len());

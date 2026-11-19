@@ -134,6 +134,7 @@ struct Args {
     /// as `yolox_track_demo --boxes-csv` writes it). Turns on the
     /// moving-object filter (`visloc_basalt::dynamic_objects`). Off by default.
     object_boxes: Option<PathBuf>,
+    export_moving_boxes: Option<PathBuf>,
 }
 
 const NATIVE_COMPANION_BINDING_SCHEMA: &str = "basalt.rust.native_companion_binding.v1";
@@ -258,6 +259,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         adapter
             .estimator
             .set_object_boxes(boxes, Default::default());
+        if args.export_moving_boxes.is_some() {
+            adapter.estimator.record_moving_boxes();
+        }
     }
     let frame_limit = args
         .max_frames
@@ -496,6 +500,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             stats.undecided_boxes,
             stats.dropped_observations
         ));
+    }
+    if let Some(path) = &args.export_moving_boxes {
+        let mut csv =
+            String::from("timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max\n");
+        if let Some(recorded) = adapter.estimator.recorded_moving_boxes() {
+            for (stamp, boxes) in recorded {
+                for region in boxes {
+                    use std::fmt::Write as _;
+                    writeln!(
+                        csv,
+                        "{stamp},{},0,1,{},{},{},{}",
+                        region.object_id, region.x_min, region.y_min, region.x_max, region.y_max
+                    )?;
+                }
+            }
+        }
+        fs::write(path, csv)?;
     }
 
     if visual_only {
@@ -975,6 +996,7 @@ impl Args {
         let mut mono_vo = false;
         let mut dump_tracks = None;
         let mut object_boxes = None;
+        let mut export_moving_boxes = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let option = argument.to_string_lossy();
@@ -1010,6 +1032,9 @@ impl Args {
                 }
                 "--object-boxes" => {
                     object_boxes = Some(next_path(&mut arguments, &option)?);
+                }
+                "--export-moving-boxes" => {
+                    export_moving_boxes = Some(next_path(&mut arguments, &option)?);
                 }
                 "--no-marg-data" => no_marg_data = true,
                 "--retained-marg-diagnostics" => retained_marg_diagnostics = true,
@@ -1065,6 +1090,9 @@ impl Args {
             euroc_dir.ok_or_else(|| format!("--euroc-dir is required\n\n{}", Self::usage()))?;
         let calibration =
             calibration.ok_or_else(|| format!("--calibration is required\n\n{}", Self::usage()))?;
+        if export_moving_boxes.is_some() && object_boxes.is_none() {
+            return Err("--export-moving-boxes requires --object-boxes".into());
+        }
         Ok(Self {
             euroc_dir,
             calibration,
@@ -1083,11 +1111,12 @@ impl Args {
             mono_vo,
             dump_tracks,
             object_boxes,
+            export_moving_boxes,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE] [--object-boxes FILE]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE] [--object-boxes FILE [--export-moving-boxes FILE]]".into()
     }
 }
 

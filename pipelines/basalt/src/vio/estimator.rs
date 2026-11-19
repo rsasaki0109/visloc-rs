@@ -870,6 +870,19 @@ impl BasaltVioEstimator {
         self.dynamic_objects.as_ref().map(|filter| filter.stats)
     }
 
+    /// Retain motion-confirmed camera-0 boxes for offline map filtering.
+    /// Call after supplying detections with [`Self::set_object_boxes`].
+    pub fn record_moving_boxes(&mut self) {
+        if let Some(filter) = &mut self.dynamic_objects {
+            filter.recorded_boxes.get_or_insert_with(BTreeMap::new);
+        }
+    }
+
+    /// Recorded moving boxes keyed by frame timestamp.
+    pub fn recorded_moving_boxes(&self) -> Option<&BTreeMap<i64, Vec<ObjectBox>>> {
+        self.dynamic_objects.as_ref()?.recorded_boxes.as_ref()
+    }
+
     /// Diagnostic: world position of every landmark that is not removed and
     /// whose host keyframe is still in the window (the host's IMU pose
     /// composed with its camera's `T_imu_cam`, applied to the landmark's
