@@ -23,37 +23,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Get the upstream release revision and public recording
+      - name: Get the upstream release revision
         shell: bash
         run: |
           git init -q upstream
           git -C upstream fetch --depth=1 https://github.com/jacobvm04/slam-dunk.git "$SLAM_DUNK_REV"
           git -C upstream checkout --quiet --detach FETCH_HEAD
           test "$(git -C upstream rev-parse HEAD)" = "$SLAM_DUNK_REV"
-          mkdir -p input
-          for attempt in 1 2 3 4 5; do
-            curl --http1.1 --fail --location --silent --show-error --continue-at - \
-              "$DATA/raw_data/training/$SEQUENCE.vrs" --output input/recording.vrs || true
-            if [ "$(stat -c %s input/recording.vrs 2>/dev/null || true)" = 5942905071 ]; then break; fi
-            sleep 5
-          done
-          printf '%s  %s\n' 65a2987cf0a966b0b503d7b614422d79311cde2a754ab857ef90d405b14fdd39 input/recording.vrs | sha256sum -c
-          curl -fsSL --retry 5 "$DATA/aria_calibrations/training/$SEQUENCE.json" -o input/calibration.json
-
-      - name: Prepare the full recording
-        shell: bash
-        run: |
-          python -m venv .venv-extract
-          .venv-extract/bin/pip install --no-cache-dir -r upstream/tools/requirements.txt
-          start=$(date +%s)
-          .venv-extract/bin/python upstream/tools/extract_recording.py input/recording.vrs "data/$SEQUENCE" \
-            --calibration input/calibration.json
-          test "$(wc -l < "data/$SEQUENCE/cam0/data.csv")" = 18353
-          test "$(wc -l < "data/$SEQUENCE/cam1/data.csv")" = 18353
-          mkdir -p metrics
-          printf '%s\n' "$(( $(date +%s) - start ))" > metrics/extraction_seconds.txt
-          rm input/recording.vrs
-          df -h .
 
       - name: Build upstream with HTTPS transport for Ubuntu packages
         shell: bash
@@ -77,14 +53,15 @@ jobs:
                       for key in ("Range", "If-Range", "If-Modified-Since")
                       if key in self.headers
                   }
-                  for mirror in (package_url.hostname, "mirrors.edge.kernel.org"):
+                  mirrors = (package_url.hostname, "mirrors.edge.kernel.org", "ubuntu.osuosl.org")
+                  for mirror in mirrors:
                       request = Request(package_url._replace(scheme="https", netloc=mirror).geturl(),
                                         headers=headers)
                       try:
-                          upstream = urlopen(request, timeout=45)
+                          upstream = urlopen(request, timeout=20)
                       except HTTPError as error:
                           upstream = error
-                          if error.code >= 500 and mirror == package_url.hostname:
+                          if mirror != mirrors[-1] and (error.code in {403, 404, 429} or error.code >= 500):
                               error.close()
                               continue
                       except (URLError, TimeoutError):
@@ -118,6 +95,34 @@ jobs:
             if [ "$attempt" -lt 3 ]; then sleep 30; fi
           done
           exit 1
+
+      - name: Download the verified public recording
+        shell: bash
+        run: |
+          mkdir -p input
+          for attempt in 1 2 3 4 5; do
+            curl --http1.1 --fail --location --silent --show-error --continue-at - \
+              "$DATA/raw_data/training/$SEQUENCE.vrs" --output input/recording.vrs || true
+            if [ "$(stat -c %s input/recording.vrs 2>/dev/null || true)" = 5942905071 ]; then break; fi
+            sleep 5
+          done
+          printf '%s  %s\n' 65a2987cf0a966b0b503d7b614422d79311cde2a754ab857ef90d405b14fdd39 input/recording.vrs | sha256sum -c
+          curl -fsSL --retry 5 "$DATA/aria_calibrations/training/$SEQUENCE.json" -o input/calibration.json
+
+      - name: Prepare the full recording
+        shell: bash
+        run: |
+          python -m venv .venv-extract
+          .venv-extract/bin/pip install --no-cache-dir -r upstream/tools/requirements.txt
+          start=$(date +%s)
+          .venv-extract/bin/python upstream/tools/extract_recording.py input/recording.vrs "data/$SEQUENCE" \
+            --calibration input/calibration.json
+          test "$(wc -l < "data/$SEQUENCE/cam0/data.csv")" = 18353
+          test "$(wc -l < "data/$SEQUENCE/cam1/data.csv")" = 18353
+          mkdir -p metrics
+          printf '%s\n' "$(( $(date +%s) - start ))" > metrics/extraction_seconds.txt
+          rm input/recording.vrs
+          df -h .
 
       - name: Prepare one shared frontend packet
         shell: bash
