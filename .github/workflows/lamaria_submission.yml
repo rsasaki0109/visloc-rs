@@ -1,8 +1,8 @@
-name: visloc-rs paired gyroscope matrix benchmark
+name: visloc-rs camera and gyroscope ablation
 
 on:
   push:
-    branches: [benchmark/visloc-gyro-matrix]
+    branches: [benchmark/visloc-camera-gyro]
 
 permissions:
   contents: read
@@ -116,7 +116,8 @@ jobs:
             --sequences ${{ matrix.sequence }} --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
             --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs \
-            --ba-est-gyro-m --ba-compare --no-ba-temperature --no-ba-rematch
+            --ba-est-gyro-m --ba-stereo-reference 0 --ba-stereo-paper-priors \
+            --ba-compare --ba-compare-camera-gyro --no-ba-temperature --no-ba-rematch
           test -s out/slam/${{ matrix.sequence }}.txt
 
       - name: Score control points
@@ -142,10 +143,10 @@ jobs:
             printf '### %s control-point evaluation\n\n' "$SEQUENCE"
             printf '| Estimate | CP score | Recall at 1 m (%%) |\n|---|---:|---:|\n'
           } >> "$GITHUB_STEP_SUMMARY"
-          for estimate in "out/slam/$SEQUENCE.txt" "$results/baseline_estimate.txt"; do
-            if [ ! -f "$estimate" ]; then continue; fi
-            label=$(basename "$estimate" .txt)
-            if [ "$estimate" = "out/slam/$SEQUENCE.txt" ]; then label=gyro_matrix; fi
+          for label in baseline camera_only gyro_only full; do
+            estimate="$results/${label}_estimate.txt"
+            if [ "$label" = full ]; then estimate="out/slam/$SEQUENCE.txt"; fi
+            test -s "$estimate"
             log="$results/cp_$label.log"
             python "$evaluator/evaluate_wrt_control_points.py" --estimate "$estimate" \
               --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
@@ -157,7 +158,7 @@ jobs:
             printf '| %s | %s | %s |\n' "$label" "$score" "$recall" >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Score paired position RMSE against the public pseudo-ground truth
+      - name: Score position RMSE on common pseudo-ground-truth timestamps
         shell: bash
         env:
           SEQUENCE: ${{ matrix.sequence }}
@@ -166,8 +167,9 @@ jobs:
           reference="$RUNNER_TEMP/$SEQUENCE-pgt.txt"
           curl -fsSL --retry 3 \
             "https://cvg-data.inf.ethz.ch/lamaria/ground_truth/pseudo_dense/$SEQUENCE.txt" -o "$reference"
-          python - "$reference" "$results" "out/slam/$SEQUENCE.txt" <<'PY' | tee "$results/gyro_ablation.json"
+          python - "$reference" "$results" "out/slam/$SEQUENCE.txt" <<'PY' | tee "$results/camera_gyro_ablation.json"
           import json
+          import re
           import sys
           from pathlib import Path
 
@@ -197,31 +199,58 @@ jobs:
 
           reference_times, reference_points = poses(sys.argv[1])
           results = Path(sys.argv[2])
-          baseline, baseline_valid = interpolate(*poses(results / "baseline_estimate.txt"), reference_times)
-          corrected, corrected_valid = interpolate(*poses(sys.argv[3]), reference_times)
-          valid = baseline_valid & corrected_valid
+          cases = {
+              "baseline": (results / "baseline_estimate.txt", "baseline_"),
+              "camera_only": (results / "camera_only_estimate.txt", "camera_only_"),
+              "gyro_only": (results / "gyro_only_estimate.txt", "gyro_only_"),
+              "full": (Path(sys.argv[3]), ""),
+          }
+          positions = {}
+          valid = np.ones(len(reference_times), dtype=bool)
+          for name, (path, _) in cases.items():
+              positions[name], available = interpolate(*poses(path), reference_times)
+              valid &= available
           if valid.sum() < 3 or valid.mean() < 0.5:
               raise ValueError(f"Insufficient common temporal coverage: {valid.sum()}/{len(valid)}")
 
-          baseline_matrix = np.array(json.loads((results / "baseline_ba2_summary.json").read_text())["gyro_m"])
-          corrected_matrix = np.array(json.loads((results / "ba2_summary.json").read_text())["gyro_m"])
-          if (baseline_matrix.shape != (3, 3) or corrected_matrix.shape != (3, 3)
-                  or baseline_matrix.any() or not np.isfinite(corrected_matrix).all()):
-              raise ValueError("Unexpected gyroscope matrices in the paired solve summaries")
+          metrics = {}
+          for name, (_, prefix) in cases.items():
+              summary = json.loads((results / f"{prefix}ba2_summary.json").read_text())
+              matrix = np.array(summary["gyro_m"])
+              has_camera = "stereo_segment_keyframes" in summary
+              has_gyro = name in ("gyro_only", "full")
+              if (matrix.shape != (3, 3) or not np.isfinite(matrix).all()
+                      or (not has_gyro and matrix.any())
+                      or has_camera != (name in ("camera_only", "full"))):
+                  raise ValueError(f"Unexpected solver configuration for {name}")
+              cp_log = (results / f"cp_{name}.log").read_text()
+              cp_score = re.search(r"CP Score: ([\d.]+)", cp_log)
+              cp_recall = re.search(r"CP Recall @ 1m: ([\d.]+)", cp_log)
+              if cp_score is None or cp_recall is None:
+                  raise ValueError(f"Missing control-point evaluation for {name}")
+              metrics[name] = {
+                  "cp_score": float(cp_score.group(1)),
+                  "cp_recall_1m": float(cp_recall.group(1)),
+                  "se3_position_rmse_m": rigid_rmse(positions[name][valid], reference_points[valid]),
+                  "gyro_response_error_matrix": matrix.tolist(),
+              }
+          cp = {name: result["cp_score"] for name, result in metrics.items()}
           print(json.dumps({
               "matched_reference_poses": int(valid.sum()),
               "total_reference_poses": len(valid),
-              "baseline_se3_rmse_m": rigid_rmse(baseline[valid], reference_points[valid]),
-              "gyro_matrix_se3_rmse_m": rigid_rmse(corrected[valid], reference_points[valid]),
-              "gyro_response_error_matrix": corrected_matrix.tolist(),
+              "cp_camera_gain": cp["camera_only"] - cp["baseline"],
+              "cp_gyro_gain": cp["gyro_only"] - cp["baseline"],
+              "cp_interaction": cp["full"] - cp["camera_only"] - cp["gyro_only"] + cp["baseline"],
+              "metrics": metrics,
           }, indent=2))
           PY
           {
             printf '\n| Estimate | SE(3) position RMSE (m) |\n|---|---:|\n'
-            jq -r '"| Baseline | \(.baseline_se3_rmse_m) |\n| Gyro matrix | \(.gyro_matrix_se3_rmse_m) |"' \
-              "$results/gyro_ablation.json"
-            jq -r '"\nCommon reference poses: \(.matched_reference_poses) / \(.total_reference_poses)."' \
-              "$results/gyro_ablation.json"
+            jq -r '.metrics | to_entries[] | "| \(.key) | \(.value.se3_position_rmse_m) |"' \
+              "$results/camera_gyro_ablation.json"
+            jq -r '"\nCommon reference poses: \(.matched_reference_poses) / \(.total_reference_poses).",
+                   "\nCP interaction (full − camera only − gyro only + baseline): \(.cp_interaction)."' \
+              "$results/camera_gyro_ablation.json"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the estimate
