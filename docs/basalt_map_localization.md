@@ -824,6 +824,8 @@ target/release/examples/basalt_map_merge --optimize-sessions \
 
 This mode runs the existing rigid registration on every pair of original,
 gravity-aligned session maps. The base session fixes the coordinate frame.
+If registration fails, the mode swaps the maps and retries. A successful
+reverse measurement is inverted into the graph edge's original direction.
 Each successful pair contributes one yaw and translation measurement, so
 repeated images from one pair do not give that pair extra weight. The
 solver initializes placements along a spanning tree and jointly minimizes
@@ -835,7 +837,12 @@ The solver applies one rigid transform to each session before fusing
 landmarks. The merged map uses the existing COLMAP layout. In `map.json`,
 `sessions[].base_from_session` stores the final transforms, and
 `session_alignment` records the initialization and final costs, detected
-pair registrations, residuals, and failed pairs.
+pair registrations, residuals, and failed pairs. For each accepted pair,
+`measurement_base_session` and `measurement_query_session` identify the
+direction used for matching and the keyframe counts. The reported
+`base_from_other` is the graph edge's transform from `other_session` to
+`base_session`. Recovered pairs record `forward_error`, and pairs that
+fail both attempts include `error` and `reverse_error`.
 
 On the same three Machine Hall maps, the normalized graph cost fell from
 0.001682 to 0.000561 in two iterations. The three pair translation

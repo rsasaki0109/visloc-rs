@@ -229,13 +229,13 @@ map's landmark tracks and retrieval index.
   agreeing images and a 0.23 m span.
 - **Dawn.** With equalization and 10 inliers, the only pair involving
   office1-5 was office1-5 as base and office1-2 as query. It had 24
-  agreeing images over 0.26 m. Inverting that measurement placed
-  office1-5 at 5.87 cm position RMSE with office1-2's fixed mocap
-  alignment. The current joint merge tries one direction per pair.
-  Anchoring all seven maps on office1-2 left office1-5 disconnected.
-  Anchoring on office1-5 exposed the reverse measurement and connected
-  all seven. After expressing those placements in office1-2's frame
-  for scoring, the seven-session position RMSE was 4.86 cm.
+  agreeing images over 0.26 m. With office1-2 as the anchor, the reverse
+  retry recovered this measurement and connected all seven sessions with
+  eight pair constraints. Office1-5 scored 5.87 cm position RMSE and the
+  full seven-session map scored 5.25 cm, using office1-2's fixed mocap
+  alignment. Office1-5 attaches through that single edge. The six
+  other session transforms match the six-session joint run exactly.
+  Reversing the six `--add` arguments produced byte-identical output.
 
 For the trajectory comparison, both merge modes use the same original
 maps in each row. We fit a fixed SE(3) alignment to the mocap ground truth
@@ -279,6 +279,9 @@ target/release/examples/basalt_map_merge --optimize-sessions --min-inliers 10 \
   --add runs/o11e_map --add runs/o16e_map --add runs/o17e_map \
   --out runs/office_aligned
 ```
+
+Add `--add runs/o15e_map` to the joint command to include the dawn session
+through the reverse retry while keeping office1-2 as the anchor.
 
 For the pair matrix, use `--inspect-loops` with all seven maps and repeat
 with the full input order reversed, including the base. Repeat for each
