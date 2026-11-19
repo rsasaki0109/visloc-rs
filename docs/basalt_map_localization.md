@@ -794,6 +794,26 @@ A candidate that agrees with the rigid registration still needs loop
 verification before graph optimization. Pair failures are included in the
 report, and inspection leaves the input maps untouched.
 
+In a release run on EuRoC Machine Hall using the maps above, all three
+pairs registered:
+
+| Base ← query | Agreeing / localized keyframe images | Registration residual RMS | Agreeing query span |
+|---|---:|---:|---:|
+| MH_01 ← MH_02 | 824 / 824 | 3.0 cm | 13.79 m |
+| MH_01 ← MH_03 | 427 / 427 | 2.7 cm | 10.61 m |
+| MH_02 ← MH_03 | 410 / 416 | 3.8 cm | 10.61 m |
+
+The triangle closed within 1.4 cm and 0.010°. The candidates span several
+locations. Coverage of MH_03 is concentrated on the western and southern
+parts of its trajectory in both pairings.
+
+![Cross-session loop candidates along three EuRoC query trajectories](assets/euroc_mh_loop_inspection.png)
+
+The sequential merge of the same three maps reached 2.35 cm position RMSE
+over all mapper keyframes. This uses a single alignment to ground truth
+fitted using only MH_01's mapper keyframe trajectory, then applies the
+reported session transforms before scoring MH_02 and MH_03.
+
 ### Lifelong use: appending each session
 
 A robot that maps each session (the SLAM's `--save-map`) and merges it into
