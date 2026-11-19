@@ -70,3 +70,5 @@ python scripts/eval_lilocbench_clearance_revisits.py --data "$liloc" \
 ```
 
 The LILocBench command uses the `patch` map and the other three recordings prepared in the preceding evaluation.
+
+The next evaluation tests image-only links between seasonal submaps and measures real building changes against public Rotterdam imagery and airborne LiDAR. [Outdoor changes and visual bridges](outdoor_changes_and_visual_bridges.md)

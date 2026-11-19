@@ -1,0 +1,252 @@
+{
+  "cases": {
+    "museumpark": {
+      "epochs": [
+        2,
+        5
+      ],
+      "labels": {
+        "Depot Boijmans roof interior": {
+          "class": "addition",
+          "cells": 360,
+          "observed": 354,
+          "change_median_m": 40.376502990722656,
+          "baseline_additions": 354,
+          "baseline_removals": 0,
+          "saved_additions": 354,
+          "saved_removals": 0
+        },
+        "stable west building roof": {
+          "class": "stable",
+          "cells": 77,
+          "observed": 77,
+          "change_median_m": 3.3610000610351562,
+          "baseline_additions": 76,
+          "baseline_removals": 0,
+          "saved_additions": 75,
+          "saved_removals": 0
+        }
+      },
+      "baseline": {
+        "addition": {
+          "tp": 354,
+          "fp": 76,
+          "fn": 6,
+          "precision": 0.8232558139534883,
+          "recall": 0.9833333333333333
+        },
+        "removal": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": null,
+          "recall": null
+        },
+        "stable_false_changes": 76,
+        "stable_columns": 77
+      },
+      "saved_update": {
+        "addition": {
+          "tp": 354,
+          "fp": 75,
+          "fn": 6,
+          "precision": 0.8251748251748252,
+          "recall": 0.9833333333333333
+        },
+        "removal": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": null,
+          "recall": null
+        },
+        "stable_false_changes": 75,
+        "stable_columns": 77
+      }
+    },
+    "erasmus_mc": {
+      "epochs": [
+        3,
+        5
+      ],
+      "labels": {
+        "removed roof at Dr Molewaterplein": {
+          "class": "removal",
+          "cells": 60,
+          "observed": 60,
+          "change_median_m": -12.49899959564209,
+          "baseline_additions": 0,
+          "baseline_removals": 60,
+          "saved_additions": 0,
+          "saved_removals": 60
+        },
+        "stable east building roof": {
+          "class": "stable",
+          "cells": 306,
+          "observed": 306,
+          "change_median_m": -0.012000083923339844,
+          "baseline_additions": 0,
+          "baseline_removals": 1,
+          "saved_additions": 0,
+          "saved_removals": 0
+        },
+        "stable road at Dr Molewaterplein": {
+          "class": "stable",
+          "cells": 88,
+          "observed": 88,
+          "change_median_m": -0.11099998652935028,
+          "baseline_additions": 0,
+          "baseline_removals": 1,
+          "saved_additions": 0,
+          "saved_removals": 0
+        }
+      },
+      "baseline": {
+        "addition": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": null,
+          "recall": null
+        },
+        "removal": {
+          "tp": 60,
+          "fp": 2,
+          "fn": 0,
+          "precision": 0.967741935483871,
+          "recall": 1.0
+        },
+        "stable_false_changes": 2,
+        "stable_columns": 394
+      },
+      "saved_update": {
+        "addition": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": null,
+          "recall": null
+        },
+        "removal": {
+          "tp": 60,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "stable_false_changes": 0,
+        "stable_columns": 394
+      }
+    },
+    "zalmhaven": {
+      "epochs": [
+        2,
+        5
+      ],
+      "labels": {
+        "Zalmhaven high-rise footprint interior": {
+          "class": "addition",
+          "cells": 63,
+          "observed": 63,
+          "change_median_m": 29.927001953125,
+          "baseline_additions": 63,
+          "baseline_removals": 0,
+          "saved_additions": 63,
+          "saved_removals": 0
+        },
+        "stable roof north of Zalmhaven": {
+          "class": "stable",
+          "cells": 209,
+          "observed": 90,
+          "change_median_m": -0.030500411987304688,
+          "baseline_additions": 0,
+          "baseline_removals": 0,
+          "saved_additions": 0,
+          "saved_removals": 0
+        },
+        "stable roof across Zalmstraat": {
+          "class": "stable",
+          "cells": 266,
+          "observed": 204,
+          "change_median_m": -0.06299591064453125,
+          "baseline_additions": 0,
+          "baseline_removals": 18,
+          "saved_additions": 0,
+          "saved_removals": 0
+        }
+      },
+      "baseline": {
+        "addition": {
+          "tp": 63,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "removal": {
+          "tp": 0,
+          "fp": 18,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": null
+        },
+        "stable_false_changes": 18,
+        "stable_columns": 475
+      },
+      "saved_update": {
+        "addition": {
+          "tp": 63,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "removal": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": null,
+          "recall": null
+        },
+        "stable_false_changes": 0,
+        "stable_columns": 475
+      }
+    }
+  },
+  "baseline": {
+    "addition": {
+      "tp": 417,
+      "fp": 76,
+      "fn": 6,
+      "precision": 0.845841784989858,
+      "recall": 0.9858156028368794
+    },
+    "removal": {
+      "tp": 60,
+      "fp": 20,
+      "fn": 0,
+      "precision": 0.75,
+      "recall": 1.0
+    },
+    "stable_false_changes": 96,
+    "stable_columns": 946
+  },
+  "saved_update": {
+    "addition": {
+      "tp": 417,
+      "fp": 75,
+      "fn": 6,
+      "precision": 0.8475609756097561,
+      "recall": 0.9858156028368794
+    },
+    "removal": {
+      "tp": 60,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "stable_false_changes": 75,
+    "stable_columns": 946
+  }
+}

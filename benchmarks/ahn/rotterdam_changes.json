@@ -1,0 +1,47 @@
+{
+  "crs": "EPSG:28992",
+  "label_sources": {
+    "aerial_orthophotos": [2016, 2023],
+    "image_service": "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0",
+    "buildings": "https://service.pdok.nl/lv/bag/wfs/v2_0"
+  },
+  "tiles": {
+    "37HN1_02": [91000, 436250, 92000, 437500],
+    "37HN1_03": [92000, 436250, 93000, 437500],
+    "37HN1_08": [92000, 435000, 93000, 436250]
+  },
+  "cases": [
+    {
+      "name": "museumpark",
+      "epochs": [2, 5],
+      "image_bounds": [91900, 436515, 92025, 436640],
+      "bounds": [91890, 436505, 92030, 436640],
+      "labels": [
+        {"name": "Depot Boijmans roof interior", "class": "addition", "bounds": [91968, 436534, 91988, 436552], "bag_id": "0599100100015964"},
+        {"name": "stable west building roof", "class": "stable", "bounds": [91904, 436524, 91911, 436535], "bag_id": "0599100000692452"}
+      ]
+    },
+    {
+      "name": "erasmus_mc",
+      "epochs": [3, 5],
+      "image_bounds": [91595, 436245, 91745, 436395],
+      "bounds": [91594, 436250, 91745, 436395],
+      "labels": [
+        {"name": "removed roof at Dr Molewaterplein", "class": "removal", "bounds": [91662, 436346, 91674, 436351], "reference": "2016/2023 PDOK orthophotos and AHN4 independent 5 m surface"},
+        {"name": "stable east building roof", "class": "stable", "bounds": [91713, 436332, 91730, 436350]},
+        {"name": "stable road at Dr Molewaterplein", "class": "stable", "bounds": [91700, 436313, 91708, 436324]}
+      ]
+    },
+    {
+      "name": "zalmhaven",
+      "epochs": [2, 5],
+      "image_bounds": [92490, 436115, 92715, 436290],
+      "bounds": [92490, 436108, 92715, 436290],
+      "labels": [
+        {"name": "Zalmhaven high-rise footprint interior", "class": "addition", "bounds": [92679, 436137, 92688, 436144], "bag_id": "0599100100016903"},
+        {"name": "stable roof north of Zalmhaven", "class": "stable", "bounds": [92559, 436226, 92578, 436237]},
+        {"name": "stable roof across Zalmstraat", "class": "stable", "bounds": [92621, 436256, 92640, 436270]}
+      ]
+    }
+  ]
+}
