@@ -270,6 +270,27 @@ def temperature_csv(seq: str, work: Path, scripts: Path, python: str, split: str
     return out
 
 
+def fused_accelerometer_csv(seq, imu, work, factory, scripts, python, split):
+    """Build batch-only IMU input from the full left stream of a sparse VRS."""
+    out = work / "imu_fused.csv"
+    if out.is_file():
+        return out
+    temporary = out.with_suffix(".tmp")
+    sparse_dir = work / "accelerometer_vrs"
+    sparse_dir.mkdir(exist_ok=True)
+    vrs = sparse_dir / f"{seq}.vrs"
+    try:
+        run([python, scripts / "lamaria_vrs_fetch.py", f"{BASE_URL}/raw_data/{split}/{seq}.vrs", vrs,
+             "--streams", "1202-2,285-1,286-1"])
+        run([python, scripts / "aria_fuse_accelerometers.py", "--right-imu", imu, "--vrs", vrs,
+             "--factory-calib", factory, "--out", temporary])
+        temporary.replace(out)
+    finally:
+        temporary.unlink(missing_ok=True)
+        shutil.rmtree(sparse_dir, ignore_errors=True)
+    return out
+
+
 def sequence_track(seq: str) -> int:
     """The leaderboard track of `sequence_<track>_<n>`."""
     return int(seq.split("_")[1])
@@ -582,9 +603,11 @@ def main() -> int:
                              "0.035 px focal-length random walks")
     parser.add_argument("--ba-est-gyro-m", action="store_true",
                         help="estimate the full gyroscope response matrix in the experimental batch pass")
-    parser.add_argument("--ba-stereo-compare", action="store_true",
-                        help="also run the default batch pass from the same inputs and save its estimates "
-                             "under --log-dir (requires --ba-chain and --ba-stereo-reference)")
+    parser.add_argument("--ba-fuse-accelerometers", action="store_true",
+                        help="--ba-chain: fuse the two Aria accelerometers for the batch pass (downloads the left IMU)")
+    parser.add_argument("--ba-compare", "--ba-stereo-compare", dest="ba_compare", action="store_true",
+                        help="also run the default batch pass from the same VIO, online trajectory and initial "
+                             "matches, and save its estimates under --log-dir")
     parser.add_argument("--ba-temperature", action=argparse.BooleanOptionalAction, default=True,
                         help="--ba-chain: on --ba-temperature-tracks by day, fetch the SLAM cameras' temperature "
                              "from the .vrs and let the pass estimate the gyroscope's bias and scale change per "
@@ -623,8 +646,12 @@ def main() -> int:
         parser.error("one of --slam-exe or --vio-exe is required")
     if (args.ba_stereo_fixed_translation or args.ba_stereo_paper_priors) and args.ba_stereo_reference is None:
         parser.error("--ba-stereo-fixed-translation and --ba-stereo-paper-priors need --ba-stereo-reference")
-    if args.ba_stereo_compare and not (args.ba_chain and args.ba_stereo_reference is not None and args.log_dir):
-        parser.error("--ba-stereo-compare requires --ba-chain, --ba-stereo-reference and --log-dir")
+    if args.ba_fuse_accelerometers and not (args.ba_chain and args.imu_rectify):
+        parser.error("--ba-fuse-accelerometers requires --ba-chain and --imu-rectify")
+    if args.ba_compare and not (args.ba_chain and args.log_dir
+                                and (args.ba_stereo_reference is not None or args.ba_est_gyro_m
+                                     or args.ba_fuse_accelerometers)):
+        parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
 
     args.config = args.config or (BA_CHAIN_CONFIG if args.ba_chain else DEFAULT_CONFIG)
     low_light_arg = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
@@ -647,7 +674,7 @@ def main() -> int:
         pass_args.append("--est-gyro-m")
 
     log(f"{len(sequences)} sequences: {sequences[0]} .. {sequences[-1]}")
-    comparison_failed = False
+    experiment_failed = False
     for seq in sequences:
         estimate = args.slam_dir / f"{seq}.txt"
         if estimate.is_file():
@@ -677,11 +704,13 @@ def main() -> int:
                     inner = verify_and_extract(zip_path, extract_dir)
 
             refinement = None
+            imu_rectified = False
             if args.imu_rectify:
                 log(f"{seq}: IMU rectification")
                 try:
                     refinement = rectify_imu(seq, inner, work, calib_dir,
                                              refine=args.device_refinement, split=args.split)
+                    imu_rectified = True
                 except Exception as error:
                     log(f"{seq}: WARN IMU rectification failed ({error!r}); using raw IMU")
 
@@ -757,6 +786,14 @@ def main() -> int:
                     trajectory = fill_late_start(args, seq, inner, variant_a, fallback, trajectory, tried, track,
                                                  work, submit_vio)
             if args.ba_chain:
+                imu = inner / "mav0" / "imu0" / "data.csv"
+                sequence_pass_args = list(pass_args)
+                if args.ba_fuse_accelerometers:
+                    if not imu_rectified:
+                        raise RuntimeError("dual accelerometer fusion needs a rectified right IMU")
+                    fused = fused_accelerometer_csv(seq, imu, work, calib_dir / f"{seq}_factory_calib.json",
+                                                   args.repo / "scripts", python, args.split)
+                    sequence_pass_args += ["--imu", fused]
                 learned = pass_features(args, track, device_serial(calib_dir, seq))
                 temperature = None
                 if args.ba_temperature and track in args.ba_temperature_tracks and not low_light:
@@ -767,15 +804,16 @@ def main() -> int:
                 log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass" if learned else "")
                     + (", the temperature" if temperature else "")
                     + (f", stereo reference cam{args.ba_stereo_reference}" if args.ba_stereo_reference is not None else "")
-                    + (", gyro matrix" if args.ba_est_gyro_m else "") + ")")
+                    + (", gyro matrix" if args.ba_est_gyro_m else "")
+                    + (", fused accelerometers" if args.ba_fuse_accelerometers else "") + ")")
                 ba_work = work / "ba"
-                chain_args = (inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv", ba_calib, track)
+                chain_args = (inner / "mav0", trajectory, imu, ba_calib, track)
                 chain_options = dict(jobs=args.ba_jobs, threads=args.ba_threads, python=python,
                                      log=lambda m, seq=seq: log(f"{seq}: {m}"), low_light=low_light,
                                      rematch=args.ba_rematch, pass_features=learned,
                                      pass_match=args.ba_pass_match, temperature=temperature)
                 try:
-                    if args.ba_stereo_compare:
+                    if args.ba_compare:
                         baseline_work = work / "ba_baseline"
                         baseline = run_chain(*chain_args, baseline_work, work / "ba_baseline.tum",
                                              **chain_options, keep_matches=True)
@@ -787,9 +825,9 @@ def main() -> int:
                                  "--out-estimate", log_dir / name], check=True)
                         share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
-                                           **chain_options, pass_args=pass_args)
+                                           **chain_options, pass_args=sequence_pass_args)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
-                    if args.ba_stereo_compare:
+                    if args.ba_compare or args.ba_fuse_accelerometers:
                         raise
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = ba_work / "ba2.tum"
@@ -806,7 +844,7 @@ def main() -> int:
                 log(f"{seq}: FAIL estimate conversion")
         except Exception as error:  # keep the loop going across sequences
             log(f"{seq}: EXCEPTION {error!r}")
-            comparison_failed |= args.ba_stereo_compare
+            experiment_failed |= args.ba_compare or args.ba_fuse_accelerometers
         finally:
             if args.log_dir:
                 for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_")):
@@ -823,7 +861,7 @@ def main() -> int:
         for estimate in sorted(args.slam_dir.glob("*.txt")):
             archive.write(estimate, f"slam/{estimate.name}")
     log(f"packaged {submission} with {len(list(args.slam_dir.glob('*.txt')))} estimates")
-    return int(comparison_failed)
+    return int(experiment_failed)
 
 
 if __name__ == "__main__":

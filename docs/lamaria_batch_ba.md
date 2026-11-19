@@ -3071,7 +3071,7 @@ focal-length walks. The pixel prior is converted to the existing log
 focal scale at the factory focal lengths. `--ba-est-gyro-m` estimates
 the recording-wide gyroscope matrix in the same passes, and
 `--ba-stereo-fixed-translation` holds the factory translation.
-Add `--ba-stereo-compare --log-dir DIR` to run both variants in one invocation
+Add `--ba-compare --log-dir DIR` to run both variants in one invocation
 with the same VIO, online trajectory and initial matches. Compare
 `baseline_ba2_estimate.txt` with `ba2_estimate.txt` to measure the change
 before each variant's trajectory guides its own rematch. With rematch
@@ -3080,6 +3080,32 @@ For an existing VIO trajectory, use `lamaria_ba_chain.py
 --pass-args="--stereo-reference 0 --ext-seg-seconds 5"` and a fresh
 `--work` directory. The chain reuses completed passes when their output
 files already exist.
+
+### Dual accelerometer input
+
+The paper fuses the two Aria accelerometers and uses the right gyroscope.
+The ASL archive includes only the right IMU, so this experiment also needs
+the complete left IMU stream from the raw VRS. The submission driver
+`--ba-fuse-accelerometers` fetches that stream as a sparse VRS and uses
+the fused measurements in the batch pass. Add `--ba-compare` to compare
+against the default chain from the same online trajectory. The preparation command
+rectifies that stream, interpolates to the right IMU timestamps, and
+removes the tangential and centripetal acceleration from the IMU separation
+before averaging. The right gyroscope and timestamps are preserved.
+Control-point results for the fused input are pending.
+
+For a local run with an existing right IMU CSV:
+
+```bash
+python scripts/lamaria_vrs_fetch.py URL recording.vrs --streams 1202-2,285-1,286-1
+python scripts/aria_fuse_accelerometers.py --right-imu imu_rectified.csv \
+  --vrs recording.vrs --factory-calib recording_factory_calib.json --out imu_fused.csv
+```
+
+Pass `--pass-args="--imu /path/to/imu_fused.csv"` to
+`lamaria_ba_chain.py` for an offline ablation that shares the right-IMU
+seed and online trajectory. The factory calibration JSON is extracted by
+`aria_factory_imu_rectify.py extract`, as for the existing rectification.
 
 ## Usage
 
