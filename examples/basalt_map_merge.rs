@@ -62,6 +62,7 @@ struct Args {
     config: MapMergeConfig,
     mode: Mode,
     refine_keyframes: bool,
+    keyframe_loop_min_separation_m: Option<f64>,
     moving_boxes: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -71,7 +72,7 @@ impl Args {
          [--min-inliers N] [--min-keyframes N] [--max-hamming N] \
          [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N] \
          [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M] \
-         [--inspect-loops | --optimize-sessions [--refine-keyframes] [--moving-boxes MAP_DIR CSV]...]"
+         [--inspect-loops | --optimize-sessions [--refine-keyframes [--keyframe-loop-min-separation-m M]] [--moving-boxes MAP_DIR CSV]...]"
             .into()
     }
 
@@ -87,6 +88,7 @@ impl Args {
             out: PathBuf::new(),
             mode: Mode::Sequential,
             refine_keyframes: false,
+            keyframe_loop_min_separation_m: None,
             moving_boxes: Vec::new(),
             config: MapMergeConfig {
                 threads: std::thread::available_parallelism().map_or(1, usize::from),
@@ -114,6 +116,13 @@ impl Args {
                 "--inspect-loops" if args.mode != Mode::Optimize => args.mode = Mode::Inspect,
                 "--optimize-sessions" if args.mode != Mode::Inspect => args.mode = Mode::Optimize,
                 "--refine-keyframes" => args.refine_keyframes = true,
+                "--keyframe-loop-min-separation-m" => {
+                    let meters: f64 = number(&option, value()?)?;
+                    if !meters.is_finite() || meters <= 0.0 {
+                        return Err(format!("{option} must be finite and positive"));
+                    }
+                    args.keyframe_loop_min_separation_m = Some(meters);
+                }
                 "--moving-boxes" => args.moving_boxes.push((value()?.into(), value()?.into())),
                 "--inspect-loops" | "--optimize-sessions" => {
                     return Err("choose either --inspect-loops or --optimize-sessions".into());
@@ -134,6 +143,9 @@ impl Args {
         args.out = out.ok_or_else(|| format!("--out is required\n\n{}", Self::usage()))?;
         if args.mode != Mode::Optimize && (args.refine_keyframes || !args.moving_boxes.is_empty()) {
             return Err("--refine-keyframes and --moving-boxes require --optimize-sessions".into());
+        }
+        if args.keyframe_loop_min_separation_m.is_some() && !args.refine_keyframes {
+            return Err("--keyframe-loop-min-separation-m requires --refine-keyframes".into());
         }
         if args.add.is_empty() {
             return Err(format!(
@@ -210,8 +222,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let removed = map_files::exclude_moving_tracks(&mut original_maps[index], &boxes);
             filter_reports.push(json!({"session": index, "removed_landmarks": removed}));
         }
-        let (alignment, mut report) =
-            global_alignment::solve(&mut original_maps, &args.config, args.refine_keyframes)?;
+        let (alignment, mut report) = global_alignment::solve(
+            &mut original_maps,
+            &args.config,
+            args.refine_keyframes
+                .then_some(args.keyframe_loop_min_separation_m.unwrap_or(0.35)),
+        )?;
         if !filter_reports.is_empty() {
             report["moving_box_filter"] = json!(filter_reports);
         }
@@ -523,6 +539,34 @@ mod tests {
         assert_eq!(parse(&optimize).unwrap().mode, Mode::Optimize);
         optimize.push("--inspect-loops");
         assert!(parse(&optimize).is_err());
+    }
+
+    #[test]
+    fn keyframe_separation_override_requires_refinement_and_positive_distance() {
+        let mut args = vec![
+            "--base",
+            "a",
+            "--add",
+            "b",
+            "--out",
+            "m",
+            "--optimize-sessions",
+        ];
+        assert!(parse(&args)
+            .unwrap()
+            .keyframe_loop_min_separation_m
+            .is_none());
+        args.extend(["--keyframe-loop-min-separation-m", "0.15"]);
+        assert!(parse(&args).is_err());
+        args.push("--refine-keyframes");
+        assert_eq!(
+            parse(&args).unwrap().keyframe_loop_min_separation_m,
+            Some(0.15)
+        );
+        for invalid in ["0", "-1", "NaN", "inf"] {
+            args[8] = invalid;
+            assert!(parse(&args).is_err());
+        }
     }
 
     #[test]

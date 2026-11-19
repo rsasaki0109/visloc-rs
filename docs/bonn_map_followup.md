@@ -51,6 +51,8 @@ Each trial accepted the cross-session registration. The keyframe refinement veri
 
 The scope is one environment. Motion scores are conditional on manually supplied boxes and IDs, and the pose study measures the combination of RGB-D odometry and multi-session registration. The voxel scores cover annotated changes and static surfaces on short revisits.
 
+The next evaluation identifies the keyframe rejection gates and measures short-baseline refinement and a depth fallback on the same recordings. [Loop and depth evaluation](bonn_loop_and_depth_evaluation.md)
+
 ## Reproduce
 
 Download and extract the original three Bonn archives and the additional `moving_obstructing_box2`, `placing_nonobstructing_box2` and `removing_nonobstructing_box2` archives to the same directory. See the initial report for dependencies and the original hashes. [Dataset downloads](https://www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/index.html) · [Initial report](bonn_labeled_map_evaluation.md)

@@ -47,13 +47,54 @@ def run_binary(binary, *arguments):
         raise RuntimeError(f"{binary.name}: {completed.stdout}\n{completed.stderr}")
 
 
-def export_visit(sequence, observations, intrinsics, work, map_builder):
+def floor_normal(depth, intrinsics, rng):
+    y, x = np.mgrid[310:480:10, :640:10]
+    z = depth[y, x] * 0.001
+    valid = (z >= 0.3) & (z <= 4.0)
+    fx, fy, cx, cy = intrinsics
+    z = z[valid]
+    if len(z) < 120:
+        return None
+    points = np.column_stack(((x[valid] - cx) * z / fx, (y[valid] - cy) * z / fy, z))
+    sample = points[rng.integers(len(points), size=(128, 3))]
+    normals = np.cross(sample[:, 1] - sample[:, 0], sample[:, 2] - sample[:, 0])
+    length = np.linalg.norm(normals, axis=1)
+    valid = (length > 1e-5) & (np.abs(normals[:, 1]) > np.cos(np.deg2rad(45)) * length)
+    if not valid.any():
+        return None
+    normals = normals[valid] / length[valid, None]
+    offset = np.einsum("ij,ij->i", normals, sample[valid, 0])
+    inliers = np.abs(points @ normals.T - offset) < 0.025
+    mask = inliers[:, inliers.sum(axis=0).argmax()]
+    if np.count_nonzero(mask) < 0.25 * len(points):
+        return None
+    _, _, basis = np.linalg.svd(points[mask] - points[mask].mean(axis=0), full_matrices=False)
+    normal = basis[-1]
+    return normal if normal[1] < 0 else -normal
+
+
+def floor_level(normals):
+    if len(normals) < 5:
+        raise ValueError("insufficient floor observations")
+    directions = np.asarray(normals)
+    consensus = directions @ directions.T > np.cos(np.deg2rad(5))
+    keep = consensus[consensus.sum(axis=1).argmax()]
+    if np.count_nonzero(keep) < max(5, len(directions) // 2):
+        raise ValueError("inconsistent floor observations")
+    up = directions[keep].mean(axis=0)
+    up /= np.linalg.norm(up)
+    return Rotation.align_vectors([[0, 0, 1]], [up])[0], int(np.count_nonzero(keep))
+
+
+def export_visit(sequence, observations, intrinsics, work, map_builder, *, level_from_depth=False):
     work.mkdir(parents=True)
     cv2.setRNGSeed(0)
     detector = cv2.SIFT_create(nfeatures=1800)
     matcher = cv2.BFMatcher(cv2.NORM_L2)
     camera = np.eye(4)
     previous = previous_depth = None
+    normals = []
+    rng = np.random.default_rng(0)
     timestamps, trajectory, manifest, inliers = [], [], [], []
     epoch = sequence.times[int(observations[0][1].stem)] - 1.0
     for _, path in observations:
@@ -73,6 +114,10 @@ def export_visit(sequence, observations, intrinsics, work, map_builder):
             camera = camera @ step
             inliers.append(support)
         previous, previous_depth = current, depth
+        if level_from_depth:
+            normal = floor_normal(depth, intrinsics, rng)
+            if normal is not None:
+                normals.append(camera[:3, :3] @ normal)
         q = Rotation.from_matrix(camera[:3, :3]).as_quat()
         trajectory.append([stamp, *camera[:3, 3], *q])
         timestamps.append((frame, stamp))
@@ -81,6 +126,17 @@ def export_visit(sequence, observations, intrinsics, work, map_builder):
         manifest.append((stamp, frame))
     (work / "rgb.txt").write_text("".join(f"{stamp:.9f} rgb_{frame}.png\n" for stamp, frame in manifest))
     (work / "depth.txt").write_text("".join(f"{stamp:.9f} depth_{frame}.png\n" for stamp, frame in manifest))
+    flags = []
+    if level_from_depth:
+        level, support = floor_level(normals)
+        trajectory = np.asarray(trajectory)
+        trajectory[:, 1:4] = level.apply(trajectory[:, 1:4])
+        trajectory[:, 4:8] = (level * Rotation.from_quat(trajectory[:, 4:8])).as_quat()
+        flags.append("--keep-world")
+        (work / "depth_floor.json").write_text(json.dumps({
+            "matched_normals": support, "available_normals": len(normals),
+            "candidate_frames": len(observations),
+        }))
     trajectory_file = work / "vo.tum"
     # Bracket the manifest timestamps to account for formatting and the export helper.
     first = [trajectory[0][0] - 0.001, *trajectory[0][1:]]
@@ -92,7 +148,7 @@ def export_visit(sequence, observations, intrinsics, work, map_builder):
     run_binary(
         map_builder, "--seq-dir", work, "--trajectory", trajectory_file, "--out", map_path,
         "--keyframe-m", "0", "--keyframe-deg", "0", "--depth-scale", "0.001",
-        "--k1", "0", "--k2", "0", "--p1", "0", "--p2", "0", "--k3", "0", *camera_args,
+        "--k1", "0", "--k2", "0", "--p1", "0", "--p2", "0", "--k3", "0", *camera_args, *flags,
     )
     return map_path, timestamps, inliers
 
@@ -105,10 +161,13 @@ def loop_closed_poses(visits, intrinsics, work, map_builder, map_merge, repeats)
         yield merge_trial(visits, runs, work / f"merged_{trial}", map_merge)
 
 
-def merge_trial(visits, runs, merged, map_merge):
+def merge_trial(visits, runs, merged, map_merge, *, refine=True, separation=None):
+    flags = ["--refine-keyframes"] if refine else []
+    if separation is not None:
+        flags.extend(["--keyframe-loop-min-separation-m", str(separation)])
     run_binary(
         map_merge, "--base", runs[0][0], "--add", runs[1][0], "--out", merged,
-        "--optimize-sessions", "--refine-keyframes", "--threads", "1", "--min-inliers", "10",
+        "--optimize-sessions", "--threads", "1", "--min-inliers", "10", *flags,
     )
     estimated = [keyframe_poses(merged, session=i) for i in range(len(runs))]
     for matched, (_, times, _) in zip(estimated, runs, strict=True):
@@ -123,15 +182,18 @@ def merge_trial(visits, runs, merged, map_merge):
     aligned, errors = [], []
     for (_, observations), matched, (_, times, _) in zip(visits, estimated, runs, strict=True):
         aligned.append({frame: anchor @ pose for (frame, _), (_, pose) in zip(times, matched, strict=True)})
-        delta = np.stack([np.linalg.inv(gt) @ pred
-                          for (gt, _), pred in zip(observations, aligned[-1].values(), strict=True)])
-        angles = np.degrees(Rotation.from_matrix(delta[:, :3, :3]).magnitude())
-        errors.append({
-            "translation_rmse_m": float(np.sqrt(np.mean(np.sum(delta[:, :3, 3] ** 2, axis=1)))),
-            "rotation_rmse_deg": float(np.sqrt(np.mean(angles ** 2))),
-        })
+        errors.append(pose_rmse(observations, aligned[-1]))
     summary = json.loads((merged / "map.json").read_text())
     return aligned, {
         "pose_errors": errors, "minimum_odometry_inliers": [min(run[2]) for run in runs],
         "session_alignment": summary["session_alignment"],
+    }
+
+
+def pose_rmse(observations, poses):
+    delta = np.stack([np.linalg.inv(gt) @ poses[int(path.stem)] for gt, path in observations])
+    angles = np.degrees(Rotation.from_matrix(delta[:, :3, :3]).magnitude())
+    return {
+        "translation_rmse_m": float(np.sqrt(np.mean(np.sum(delta[:, :3, 3] ** 2, axis=1)))),
+        "rotation_rmse_deg": float(np.sqrt(np.mean(angles ** 2))),
     }

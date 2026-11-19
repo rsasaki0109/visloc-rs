@@ -9,7 +9,7 @@ use super::map_files::{self, SavedMap};
 pub(super) fn solve(
     maps: &mut [SavedMap],
     config: &MapMergeConfig,
-    refine_keyframes: bool,
+    keyframe_loop_min_separation_m: Option<f64>,
 ) -> Result<(SessionAlignment, Value), Box<dyn std::error::Error>> {
     let mut constraints = Vec::new();
     let mut pair_reports = Vec::new();
@@ -113,13 +113,14 @@ pub(super) fn solve(
         "pairs": pair_reports,
         "failed_pairs": failed_pairs,
     });
-    if refine_keyframes {
+    if let Some(min_separation_m) = keyframe_loop_min_separation_m {
         report["keyframe_refinement"] = super::keyframe_alignment::refine(
             maps,
             &alignment.reference_from_session,
             &constraints,
             &directions,
             config,
+            min_separation_m,
         )?;
     }
     Ok((alignment, report))

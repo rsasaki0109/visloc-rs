@@ -1,0 +1,1985 @@
+{
+  "different_recordings_box_added": {
+    "mocap": {
+      "name": "different_recordings_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        4
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        25,
+        24
+      ],
+      "ambiguous_excluded": 10,
+      "labeled_changes_outside_candidates": 4,
+      "unknown": 392,
+      "intermittent": 92,
+      "occluded_static_voxels": 227,
+      "occupancy_difference": {
+        "tp": 110,
+        "fp": 361,
+        "fn": 4,
+        "tn": 824,
+        "precision": 0.23354564755838642,
+        "recall": 0.9649122807017544,
+        "f1": 0.37606837606837606
+      },
+      "occupancy_difference_occluded_false_positives": 215,
+      "visibility": {
+        "tp": 83,
+        "fp": 24,
+        "fn": 31,
+        "tn": 1161,
+        "precision": 0.7757009345794392,
+        "recall": 0.7280701754385965,
+        "f1": 0.751131221719457
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 4,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 27,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 708,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 83
+    },
+    "session_alignment": {
+      "name": "different_recordings_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        4
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        25,
+        24
+      ],
+      "ambiguous_excluded": 10,
+      "labeled_changes_outside_candidates": 36,
+      "unknown": 490,
+      "intermittent": 53,
+      "occluded_static_voxels": 227,
+      "occupancy_difference": {
+        "tp": 78,
+        "fp": 280,
+        "fn": 36,
+        "tn": 905,
+        "precision": 0.21787709497206703,
+        "recall": 0.6842105263157895,
+        "f1": 0.3305084745762712
+      },
+      "occupancy_difference_occluded_false_positives": 121,
+      "visibility": {
+        "tp": 71,
+        "fp": 49,
+        "fn": 43,
+        "tn": 1136,
+        "precision": 0.5916666666666667,
+        "recall": 0.6228070175438597,
+        "f1": 0.6068376068376068
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 36,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 7,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 636,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 71,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.029976808807888083,
+          "rotation_rmse_deg": 1.1889746367133882
+        },
+        {
+          "translation_rmse_m": 0.0500067627089792,
+          "rotation_rmse_deg": 1.3654147126379657
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.02939371278706907,
+            "rotation_rmse_deg": 1.1202227649950092
+          },
+          {
+            "translation_rmse_m": 0.04887918645136719,
+            "rotation_rmse_deg": 1.370201943201832
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          82
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 56,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9671977063327911,
+                  -0.0,
+                  -0.0,
+                  -0.2540247957672401
+                ],
+                "translation": [
+                  0.18494787796441134,
+                  -0.015232892843298453,
+                  0.011547177393508393
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.028135662833343688,
+              "keyframes": 56,
+              "localized_keyframes": 56,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "default_loops": {
+      "name": "different_recordings_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        4
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        25,
+        24
+      ],
+      "ambiguous_excluded": 10,
+      "labeled_changes_outside_candidates": 36,
+      "unknown": 490,
+      "intermittent": 53,
+      "occluded_static_voxels": 227,
+      "occupancy_difference": {
+        "tp": 78,
+        "fp": 280,
+        "fn": 36,
+        "tn": 905,
+        "precision": 0.21787709497206703,
+        "recall": 0.6842105263157895,
+        "f1": 0.3305084745762712
+      },
+      "occupancy_difference_occluded_false_positives": 121,
+      "visibility": {
+        "tp": 71,
+        "fp": 49,
+        "fn": 43,
+        "tn": 1136,
+        "precision": 0.5916666666666667,
+        "recall": 0.6228070175438597,
+        "f1": 0.6068376068376068
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 36,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 7,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 636,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 71,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.029976808807888083,
+          "rotation_rmse_deg": 1.1889746367133882
+        },
+        {
+          "translation_rmse_m": 0.0500067627089792,
+          "rotation_rmse_deg": 1.3654147126379657
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.02939371278706907,
+            "rotation_rmse_deg": 1.1202227649950092
+          },
+          {
+            "translation_rmse_m": 0.04887918645136719,
+            "rotation_rmse_deg": 1.370201943201832
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          82
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": false,
+            "min_separation_m": 0.35,
+            "pairs": [
+              {
+                "anchored_candidates": 56,
+                "base": 0,
+                "image_pairs": [],
+                "localized_queries": 56,
+                "pose_consistent": 56,
+                "query": 1,
+                "query_frames": 56,
+                "rejected": {
+                  "spatial_separation": 55
+                },
+                "selected": 0,
+                "spatially_separated": 1
+              }
+            ],
+            "retriangulated": 0,
+            "selected_loops": 0
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 56,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9671977063327911,
+                  -0.0,
+                  -0.0,
+                  -0.2540247957672401
+                ],
+                "translation": [
+                  0.18494787796441134,
+                  -0.015232892843298453,
+                  0.011547177393508393
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.028135662833343688,
+              "keyframes": 56,
+              "localized_keyframes": 56,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "short_baseline_loops": {
+      "name": "different_recordings_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        4
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        25,
+        24
+      ],
+      "ambiguous_excluded": 10,
+      "labeled_changes_outside_candidates": 36,
+      "unknown": 490,
+      "intermittent": 53,
+      "occluded_static_voxels": 227,
+      "occupancy_difference": {
+        "tp": 78,
+        "fp": 280,
+        "fn": 36,
+        "tn": 905,
+        "precision": 0.21787709497206703,
+        "recall": 0.6842105263157895,
+        "f1": 0.3305084745762712
+      },
+      "occupancy_difference_occluded_false_positives": 121,
+      "visibility": {
+        "tp": 71,
+        "fp": 49,
+        "fn": 43,
+        "tn": 1136,
+        "precision": 0.5916666666666667,
+        "recall": 0.6228070175438597,
+        "f1": 0.6068376068376068
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 36,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 7,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 636,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 71,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.029976808807888083,
+          "rotation_rmse_deg": 1.1889746367133882
+        },
+        {
+          "translation_rmse_m": 0.0500067627089792,
+          "rotation_rmse_deg": 1.3654147126379657
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.02939371278706907,
+            "rotation_rmse_deg": 1.1202227649950092
+          },
+          {
+            "translation_rmse_m": 0.04887918645136719,
+            "rotation_rmse_deg": 1.370201943201832
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          82
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": false,
+            "min_separation_m": 0.15,
+            "pairs": [
+              {
+                "anchored_candidates": 56,
+                "base": 0,
+                "image_pairs": [],
+                "localized_queries": 56,
+                "pose_consistent": 56,
+                "query": 1,
+                "query_frames": 56,
+                "rejected": {
+                  "spatial_separation": 55
+                },
+                "selected": 0,
+                "spatially_separated": 1
+              }
+            ],
+            "retriangulated": 0,
+            "selected_loops": 0
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 56,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9671977063327911,
+                  -0.0,
+                  -0.0,
+                  -0.2540247957672401
+                ],
+                "translation": [
+                  0.18494787796441134,
+                  -0.015232892843298453,
+                  0.011547177393508393
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.028135662833343688,
+              "keyframes": 56,
+              "localized_keyframes": 56,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "depth_floor_support": [
+      {
+        "matched_normals": 40,
+        "available_normals": 40,
+        "candidate_frames": 40
+      },
+      {
+        "matched_normals": 56,
+        "available_normals": 56,
+        "candidate_frames": 56
+      }
+    ]
+  },
+  "different_recordings_box_removed": {
+    "mocap": {
+      "name": "different_recordings_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        2,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [
+          374
+        ],
+        []
+      ],
+      "synchronized_frames": [
+        11,
+        11
+      ],
+      "ambiguous_excluded": 14,
+      "labeled_changes_outside_candidates": 3,
+      "unknown": 313,
+      "intermittent": 45,
+      "occluded_static_voxels": 71,
+      "occupancy_difference": {
+        "tp": 83,
+        "fp": 199,
+        "fn": 3,
+        "tn": 953,
+        "precision": 0.29432624113475175,
+        "recall": 0.9651162790697675,
+        "f1": 0.45108695652173914
+      },
+      "occupancy_difference_occluded_false_positives": 60,
+      "visibility": {
+        "tp": 69,
+        "fp": 17,
+        "fn": 17,
+        "tn": 1135,
+        "precision": 0.8023255813953488,
+        "recall": 0.8023255813953488,
+        "f1": 0.8023255813953488
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 3,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 13,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 1,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 794,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 69
+    },
+    "session_alignment": {
+      "name": "different_recordings_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        2,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [
+          374
+        ],
+        []
+      ],
+      "synchronized_frames": [
+        11,
+        11
+      ],
+      "ambiguous_excluded": 14,
+      "labeled_changes_outside_candidates": 23,
+      "unknown": 417,
+      "intermittent": 99,
+      "occluded_static_voxels": 71,
+      "occupancy_difference": {
+        "tp": 63,
+        "fp": 266,
+        "fn": 23,
+        "tn": 886,
+        "precision": 0.19148936170212766,
+        "recall": 0.7325581395348837,
+        "f1": 0.3036144578313253
+      },
+      "occupancy_difference_occluded_false_positives": 50,
+      "visibility": {
+        "tp": 47,
+        "fp": 7,
+        "fn": 39,
+        "tn": 1145,
+        "precision": 0.8703703703703703,
+        "recall": 0.5465116279069767,
+        "f1": 0.6714285714285714
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 23,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 12,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 4,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 668,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 47,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.018668929179620188,
+          "rotation_rmse_deg": 0.501175846477888
+        },
+        {
+          "translation_rmse_m": 0.06082776714517606,
+          "rotation_rmse_deg": 1.0823215197520697
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.035378137512106465,
+            "rotation_rmse_deg": 0.7368202412319081
+          },
+          {
+            "translation_rmse_m": 0.04554765076023899,
+            "rotation_rmse_deg": 1.0446199820888964
+          }
+        ],
+        "minimum_odometry_inliers": [
+          63,
+          28
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 40,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9990793361290159,
+                  0.0,
+                  0.0,
+                  0.04290081724169091
+                ],
+                "translation": [
+                  0.11326493270160813,
+                  -0.22714992242230575,
+                  -0.06225504877621202
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.03301995169717138,
+              "keyframes": 40,
+              "localized_keyframes": 40,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "default_loops": {
+      "name": "different_recordings_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        2,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [
+          374
+        ],
+        []
+      ],
+      "synchronized_frames": [
+        11,
+        11
+      ],
+      "ambiguous_excluded": 14,
+      "labeled_changes_outside_candidates": 23,
+      "unknown": 417,
+      "intermittent": 99,
+      "occluded_static_voxels": 71,
+      "occupancy_difference": {
+        "tp": 63,
+        "fp": 266,
+        "fn": 23,
+        "tn": 886,
+        "precision": 0.19148936170212766,
+        "recall": 0.7325581395348837,
+        "f1": 0.3036144578313253
+      },
+      "occupancy_difference_occluded_false_positives": 50,
+      "visibility": {
+        "tp": 47,
+        "fp": 7,
+        "fn": 39,
+        "tn": 1145,
+        "precision": 0.8703703703703703,
+        "recall": 0.5465116279069767,
+        "f1": 0.6714285714285714
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 23,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 12,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 4,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 668,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 47,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.018668929179620188,
+          "rotation_rmse_deg": 0.501175846477888
+        },
+        {
+          "translation_rmse_m": 0.06082776714517606,
+          "rotation_rmse_deg": 1.0823215197520697
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.035378137512106465,
+            "rotation_rmse_deg": 0.7368202412319081
+          },
+          {
+            "translation_rmse_m": 0.04554765076023899,
+            "rotation_rmse_deg": 1.0446199820888964
+          }
+        ],
+        "minimum_odometry_inliers": [
+          63,
+          28
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": false,
+            "min_separation_m": 0.35,
+            "pairs": [
+              {
+                "anchored_candidates": 40,
+                "base": 0,
+                "image_pairs": [],
+                "localized_queries": 40,
+                "pose_consistent": 40,
+                "query": 1,
+                "query_frames": 40,
+                "rejected": {
+                  "spatial_separation": 39
+                },
+                "selected": 0,
+                "spatially_separated": 1
+              }
+            ],
+            "retriangulated": 0,
+            "selected_loops": 0
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 40,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9990793361290159,
+                  0.0,
+                  0.0,
+                  0.04290081724169091
+                ],
+                "translation": [
+                  0.11326493270160813,
+                  -0.22714992242230575,
+                  -0.06225504877621202
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.03301995169717138,
+              "keyframes": 40,
+              "localized_keyframes": 40,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "short_baseline_loops": {
+      "name": "different_recordings_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        2,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [
+          374
+        ],
+        []
+      ],
+      "synchronized_frames": [
+        11,
+        11
+      ],
+      "ambiguous_excluded": 14,
+      "labeled_changes_outside_candidates": 26,
+      "unknown": 399,
+      "intermittent": 89,
+      "occluded_static_voxels": 71,
+      "occupancy_difference": {
+        "tp": 60,
+        "fp": 277,
+        "fn": 26,
+        "tn": 875,
+        "precision": 0.17804154302670624,
+        "recall": 0.6976744186046512,
+        "f1": 0.28368794326241137
+      },
+      "occupancy_difference_occluded_false_positives": 50,
+      "visibility": {
+        "tp": 47,
+        "fp": 2,
+        "fn": 39,
+        "tn": 1150,
+        "precision": 0.9591836734693877,
+        "recall": 0.5465116279069767,
+        "f1": 0.6962962962962963
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 26,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 9,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 4,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 701,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 47,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.025875282817755463,
+          "rotation_rmse_deg": 0.5384602333002758
+        },
+        {
+          "translation_rmse_m": 0.05194763457602934,
+          "rotation_rmse_deg": 1.0801457680318876
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.0336427066047643,
+            "rotation_rmse_deg": 0.7670879474022821
+          },
+          {
+            "translation_rmse_m": 0.044916385134763204,
+            "rotation_rmse_deg": 1.0454374581162071
+          }
+        ],
+        "minimum_odometry_inliers": [
+          63,
+          28
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": true,
+            "gravity_projected_cost": 0.00019793588353703446,
+            "initial_cost": 0.0003499074112890974,
+            "max_keyframe_correction_m": 0.016007857044868658,
+            "min_separation_m": 0.15,
+            "pairs": [
+              {
+                "anchored_candidates": 40,
+                "base": 0,
+                "image_pairs": [
+                  [
+                    6,
+                    7
+                  ],
+                  [
+                    31,
+                    20
+                  ]
+                ],
+                "localized_queries": 40,
+                "pose_consistent": 40,
+                "query": 1,
+                "query_frames": 40,
+                "rejected": {
+                  "spatial_separation": 38
+                },
+                "selected": 2,
+                "spatially_separated": 2
+              }
+            ],
+            "retriangulated": 1714,
+            "selected_loops": 2,
+            "solver_cost": 0.00018415461267435131
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 40,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9990793361290159,
+                  0.0,
+                  0.0,
+                  0.04290081724169091
+                ],
+                "translation": [
+                  0.11326493270160813,
+                  -0.22714992242230575,
+                  -0.06225504877621202
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.03301995169717138,
+              "keyframes": 40,
+              "localized_keyframes": 40,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "depth_floor_support": [
+      {
+        "matched_normals": 60,
+        "available_normals": 60,
+        "candidate_frames": 60
+      },
+      {
+        "matched_normals": 40,
+        "available_normals": 40,
+        "candidate_frames": 40
+      }
+    ]
+  },
+  "holdout_box_added": {
+    "mocap": {
+      "name": "holdout_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        3
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        16,
+        16
+      ],
+      "ambiguous_excluded": 11,
+      "labeled_changes_outside_candidates": 2,
+      "unknown": 260,
+      "intermittent": 60,
+      "occluded_static_voxels": 154,
+      "occupancy_difference": {
+        "tp": 133,
+        "fp": 296,
+        "fn": 7,
+        "tn": 721,
+        "precision": 0.31002331002331,
+        "recall": 0.95,
+        "f1": 0.46748681898066785
+      },
+      "occupancy_difference_occluded_false_positives": 143,
+      "visibility": {
+        "tp": 122,
+        "fp": 31,
+        "fn": 18,
+        "tn": 986,
+        "precision": 0.7973856209150327,
+        "recall": 0.8714285714285714,
+        "f1": 0.8327645051194539
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 2,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 7,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 3,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 6,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 678,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 122
+    },
+    "session_alignment": {
+      "name": "holdout_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        3
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        16,
+        16
+      ],
+      "ambiguous_excluded": 11,
+      "labeled_changes_outside_candidates": 92,
+      "unknown": 545,
+      "intermittent": 33,
+      "occluded_static_voxels": 154,
+      "occupancy_difference": {
+        "tp": 47,
+        "fp": 200,
+        "fn": 93,
+        "tn": 817,
+        "precision": 0.1902834008097166,
+        "recall": 0.3357142857142857,
+        "f1": 0.24289405684754523
+      },
+      "occupancy_difference_occluded_false_positives": 65,
+      "visibility": {
+        "tp": 33,
+        "fp": 39,
+        "fn": 107,
+        "tn": 978,
+        "precision": 0.4583333333333333,
+        "recall": 0.2357142857142857,
+        "f1": 0.3113207547169811
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 92,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 13,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 1,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 1,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 506,
+      "visibility_occluded_false_positives": 1,
+      "visibility_true_positives_with_correct_direction": 33,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.10441631283972051,
+          "rotation_rmse_deg": 1.407197962340596
+        },
+        {
+          "translation_rmse_m": 0.13087955707190435,
+          "rotation_rmse_deg": 1.835120738732946
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.10306849914794074,
+            "rotation_rmse_deg": 1.5132160872782787
+          },
+          {
+            "translation_rmse_m": 0.1492205346283848,
+            "rotation_rmse_deg": 2.0509158737971713
+          }
+        ],
+        "minimum_odometry_inliers": [
+          41,
+          57
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 58,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.995815721899822,
+                  -0.0,
+                  -0.0,
+                  -0.09138406872719268
+                ],
+                "translation": [
+                  -0.21863254105645732,
+                  -0.13565051247457457,
+                  0.4218809938679757
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.04359054110085088,
+              "keyframes": 58,
+              "localized_keyframes": 58,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "default_loops": {
+      "name": "holdout_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        3
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        16,
+        16
+      ],
+      "ambiguous_excluded": 11,
+      "labeled_changes_outside_candidates": 92,
+      "unknown": 545,
+      "intermittent": 33,
+      "occluded_static_voxels": 154,
+      "occupancy_difference": {
+        "tp": 47,
+        "fp": 200,
+        "fn": 93,
+        "tn": 817,
+        "precision": 0.1902834008097166,
+        "recall": 0.3357142857142857,
+        "f1": 0.24289405684754523
+      },
+      "occupancy_difference_occluded_false_positives": 65,
+      "visibility": {
+        "tp": 33,
+        "fp": 39,
+        "fn": 107,
+        "tn": 978,
+        "precision": 0.4583333333333333,
+        "recall": 0.2357142857142857,
+        "f1": 0.3113207547169811
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 92,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 13,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 1,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 1,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 506,
+      "visibility_occluded_false_positives": 1,
+      "visibility_true_positives_with_correct_direction": 33,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.10441631283972051,
+          "rotation_rmse_deg": 1.407197962340596
+        },
+        {
+          "translation_rmse_m": 0.13087955707190435,
+          "rotation_rmse_deg": 1.835120738732946
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.10306849914794074,
+            "rotation_rmse_deg": 1.5132160872782787
+          },
+          {
+            "translation_rmse_m": 0.1492205346283848,
+            "rotation_rmse_deg": 2.0509158737971713
+          }
+        ],
+        "minimum_odometry_inliers": [
+          41,
+          57
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": false,
+            "min_separation_m": 0.35,
+            "pairs": [
+              {
+                "anchored_candidates": 58,
+                "base": 0,
+                "image_pairs": [],
+                "localized_queries": 58,
+                "pose_consistent": 57,
+                "query": 1,
+                "query_frames": 58,
+                "rejected": {
+                  "placement_translation": 1,
+                  "spatial_separation": 56
+                },
+                "selected": 0,
+                "spatially_separated": 1
+              }
+            ],
+            "retriangulated": 0,
+            "selected_loops": 0
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 58,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.995815721899822,
+                  -0.0,
+                  -0.0,
+                  -0.09138406872719268
+                ],
+                "translation": [
+                  -0.21863254105645732,
+                  -0.13565051247457457,
+                  0.4218809938679757
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.04359054110085088,
+              "keyframes": 58,
+              "localized_keyframes": 58,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "short_baseline_loops": {
+      "name": "holdout_box_added",
+      "direction": "addition",
+      "held_out_frames": [
+        3,
+        3
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        16,
+        16
+      ],
+      "ambiguous_excluded": 11,
+      "labeled_changes_outside_candidates": 102,
+      "unknown": 555,
+      "intermittent": 34,
+      "occluded_static_voxels": 154,
+      "occupancy_difference": {
+        "tp": 37,
+        "fp": 213,
+        "fn": 103,
+        "tn": 804,
+        "precision": 0.148,
+        "recall": 0.2642857142857143,
+        "f1": 0.18974358974358974
+      },
+      "occupancy_difference_occluded_false_positives": 68,
+      "visibility": {
+        "tp": 25,
+        "fp": 33,
+        "fn": 115,
+        "tn": 984,
+        "precision": 0.43103448275862066,
+        "recall": 0.17857142857142858,
+        "f1": 0.25252525252525254
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 102,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 12,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 1,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 0,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 510,
+      "visibility_occluded_false_positives": 1,
+      "visibility_true_positives_with_correct_direction": 25,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.09935065231245192,
+          "rotation_rmse_deg": 1.4408335387786573
+        },
+        {
+          "translation_rmse_m": 0.13496758638996328,
+          "rotation_rmse_deg": 1.8418189636608142
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.09805871784485909,
+            "rotation_rmse_deg": 1.5444871387365966
+          },
+          {
+            "translation_rmse_m": 0.15323711247165514,
+            "rotation_rmse_deg": 2.053761446550546
+          }
+        ],
+        "minimum_odometry_inliers": [
+          41,
+          57
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": true,
+            "gravity_projected_cost": 0.00030800354467744177,
+            "initial_cost": 0.00044977220589683916,
+            "max_keyframe_correction_m": 0.028068503334714893,
+            "min_separation_m": 0.15,
+            "pairs": [
+              {
+                "anchored_candidates": 58,
+                "base": 0,
+                "image_pairs": [
+                  [
+                    48,
+                    16
+                  ],
+                  [
+                    24,
+                    12
+                  ],
+                  [
+                    8,
+                    1
+                  ]
+                ],
+                "localized_queries": 58,
+                "pose_consistent": 57,
+                "query": 1,
+                "query_frames": 58,
+                "rejected": {
+                  "placement_translation": 1,
+                  "spatial_separation": 54
+                },
+                "selected": 3,
+                "spatially_separated": 3
+              }
+            ],
+            "retriangulated": 1961,
+            "selected_loops": 3,
+            "solver_cost": 0.0001055980111090828
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 58,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.995815721899822,
+                  -0.0,
+                  -0.0,
+                  -0.09138406872719268
+                ],
+                "translation": [
+                  -0.21863254105645732,
+                  -0.13565051247457457,
+                  0.4218809938679757
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.04359054110085088,
+              "keyframes": 58,
+              "localized_keyframes": 58,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "depth_floor_support": [
+      {
+        "matched_normals": 48,
+        "available_normals": 48,
+        "candidate_frames": 53
+      },
+      {
+        "matched_normals": 58,
+        "available_normals": 58,
+        "candidate_frames": 58
+      }
+    ]
+  },
+  "holdout_box_removed": {
+    "mocap": {
+      "name": "holdout_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        3,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        13,
+        10
+      ],
+      "ambiguous_excluded": 34,
+      "labeled_changes_outside_candidates": 3,
+      "unknown": 280,
+      "intermittent": 89,
+      "occluded_static_voxels": 129,
+      "occupancy_difference": {
+        "tp": 133,
+        "fp": 297,
+        "fn": 3,
+        "tn": 505,
+        "precision": 0.30930232558139537,
+        "recall": 0.9779411764705882,
+        "f1": 0.46996466431095407
+      },
+      "occupancy_difference_occluded_false_positives": 114,
+      "visibility": {
+        "tp": 93,
+        "fp": 114,
+        "fn": 43,
+        "tn": 688,
+        "precision": 0.4492753623188406,
+        "recall": 0.6838235294117647,
+        "f1": 0.5422740524781341
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 3,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 29,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 7,
+        "insufficient_clear_votes": 1,
+        "conflicting_clear_votes": 3
+      },
+      "visibility_stable_correct": 355,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 93
+    },
+    "session_alignment": {
+      "name": "holdout_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        3,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        13,
+        10
+      ],
+      "ambiguous_excluded": 34,
+      "labeled_changes_outside_candidates": 13,
+      "unknown": 315,
+      "intermittent": 40,
+      "occluded_static_voxels": 129,
+      "occupancy_difference": {
+        "tp": 123,
+        "fp": 280,
+        "fn": 13,
+        "tn": 522,
+        "precision": 0.3052109181141439,
+        "recall": 0.9044117647058824,
+        "f1": 0.45640074211502785
+      },
+      "occupancy_difference_occluded_false_positives": 117,
+      "visibility": {
+        "tp": 93,
+        "fp": 47,
+        "fn": 43,
+        "tn": 755,
+        "precision": 0.6642857142857143,
+        "recall": 0.6838235294117647,
+        "f1": 0.6739130434782609
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 13,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 24,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 5,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 1
+      },
+      "visibility_stable_correct": 438,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 93,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.018866291292820976,
+          "rotation_rmse_deg": 0.6090811226010205
+        },
+        {
+          "translation_rmse_m": 0.0791546758416922,
+          "rotation_rmse_deg": 1.884579534029432
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.051666062589538056,
+            "rotation_rmse_deg": 0.8206347199900901
+          },
+          {
+            "translation_rmse_m": 0.05640460107511314,
+            "rotation_rmse_deg": 1.1725644452245991
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          40
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 50,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9996000705318057,
+                  0.0,
+                  0.0,
+                  0.028278949641193023
+                ],
+                "translation": [
+                  -0.13454073029954824,
+                  -0.24888704398695757,
+                  0.36044738446260377
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.06113851930224765,
+              "keyframes": 50,
+              "localized_keyframes": 50,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "default_loops": {
+      "name": "holdout_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        3,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        13,
+        10
+      ],
+      "ambiguous_excluded": 34,
+      "labeled_changes_outside_candidates": 13,
+      "unknown": 315,
+      "intermittent": 40,
+      "occluded_static_voxels": 129,
+      "occupancy_difference": {
+        "tp": 123,
+        "fp": 280,
+        "fn": 13,
+        "tn": 522,
+        "precision": 0.3052109181141439,
+        "recall": 0.9044117647058824,
+        "f1": 0.45640074211502785
+      },
+      "occupancy_difference_occluded_false_positives": 117,
+      "visibility": {
+        "tp": 93,
+        "fp": 47,
+        "fn": 43,
+        "tn": 755,
+        "precision": 0.6642857142857143,
+        "recall": 0.6838235294117647,
+        "f1": 0.6739130434782609
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 13,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 24,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 5,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 1
+      },
+      "visibility_stable_correct": 438,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 93,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.018866291292820976,
+          "rotation_rmse_deg": 0.6090811226010205
+        },
+        {
+          "translation_rmse_m": 0.0791546758416922,
+          "rotation_rmse_deg": 1.884579534029432
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.051666062589538056,
+            "rotation_rmse_deg": 0.8206347199900901
+          },
+          {
+            "translation_rmse_m": 0.05640460107511314,
+            "rotation_rmse_deg": 1.1725644452245991
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          40
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": false,
+            "min_separation_m": 0.35,
+            "pairs": [
+              {
+                "anchored_candidates": 50,
+                "base": 0,
+                "image_pairs": [],
+                "localized_queries": 50,
+                "pose_consistent": 49,
+                "query": 1,
+                "query_frames": 50,
+                "rejected": {
+                  "placement_translation": 1,
+                  "spatial_separation": 48
+                },
+                "selected": 0,
+                "spatially_separated": 1
+              }
+            ],
+            "retriangulated": 0,
+            "selected_loops": 0
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 50,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9996000705318057,
+                  0.0,
+                  0.0,
+                  0.028278949641193023
+                ],
+                "translation": [
+                  -0.13454073029954824,
+                  -0.24888704398695757,
+                  0.36044738446260377
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.06113851930224765,
+              "keyframes": 50,
+              "localized_keyframes": 50,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "short_baseline_loops": {
+      "name": "holdout_box_removed",
+      "direction": "removal",
+      "held_out_frames": [
+        3,
+        2
+      ],
+      "sampled_depth_files_missing": [
+        [],
+        []
+      ],
+      "synchronized_frames": [
+        13,
+        10
+      ],
+      "ambiguous_excluded": 34,
+      "labeled_changes_outside_candidates": 19,
+      "unknown": 340,
+      "intermittent": 31,
+      "occluded_static_voxels": 129,
+      "occupancy_difference": {
+        "tp": 117,
+        "fp": 226,
+        "fn": 19,
+        "tn": 576,
+        "precision": 0.34110787172011664,
+        "recall": 0.8602941176470589,
+        "f1": 0.48851774530271397
+      },
+      "occupancy_difference_occluded_false_positives": 87,
+      "visibility": {
+        "tp": 92,
+        "fp": 26,
+        "fn": 44,
+        "tn": 776,
+        "precision": 0.7796610169491526,
+        "recall": 0.6764705882352942,
+        "f1": 0.7244094488188977
+      },
+      "missed_changes": {
+        "missing_surface_candidate": 19,
+        "outside_occupied_view": 0,
+        "invalid_occupied_depth": 0,
+        "insufficient_occupied_votes": 23,
+        "outside_clear_view": 0,
+        "invalid_clear_depth": 0,
+        "patch_rejected_clearance": 0,
+        "occluded_in_clear_visit": 2,
+        "insufficient_clear_votes": 0,
+        "conflicting_clear_votes": 0
+      },
+      "visibility_stable_correct": 447,
+      "visibility_occluded_false_positives": 0,
+      "visibility_true_positives_with_correct_direction": 92,
+      "scoring_pose_errors": [
+        {
+          "translation_rmse_m": 0.021066887117521735,
+          "rotation_rmse_deg": 0.6142114423951398
+        },
+        {
+          "translation_rmse_m": 0.08265565696858689,
+          "rotation_rmse_deg": 1.8820315095170965
+        }
+      ],
+      "alignment": {
+        "pose_errors": [
+          {
+            "translation_rmse_m": 0.06036209559603858,
+            "rotation_rmse_deg": 0.9895120974046963
+          },
+          {
+            "translation_rmse_m": 0.05275214933792897,
+            "rotation_rmse_deg": 1.1452726941322355
+          }
+        ],
+        "minimum_odometry_inliers": [
+          59,
+          40
+        ],
+        "session_alignment": {
+          "anchor_session": 0,
+          "cost_after": 0.0,
+          "cost_before": 0.0,
+          "failed_pairs": [],
+          "iterations": 0,
+          "keyframe_refinement": {
+            "applied": true,
+            "gravity_projected_cost": 0.00031126659584038244,
+            "initial_cost": 0.000714505177031277,
+            "max_keyframe_correction_m": 0.03962990026671116,
+            "min_separation_m": 0.15,
+            "pairs": [
+              {
+                "anchored_candidates": 50,
+                "base": 0,
+                "image_pairs": [
+                  [
+                    31,
+                    36
+                  ],
+                  [
+                    7,
+                    27
+                  ]
+                ],
+                "localized_queries": 50,
+                "pose_consistent": 49,
+                "query": 1,
+                "query_frames": 50,
+                "rejected": {
+                  "placement_translation": 1,
+                  "spatial_separation": 47
+                },
+                "selected": 2,
+                "spatially_separated": 2
+              }
+            ],
+            "retriangulated": 1884,
+            "selected_loops": 2,
+            "solver_cost": 0.00029386516510255585
+          },
+          "mode": "gravity_aligned_yaw_translation",
+          "pairs": [
+            {
+              "agreeing_keyframes": 50,
+              "base_from_other": {
+                "quaternion_wxyz": [
+                  0.9996000705318057,
+                  0.0,
+                  0.0,
+                  0.028278949641193023
+                ],
+                "translation": [
+                  -0.13454073029954824,
+                  -0.24888704398695757,
+                  0.36044738446260377
+                ]
+              },
+              "base_session": 0,
+              "final_residual": {
+                "translation_m": 0.0,
+                "weight": 1.0,
+                "yaw_deg": 0.0
+              },
+              "forward_error": null,
+              "keyframe_rms_m": 0.06113851930224765,
+              "keyframes": 50,
+              "localized_keyframes": 50,
+              "measurement_base_session": 0,
+              "measurement_query_session": 1,
+              "other_session": 1
+            }
+          ],
+          "session_count": 2,
+          "translation_scale_m": 0.25,
+          "yaw_scale_deg": 2.0
+        }
+      }
+    },
+    "depth_floor_support": [
+      {
+        "matched_normals": 44,
+        "available_normals": 44,
+        "candidate_frames": 53
+      },
+      {
+        "matched_normals": 50,
+        "available_normals": 50,
+        "candidate_frames": 50
+      }
+    ]
+  }
+}

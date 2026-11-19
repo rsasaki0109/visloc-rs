@@ -52,6 +52,7 @@ pub(super) fn refine(
     edges: &[SessionConstraint],
     directions: &[(usize, usize)],
     config: &MapMergeConfig,
+    min_separation_m: f64,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let mut graph = PoseGraph::new();
     let mut frames = Vec::new();
@@ -132,7 +133,14 @@ pub(super) fn refine(
             &maps[query].descriptors,
             config,
         );
+        let query_frames = frames[query].len();
+        let localized_queries = report
+            .registration
+            .as_ref()
+            .ok()
+            .map(|r| r.localized_keyframes);
         let mut candidates = report.candidates;
+        let candidate_count = candidates.len();
         candidates.sort_by(|a, b| {
             b.base_keyframe_inliers
                 .cmp(&a.base_keyframe_inliers)
@@ -141,19 +149,30 @@ pub(super) fn refine(
         });
         let mut chosen: Vec<PoseGraphEdge> = Vec::new();
         let mut image_pairs = Vec::new();
+        let mut rejected = BTreeMap::<&str, usize>::new();
+        let mut pose_consistent = 0;
         for candidate in &candidates {
-            if !candidate.agrees_with_registration
-                || candidate.base_keyframe_inliers < (config.min_inliers / 2).max(6)
-                || !candidate
-                    .mean_reprojection_error_px
-                    .is_some_and(|error| error <= 2.0)
+            let reason = if !candidate.agrees_with_registration {
+                Some("registration_disagreement")
+            } else if candidate.base_keyframe_inliers < (config.min_inliers / 2).max(6) {
+                Some("anchor_inliers")
+            } else if !candidate
+                .mean_reprojection_error_px
+                .is_some_and(|error| error <= 2.0)
             {
+                Some("reprojection")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                *rejected.entry(reason).or_default() += 1;
                 continue;
             }
             let (Some(from), Some(to)) = (
                 frames[base].get(&candidate.base_keyframe_id),
                 frames[query].get(&candidate.other_keyframe_id),
             ) else {
+                *rejected.entry("missing_rig_frame").or_default() += 1;
                 continue;
             };
             let measurement = to
@@ -164,15 +183,24 @@ pub(super) fn refine(
             let prediction =
                 relative_world_to_camera(&graph.poses[&from.node], &graph.poses[&to.node]);
             let residual = prediction.inverse().compose(&measurement);
-            if residual.translation.norm() > 0.12 || residual.rotation.angle().to_degrees() > 4.0 {
+            if residual.translation.norm() > 0.12 {
+                *rejected.entry("placement_translation").or_default() += 1;
                 continue;
             }
+            if residual.rotation.angle().to_degrees() > 4.0 {
+                *rejected.entry("placement_rotation").or_default() += 1;
+                continue;
+            }
+            pose_consistent += 1;
             let from_center = graph.poses[&from.node].camera_center_world();
             let to_center = graph.poses[&to.node].camera_center_world();
             if chosen.iter().any(|prior| {
-                (from_center - graph.poses[&prior.from].camera_center_world()).norm() < 0.35
-                    || (to_center - graph.poses[&prior.to].camera_center_world()).norm() < 0.35
+                (from_center - graph.poses[&prior.from].camera_center_world()).norm()
+                    < min_separation_m
+                    || (to_center - graph.poses[&prior.to].camera_center_world()).norm()
+                        < min_separation_m
             }) {
+                *rejected.entry("spatial_separation").or_default() += 1;
                 continue;
             }
             chosen.push(PoseGraphEdge {
@@ -185,6 +213,7 @@ pub(super) fn refine(
             });
             image_pairs.push([candidate.base_keyframe_id, candidate.other_keyframe_id]);
         }
+        let spatially_separated = chosen.len();
         let count = if chosen.len() >= 2 {
             let count = chosen.len();
             graph.edges.extend(chosen);
@@ -196,11 +225,15 @@ pub(super) fn refine(
             0
         };
         selected += count;
-        pairs.push(
-            json!({"base": base, "query": query, "selected": count, "image_pairs": image_pairs}),
-        );
+        pairs.push(json!({
+            "base": base, "query": query, "selected": count, "image_pairs": image_pairs,
+            "query_frames": query_frames, "localized_queries": localized_queries,
+            "anchored_candidates": candidate_count, "pose_consistent": pose_consistent,
+            "spatially_separated": spatially_separated, "rejected": rejected,
+        }));
     }
-    let mut report = json!({"selected_loops": selected, "pairs": pairs, "retriangulated": 0});
+    let mut report = json!({"selected_loops": selected, "pairs": pairs, "retriangulated": 0,
+                           "min_separation_m": min_separation_m, "applied": false});
     if selected == 0 {
         println!("keyframe refinement: no spatially separated loop measurements");
         return Ok(report);
@@ -234,7 +267,6 @@ pub(super) fn refine(
     report["solver_cost"] = json!(result.final_cost);
     report["gravity_projected_cost"] = json!(applied_cost);
     if !applied_cost.is_finite() || applied_cost >= result.initial_cost {
-        report["applied"] = json!(false);
         println!("keyframe refinement: gravity-preserving update did not lower the graph cost");
         return Ok(report);
     }
