@@ -55,11 +55,64 @@ jobs:
           rm input/recording.vrs
           df -h .
 
-      - name: Build upstream as published
+      - name: Build upstream with HTTPS transport for Ubuntu packages
         shell: bash
         run: |
+          # The Ubuntu mirror's port 80 repeatedly timed out on hosted runners.
+          python -u - <<'PY' &
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from shutil import copyfileobj
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          class UbuntuPackageProxy(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  package_url = urlsplit(self.path)
+                  if package_url.hostname not in {"archive.ubuntu.com", "security.ubuntu.com"}:
+                      self.send_error(403, "Expected a public Ubuntu package URL")
+                      return
+                  headers = {
+                      key: self.headers[key]
+                      for key in ("Range", "If-Range", "If-Modified-Since")
+                      if key in self.headers
+                  }
+                  for mirror in (package_url.hostname, "mirrors.edge.kernel.org"):
+                      request = Request(package_url._replace(scheme="https", netloc=mirror).geturl(),
+                                        headers=headers)
+                      try:
+                          upstream = urlopen(request, timeout=45)
+                      except HTTPError as error:
+                          upstream = error
+                          if error.code >= 500 and mirror == package_url.hostname:
+                              error.close()
+                              continue
+                      except (URLError, TimeoutError):
+                          continue
+                      with upstream:
+                          self.send_response(upstream.code)
+                          for key in ("Content-Length", "Content-Range", "Content-Type",
+                                      "Last-Modified", "ETag", "Accept-Ranges"):
+                              if key in upstream.headers:
+                                  self.send_header(key, upstream.headers[key])
+                          self.end_headers()
+                          copyfileobj(upstream, self.wfile)
+                      return
+                  self.send_error(502, "Could not reach Ubuntu mirrors over HTTPS")
+
+              def log_message(self, format, *args):
+                  return
+
+          ThreadingHTTPServer(("127.0.0.1", 18743), UbuntuPackageProxy).serve_forever()
+          PY
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
+          curl --noproxy "" --proxy http://127.0.0.1:18743 --connect-timeout 5 --max-time 100 \
+            --retry 2 --retry-connrefused --fail --silent --show-error \
+            http://archive.ubuntu.com/ubuntu/dists/noble/InRelease -o /dev/null
           for attempt in 1 2 3; do
-            if docker build --progress=plain -t slam-dunk-benchmark upstream; then
+            if docker build --progress=plain --network host \
+              --build-arg http_proxy=http://127.0.0.1:18743 -t slam-dunk-benchmark upstream; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then sleep 30; fi
