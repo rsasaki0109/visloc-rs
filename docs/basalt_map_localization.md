@@ -765,6 +765,101 @@ against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
 better than the constraints a deformation would use. Where they do not
 (MH_04's far end), there is nothing to fit.
 
+### Inspecting cross-session loop candidates
+
+Run inspection on the original per-session maps before any landmark fusion:
+
+```bash
+target/release/examples/basalt_map_merge --inspect-loops \
+  --base runs/mh01_map --add runs/mh02_map --add runs/mh03_map \
+  --out runs/mh_loop_inspection
+python scripts/render_map_loop_inspection.py \
+  runs/mh_loop_inspection/loop_inspection.json --out runs/mh_loop_inspection/support.png
+```
+
+`loop_inspection.json` lists the input sessions and reports each map pair.
+Each PnP candidate names both image IDs (look them up in the corresponding
+`images.csv`), the transform from the base camera into the other camera,
+its inlier count, and mean reprojection error in pixels. PnP uses the
+candidate landmarks across the base map or retrieval shortlist. The base
+endpoint is the posed image observing the most distinct inliers, and the
+report records that image's support separately.
+
+Use the candidate camera centres and the span of the agreeing centres
+to inspect where the matches came from. The span is the maximum distance
+between those centres in the query session's frame. Each triangle with
+three registered pairs reports the translation and rotation difference
+between direct registration and the transform composed via the third map.
+A candidate that agrees with the rigid registration still needs loop
+verification before graph optimization. Pair failures are included in the
+report, and inspection leaves the input maps untouched.
+
+In a release run on EuRoC Machine Hall using the maps above, all three
+pairs registered:
+
+| Base ← query | Agreeing / localized keyframe images | Registration residual RMS | Agreeing query span |
+|---|---:|---:|---:|
+| MH_01 ← MH_02 | 824 / 824 | 3.0 cm | 13.79 m |
+| MH_01 ← MH_03 | 427 / 427 | 2.7 cm | 10.61 m |
+| MH_02 ← MH_03 | 410 / 416 | 3.8 cm | 10.61 m |
+
+The triangle closed within 1.4 cm and 0.010°. The candidates span several
+locations. Coverage of MH_03 is concentrated on the western and southern
+parts of its trajectory in both pairings.
+
+![Cross-session loop candidates along three EuRoC query trajectories](assets/euroc_mh_loop_inspection.png)
+
+The sequential merge of the same three maps reached 2.35 cm position RMSE
+over all mapper keyframes. This uses a single alignment to ground truth
+fitted using only MH_01's mapper keyframe trajectory, then applies the
+reported session transforms before scoring MH_02 and MH_03.
+
+### Joint session alignment before fusion
+
+```bash
+target/release/examples/basalt_map_merge --optimize-sessions \
+  --base runs/mh01_map --add runs/mh02_map --add runs/mh03_map \
+  --out runs/mh_aligned
+```
+
+This mode runs the existing rigid registration on every pair of original,
+gravity-aligned session maps. The base session fixes the coordinate frame.
+If registration fails, the mode swaps the maps and retries. A successful
+reverse measurement is inverted into the graph edge's original direction.
+Each successful pair contributes one yaw and translation measurement, so
+repeated images from one pair do not give that pair extra weight. The
+solver initializes placements along a spanning tree and jointly minimizes
+the pair residuals using a Huber loss scaled by 25 cm and 2°. If a session
+has no path to the base, the command reports it as disconnected and stops
+before fusion. Added maps are ordered by canonical path.
+
+The solver applies one rigid transform to each session before fusing
+landmarks. The merged map uses the existing COLMAP layout. In `map.json`,
+`sessions[].base_from_session` stores the final transforms, and
+`session_alignment` records the initialization and final costs, detected
+pair registrations, residuals, and failed pairs. For each accepted pair,
+`measurement_base_session` and `measurement_query_session` identify the
+direction used for matching and the keyframe counts. The reported
+`base_from_other` is the graph edge's transform from `other_session` to
+`base_session`. Recovered pairs record `forward_error`, and pairs that
+fail both attempts include `error` and `reverse_error`.
+
+On the same three Machine Hall maps, the normalized graph cost fell from
+0.001682 to 0.000561 in two iterations. The three pair translation
+residuals were each 4.8 mm after alignment. Reversing the two `--add`
+arguments produced byte-identical output.
+
+| Position RMSE (MH_01 alignment to ground truth) | Sequential merge | Joint session alignment |
+|---|---:|---:|
+| MH_01 | 1.45 cm | 1.45 cm |
+| MH_02 | 2.55 cm | 2.61 cm |
+| MH_03 | 3.00 cm | 2.99 cm |
+| All mapper keyframes | 2.35 cm | 2.37 cm |
+
+The pair measurements were already consistent to centimetre scale.
+Joint alignment distributed their disagreement across the graph, while
+the aggregate ground-truth RMSE increased by about 0.2 mm.
+
 ### Lifelong use: appending each session
 
 A robot that maps each session (the SLAM's `--save-map`) and merges it into

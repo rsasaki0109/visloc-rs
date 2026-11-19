@@ -15,6 +15,7 @@ mod correspondence;
 mod keyframe_retrieval;
 mod map_merge;
 mod odom_correction;
+mod session_alignment;
 mod wheel_calibration;
 mod wheel_gyro;
 
@@ -39,9 +40,14 @@ pub use correspondence::{
 };
 pub use keyframe_retrieval::KeyframeRetrieval;
 pub use map_merge::{
-    merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
+    inspect_map_registration, merge_maps, register_map, MapLoopCandidate, MapMergeConfig,
+    MapMergeError, MapRegistration, MapRegistrationInspection, MergedMap,
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
+pub use session_alignment::{
+    align_sessions, SessionAlignment, SessionAlignmentConfig, SessionAlignmentError,
+    SessionAlignmentResidual, SessionConstraint,
+};
 pub use wheel_calibration::{
     CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
 };

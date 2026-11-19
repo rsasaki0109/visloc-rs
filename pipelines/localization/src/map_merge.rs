@@ -35,7 +35,7 @@
 //! descriptor for each point, and the ratio test of matching would reject
 //! most matches there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Point2, Vector3};
 use visloc_core::geometry::{Pose, SE3};
@@ -194,6 +194,31 @@ impl std::fmt::Display for MapMergeError {
 
 impl std::error::Error for MapMergeError {}
 
+/// Candidate relative pose derived by localizing an image from another map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapLoopCandidate {
+    pub base_keyframe_id: u64,
+    pub other_keyframe_id: u64,
+    /// Transforms coordinates from the base camera into the other camera.
+    pub other_camera_from_base_camera: SE3,
+    pub inlier_count: usize,
+    /// Number of PnP inlier landmarks observed by the chosen base keyframe.
+    /// PnP itself uses landmarks from the whole candidate set.
+    pub base_keyframe_inliers: usize,
+    pub mean_reprojection_error_px: Option<f64>,
+    /// Camera center in the original coordinate frame of the other session.
+    pub other_camera_center_m: Vector3<f64>,
+    pub agrees_with_registration: bool,
+}
+
+/// Pairwise registration and its diagnostic candidates, including candidates
+/// from pairs for which a consistent registration could not be found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapRegistrationInspection {
+    pub registration: Result<MapRegistration, MapMergeError>,
+    pub candidates: Vec<MapLoopCandidate>,
+}
+
 /// One keyframe of the other map localized in the base map.
 #[derive(Debug, Clone)]
 struct KeyframeFix {
@@ -201,6 +226,7 @@ struct KeyframeFix {
     base_centre: Vector3<f64>,
     /// Yaw of the base-from-other rotation this keyframe implies.
     yaw: f64,
+    candidate: Option<MapLoopCandidate>,
 }
 
 impl KeyframeFix {
@@ -241,6 +267,12 @@ fn fit_keyframes(fixes: &[&KeyframeFix]) -> Offset {
 
 type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
 
+struct RegistrationTarget<'a> {
+    index: BinaryLandmarkIndex,
+    retrieval: Option<KeyframeRetrieval>,
+    inspection_map: Option<&'a VisualMap>,
+}
+
 fn pnp_pipeline(config: &MapMergeConfig) -> Pipeline {
     let ransac = PnPRansac {
         pose_estimator: P3PGrunert,
@@ -269,13 +301,12 @@ fn pnp_pipeline(config: &MapMergeConfig) -> Pipeline {
     )
 }
 
-/// Localizes one keyframe of `other` in the base map behind `index`.
+/// Localizes one keyframe of `other` in the base map behind `target`.
 fn localize_keyframe(
     keyframe: &Keyframe,
     other: &VisualMap,
     other_descriptors: &LandmarkDescriptorStore,
-    index: &BinaryLandmarkIndex,
-    retrieval: Option<&KeyframeRetrieval>,
+    target: &RegistrationTarget<'_>,
     pipeline: &Pipeline,
     config: &MapMergeConfig,
 ) -> Option<KeyframeFix> {
@@ -295,8 +326,9 @@ fn localize_keyframe(
     if keypoints.len() < config.min_inliers {
         return None;
     }
+    let index = &target.index;
     let packed = index.pack_query(&descriptors);
-    let correspondences = match retrieval {
+    let correspondences = match &target.retrieval {
         Some(retrieval) => {
             let candidates = retrieval.candidate_landmarks(&packed, config.retrieval_keyframes);
             index.match_among(&keypoints, &packed, config.gates, &candidates)
@@ -309,11 +341,59 @@ fn localize_keyframe(
         .camera_to_world()
         .compose(&pose.world_to_camera)
         .rotation;
+    let other_centre = pose.camera_center_world().coords;
+    let base_centre = base_pose.camera_center_world().coords;
+    let candidate = target.inspection_map.and_then(|base| {
+        let (base_id, base_keyframe_inliers, anchor_pose) =
+            loop_anchor(base, &result.inlier_landmark_ids, &base_centre)?;
+        Some(MapLoopCandidate {
+            base_keyframe_id: base_id,
+            other_keyframe_id: keyframe.frame.id,
+            other_camera_from_base_camera: base_pose
+                .world_to_camera
+                .compose(&anchor_pose.camera_to_world()),
+            inlier_count: result.inlier_count,
+            base_keyframe_inliers,
+            mean_reprojection_error_px: result.reprojection_error,
+            other_camera_center_m: other_centre,
+            agrees_with_registration: false,
+        })
+    });
     Some(KeyframeFix {
-        other_centre: pose.camera_center_world().coords,
-        base_centre: base_pose.camera_center_world().coords,
+        other_centre,
+        base_centre,
         yaw: yaw_of(&base_from_other),
+        candidate,
     })
+}
+
+/// Expresses the map-wide PnP fix relative to the posed image observing the
+/// most distinct inliers. Prefer the closer viewpoint when support is equal.
+fn loop_anchor<'a>(
+    base: &'a VisualMap,
+    inlier_ids: &[LandmarkId],
+    localized_center: &Vector3<f64>,
+) -> Option<(u64, usize, &'a Pose)> {
+    let mut support = HashMap::<u64, usize>::new();
+    let mut seen = HashSet::new();
+    for id in inlier_ids {
+        if let Some(landmark) = base.landmarks.get(id) {
+            for observation in &landmark.observations {
+                if seen.insert((*id, observation.frame_id)) {
+                    *support.entry(observation.frame_id).or_default() += 1;
+                }
+            }
+        }
+    }
+    support
+        .into_iter()
+        .filter_map(|(id, count)| {
+            let pose = base.keyframes.get(&id)?.frame.pose.as_ref()?;
+            let distance = (pose.camera_center_world().coords - localized_center).norm_squared();
+            Some((id, count, pose, distance))
+        })
+        .min_by(|a, b| b.1.cmp(&a.1).then(a.3.total_cmp(&b.3)).then(a.0.cmp(&b.0)))
+        .map(|(id, count, pose, _)| (id, count, pose))
 }
 
 /// Finds the transform taking `other` into `base`; see the module
@@ -325,6 +405,78 @@ pub fn register_map(
     other_descriptors: &LandmarkDescriptorStore,
     config: &MapMergeConfig,
 ) -> Result<MapRegistration, MapMergeError> {
+    let (keyframes, fixes) = collect_keyframe_fixes(
+        base,
+        base_descriptors,
+        other,
+        other_descriptors,
+        config,
+        false,
+    )?;
+    fit_registration(keyframes, &fixes, config).map(|(registration, _)| registration)
+}
+
+/// Runs the same registration as [`register_map`] and retains relative pose
+/// candidates for inspection. An agreeing candidate passed the registration's
+/// common-transform test and still needs loop-specific verification.
+pub fn inspect_map_registration(
+    base: &VisualMap,
+    base_descriptors: &LandmarkDescriptorStore,
+    other: &VisualMap,
+    other_descriptors: &LandmarkDescriptorStore,
+    config: &MapMergeConfig,
+) -> MapRegistrationInspection {
+    let (keyframes, fixes) = match collect_keyframe_fixes(
+        base,
+        base_descriptors,
+        other,
+        other_descriptors,
+        config,
+        true,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            return MapRegistrationInspection {
+                registration: Err(error),
+                candidates: Vec::new(),
+            };
+        }
+    };
+    let registration = fit_registration(keyframes, &fixes, config).map(|(registration, best)| {
+        let agreeing = best
+            .into_iter()
+            .filter_map(|fix| {
+                fix.candidate
+                    .as_ref()
+                    .map(|candidate| candidate.other_keyframe_id)
+            })
+            .collect::<HashSet<_>>();
+        (registration, agreeing)
+    });
+    let candidates = fixes
+        .into_iter()
+        .filter_map(|fix| fix.candidate)
+        .map(|mut candidate| {
+            candidate.agrees_with_registration = registration
+                .as_ref()
+                .is_ok_and(|(_, agreeing)| agreeing.contains(&candidate.other_keyframe_id));
+            candidate
+        })
+        .collect();
+    MapRegistrationInspection {
+        registration: registration.map(|(registration, _)| registration),
+        candidates,
+    }
+}
+
+fn collect_keyframe_fixes(
+    base: &VisualMap,
+    base_descriptors: &LandmarkDescriptorStore,
+    other: &VisualMap,
+    other_descriptors: &LandmarkDescriptorStore,
+    config: &MapMergeConfig,
+    inspect: bool,
+) -> Result<(usize, Vec<KeyframeFix>), MapMergeError> {
     let index = BinaryLandmarkIndex::new(base, base_descriptors)
         .with_duplicate_radius(config.duplicate_radius_m);
     if index.is_empty() {
@@ -333,6 +485,11 @@ pub fn register_map(
     let pipeline = pnp_pipeline(config);
     let retrieval = (config.retrieval_keyframes > 0)
         .then(|| KeyframeRetrieval::new(base, &index, config.retrieval_bits));
+    let target = RegistrationTarget {
+        index,
+        retrieval,
+        inspection_map: inspect.then_some(base),
+    };
     let mut keyframes = other
         .keyframes
         .values()
@@ -348,8 +505,7 @@ pub fn register_map(
                     keyframe,
                     other,
                     other_descriptors,
-                    &index,
-                    retrieval.as_ref(),
+                    &target,
                     &pipeline,
                     config,
                 )
@@ -375,8 +531,14 @@ pub fn register_map(
                 .collect()
         })
     };
-    let fixes = fixes.into_iter().flatten().collect::<Vec<_>>();
+    Ok((keyframes.len(), fixes.into_iter().flatten().collect()))
+}
 
+fn fit_registration<'a>(
+    keyframes: usize,
+    fixes: &'a [KeyframeFix],
+    config: &MapMergeConfig,
+) -> Result<(MapRegistration, Vec<&'a KeyframeFix>), MapMergeError> {
     // The transform most keyframes agree with, refitted to them until the
     // agreeing set settles.
     let agreeing = |offset: &Offset| {
@@ -386,7 +548,7 @@ pub fn register_map(
             .collect::<Vec<_>>()
     };
     let mut best = Vec::new();
-    for fix in &fixes {
+    for fix in fixes {
         let candidate = agreeing(&fix.offset());
         if candidate.len() > best.len() {
             best = candidate;
@@ -418,13 +580,16 @@ pub fn register_map(
         / best.len() as f64)
         .sqrt();
 
-    Ok(MapRegistration {
-        base_from_other: offset.se3(),
-        keyframes: keyframes.len(),
-        localized_keyframes: fixes.len(),
-        agreeing_keyframes: best.len(),
-        keyframe_rms_m,
-    })
+    Ok((
+        MapRegistration {
+            base_from_other: offset.se3(),
+            keyframes,
+            localized_keyframes: fixes.len(),
+            agreeing_keyframes: best.len(),
+            keyframe_rms_m,
+        },
+        best,
+    ))
 }
 
 fn same_camera(lhs: &Camera, rhs: &Camera) -> bool {
@@ -918,6 +1083,62 @@ mod tests {
         )
         .expect("registered");
         assert_eq!(serial, registration);
+    }
+
+    #[test]
+    fn inspection_exports_camera_relative_poses_and_keeps_candidates_on_failed_registration() {
+        let s = sessions();
+        let mut config = MapMergeConfig::default();
+        let inspect = |config: &MapMergeConfig| {
+            inspect_map_registration(&s.base.0, &s.base.1, &s.other.0, &s.other.1, config)
+        };
+        let report = inspect(&config);
+        assert_eq!(
+            report.registration,
+            register_map(&s.base.0, &s.base.1, &s.other.0, &s.other.1, &config)
+        );
+        assert_eq!(
+            report.candidates.len(),
+            report.registration.unwrap().localized_keyframes
+        );
+        for candidate in &report.candidates {
+            let base_pose = s.base.0.keyframes[&candidate.base_keyframe_id]
+                .frame
+                .pose
+                .as_ref()
+                .unwrap();
+            let other_pose = s.other.0.keyframes[&candidate.other_keyframe_id]
+                .frame
+                .pose
+                .as_ref()
+                .unwrap();
+            let expected = other_pose
+                .world_to_camera
+                .compose(&s.base_from_other.inverse())
+                .compose(&base_pose.camera_to_world());
+            assert_se3_close(
+                &candidate.other_camera_from_base_camera,
+                &expected,
+                0.03,
+                0.2,
+            );
+            assert!(candidate.agrees_with_registration);
+            assert!(candidate.base_keyframe_inliers > 0);
+            assert!(candidate.base_keyframe_inliers <= candidate.inlier_count);
+            assert!(candidate.mean_reprojection_error_px.unwrap().is_finite());
+        }
+
+        config.min_keyframes = 13;
+        let rejected = inspect(&config);
+        assert!(matches!(
+            rejected.registration,
+            Err(MapMergeError::TooFewKeyframes { .. })
+        ));
+        assert_eq!(rejected.candidates.len(), report.candidates.len());
+        assert!(rejected
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.agrees_with_registration));
     }
 
     #[test]

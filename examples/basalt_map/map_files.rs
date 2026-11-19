@@ -25,6 +25,7 @@
 // The writer, the reader and the merger examples each use part of this module.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -86,6 +87,36 @@ pub struct ImageRow {
     pub timestamp_ns: Option<i64>,
     /// Index into `map.json`'s `sessions`.
     pub session: usize,
+}
+
+pub fn load_original_maps(paths: &[&Path]) -> Result<Vec<SavedMap>, Box<dyn std::error::Error>> {
+    let mut input_paths = HashSet::new();
+    let mut maps: Vec<SavedMap> = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !input_paths.insert(path.canonicalize()?) {
+            return Err(format!("{}: repeated input map", path.display()).into());
+        }
+        let map = load(path)?;
+        if map.images.iter().any(|image| image.session != 0)
+            || map.summary["sessions"]
+                .as_array()
+                .is_some_and(|sessions| sessions.len() > 1)
+        {
+            return Err(format!("{}: expected an original session map", path.display()).into());
+        }
+        if maps
+            .first()
+            .is_some_and(|base| base.frontend != map.frontend)
+        {
+            return Err(format!(
+                "{}: inconsistent feature extraction settings",
+                path.display()
+            )
+            .into());
+        }
+        maps.push(map);
+    }
+    Ok(maps)
 }
 
 pub fn se3_json(pose: &SE3) -> Value {

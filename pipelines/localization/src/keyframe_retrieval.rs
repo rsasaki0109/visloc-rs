@@ -127,10 +127,15 @@ impl KeyframeRetrieval {
     /// The `top_k` keyframes most like `query`, best first, as
     /// `(position, score)`; ties go to the lower keyframe id.
     fn ranked(&self, query: &PackedDescriptors, top_k: usize) -> Vec<(usize, f32)> {
-        let words = bag_of_words(
+        let mut words = bag_of_words(
             (0..query.len()).filter_map(|index| query.get(index)),
             self.bits,
-        );
+        )
+        .into_iter()
+        .collect::<Vec<_>>();
+        // A fixed summation order avoids changing near-tied shortlists with
+        // the histogram's randomized hash iteration order.
+        words.sort_unstable_by_key(|&(word, _)| word);
         let mut scores = vec![0.0_f32; self.keyframe_ids.len()];
         for (word, query_weight) in words {
             for &(keyframe, weight) in self.inverted.get(&word).into_iter().flatten() {
@@ -263,6 +268,27 @@ mod tests {
         // The same as the map-wide search, which finds the same landmarks.
         let all = index.match_all(&keypoints, &packed, gates, 1);
         assert_eq!(all.landmark_ids, set.landmark_ids);
+    }
+
+    #[test]
+    fn retrieval_accumulates_word_scores_in_word_order() {
+        let retrieval = KeyframeRetrieval {
+            bits: 16,
+            keyframe_ids: vec![7],
+            landmarks: vec![Vec::new()],
+            inverted: HashMap::from([
+                (0, vec![(0, 0.2)]),
+                (1, vec![(0, 0.05)]),
+                (u16::MAX.into(), vec![(0, 0.01)]),
+            ]),
+        };
+        let mut first_bit = vec![0.0; 256];
+        first_bit[WORD_BITS[0]] = 1.0;
+        let packed = PackedDescriptors::pack(&[vec![0.0; 256], first_bit, vec![1.0; 256]], 256);
+        let expected = vec![(7, (0.2_f32 + 0.05) + 0.01)];
+        for _ in 0..32 {
+            assert_eq!(retrieval.query(&packed, 1), expected);
+        }
     }
 
     #[test]

@@ -201,6 +201,92 @@ python3 scripts/render_map_merge_gif.py --merged runs/office_merged \
 `.7z`. The GIF is not in the repository: its colours come from the dataset's
 images, which are CC BY-ND 4.0.
 
+## Session alignment across days
+
+We rebuilt all seven office maps with the stock T265 calibration, using
+both raw and locally equalized images for ORB extraction. We inspected
+all 42 directed map pairs at 15 and 10 minimum PnP inliers. Each pair
+still needed at least three keyframe images agreeing on a rigid transform.
+The direction matters because the query images match against the base
+map's landmark tracks and retrieval index.
+
+![Agreeing OpenLORIS office keyframe images by base and query session](assets/openloris_office_session_pair_support.png)
+
+| ORB input | Minimum inliers | Directed pairs registered |
+|---|---:|---:|
+| Raw | 15 | 8 / 42 |
+| Raw | 10 | 10 / 42 |
+| Local contrast equalization | 15 | 11 / 42 |
+| Local contrast equalization | 10 | 15 / 42 |
+
+- **Moved furniture.** With raw descriptors and 15 inliers, office1-6
+  registered to office1-1 using 164 agreeing images spread over 3.18 m of
+  the route. Office1-7 registered to office1-2 using 54 agreeing images.
+- **Daylight.** Equalization and 10 inliers registered office1-4 to
+  office1-2 with 15 agreeing images and a 0.64 m span. The reverse
+  direction had 13 agreeing images and a 3.36 m span. With raw descriptors
+  and 10 inliers, the reverse direction alone registered, with four
+  agreeing images and a 0.23 m span.
+- **Dawn.** With equalization and 10 inliers, the only pair involving
+  office1-5 was office1-5 as base and office1-2 as query. It had 24
+  agreeing images over 0.26 m. With office1-2 as the anchor, the reverse
+  retry recovered this measurement and connected all seven sessions with
+  eight pair constraints. Office1-5 scored 5.87 cm position RMSE and the
+  full seven-session map scored 5.25 cm, using office1-2's fixed mocap
+  alignment. Office1-5 attaches through that single edge. The six
+  other session transforms match the six-session joint run exactly.
+  Reversing the six `--add` arguments produced byte-identical output.
+
+For the trajectory comparison, both merge modes use the same original
+maps in each row. We fit a fixed SE(3) alignment to the mocap ground truth
+using only office1-2's T265 IMU keyframe positions, then score all sessions
+using their reported `base_from_session` transforms. We associate
+timestamps within 10 ms.
+
+With the first three raw runs alone, office1-1 and office1-2 had zero
+localized keyframe images in both directions. The in-place turns in
+office1-3 connected them with 98 agreeing images against office1-1 and
+22 against office1-2. The three-session position RMSE was 2.58 cm for
+sequential merge and 2.59 cm for joint alignment.
+
+| Sessions | Pair measurements in joint graph | Sequential position RMSE | Joint position RMSE |
+|---|---:|---:|---:|
+| Raw, 15 inliers, 1–3 and 6–7 | 4 | 4.55 cm | 4.41 cm |
+| Equalized, 10 inliers, 1–4 and 6–7 | 7 | 4.84 cm | 4.96 cm |
+
+The raw graph is a tree, and the initialization satisfies all four
+measurements. The change in RMSE reflects placement from the original
+maps before fusion. The six-session equalized graph has two independent
+cycles. Its normalized cost decreased from 0.414 to 0.140 and its
+ground-truth RMSE increased by 1.3 mm.
+
+In a held-out revisit, we localized office1-7 against raw maps of
+office1-2, 1-3, 1-1 and 1-6 using VIO plus map fixes and 15 minimum
+inliers. The sequential and joint maps reported poses for 880 and 889 of
+1,140 frames, respectively. On the 880 common timestamps, position
+RMSE was 2.96 cm with the sequential map and 3.75 cm with the joint map.
+With office1-5 held out and the six equalized maps, both merge modes
+produced zero map poses across 1,591 frames at the same localization
+settings.
+
+To reproduce the six-session comparison, build the equalized maps using
+the recipe below, then run the same command with and without
+`--optimize-sessions`, with separate output directories.
+
+```bash
+target/release/examples/basalt_map_merge --optimize-sessions --min-inliers 10 \
+  --base runs/o12e_map --add runs/o13e_map --add runs/o14e_map \
+  --add runs/o11e_map --add runs/o16e_map --add runs/o17e_map \
+  --out runs/office_aligned
+```
+
+Add `--add runs/o15e_map` to the joint command to include the dawn session
+through the reverse retry while keeping office1-2 as the anchor.
+
+For the pair matrix, use `--inspect-loops` with all seven maps and repeat
+with the full input order reversed, including the base. Repeat for each
+combination of ORB input and minimum inlier count in the table.
+
 ## Results
 
 Each query is localized against a map built from another session, with

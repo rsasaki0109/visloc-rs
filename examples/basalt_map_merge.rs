@@ -23,10 +23,21 @@
 //! world and how it was registered; `images.csv` says which session each image
 //! came from. A merged map can be the `--base` (or an `--add`) of another
 //! merge.
+//!
+//! With `--inspect-loops`, inspect registration between the original maps
+//! and write `loop_inspection.json` to the output directory without merging.
+//! With `--optimize-sessions`, jointly align the original maps in the base
+//! session's frame before fusing their landmarks.
 
+#[path = "basalt_map/global_alignment.rs"]
+mod global_alignment;
+#[path = "basalt_map/loop_inspection.rs"]
+mod loop_inspection;
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
 
+use std::io;
+use std::iter;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -34,12 +45,20 @@ use serde_json::{json, Value};
 use visloc_core::geometry::SE3;
 use visloc_rs::localization::{merge_maps, register_map, MapMergeConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Sequential,
+    Inspect,
+    Optimize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Args {
     base: PathBuf,
     add: Vec<PathBuf>,
     out: PathBuf,
     config: MapMergeConfig,
+    mode: Mode,
 }
 
 impl Args {
@@ -47,7 +66,8 @@ impl Args {
         "usage: basalt_map_merge --base DIR --add DIR [--add DIR ...] --out DIR \
          [--min-inliers N] [--min-keyframes N] [--max-hamming N] \
          [--fuse-radius-m M] [--fuse-max-hamming N] [--threads N] \
-         [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M]"
+         [--retrieval-keyframes N] [--retrieval-bits B] [--duplicate-radius-m M] \
+         [--inspect-loops | --optimize-sessions]"
             .into()
     }
 
@@ -61,6 +81,7 @@ impl Args {
             base: PathBuf::new(),
             add: Vec::new(),
             out: PathBuf::new(),
+            mode: Mode::Sequential,
             config: MapMergeConfig {
                 threads: std::thread::available_parallelism().map_or(1, usize::from),
                 ..MapMergeConfig::default()
@@ -84,6 +105,11 @@ impl Args {
                 "--base" => base = Some(PathBuf::from(value()?)),
                 "--add" => args.add.push(PathBuf::from(value()?)),
                 "--out" => out = Some(PathBuf::from(value()?)),
+                "--inspect-loops" if args.mode != Mode::Optimize => args.mode = Mode::Inspect,
+                "--optimize-sessions" if args.mode != Mode::Inspect => args.mode = Mode::Optimize,
+                "--inspect-loops" | "--optimize-sessions" => {
+                    return Err("choose either --inspect-loops or --optimize-sessions".into());
+                }
                 "--min-inliers" => config.min_inliers = number(&option, value()?)?,
                 "--retrieval-keyframes" => config.retrieval_keyframes = number(&option, value()?)?,
                 "--retrieval-bits" => config.retrieval_bits = number(&option, value()?)?,
@@ -132,7 +158,40 @@ fn same_rig(lhs: &[SE3], rhs: &[SE3]) -> bool {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let mut merged = map_files::load(&args.base)?;
+    if args.mode == Mode::Inspect {
+        return loop_inspection::run(args);
+    }
+
+    let mut additions = args.add.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let mut original_maps = Vec::new();
+    let optimization = if args.mode == Mode::Optimize {
+        let mut sorted = additions
+            .iter()
+            .map(|&path| Ok((path.canonicalize()?, path)))
+            .collect::<io::Result<Vec<_>>>()?;
+        sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        additions = sorted.into_iter().map(|(_, path)| path).collect();
+        let paths = iter::once(args.base.as_path())
+            .chain(additions.iter().copied())
+            .collect::<Vec<_>>();
+        if let Ok(output) = args.out.canonicalize() {
+            for path in &paths {
+                if path.canonicalize()? == output {
+                    return Err(
+                        "optimized output must be a separate directory from the input maps".into(),
+                    );
+                }
+            }
+        }
+        original_maps = map_files::load_original_maps(&paths)?;
+        Some(global_alignment::solve(&original_maps, &args.config)?)
+    } else {
+        None
+    };
+    let mut original_maps = original_maps.into_iter();
+    let mut merged = original_maps
+        .next()
+        .map_or_else(|| map_files::load(&args.base), Ok)?;
     let mut sessions = map_sessions(&merged, &args.base);
     let mut images = merged.images.clone();
     println!(
@@ -142,8 +201,10 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         merged.map.landmarks.len()
     );
 
-    for dir in &args.add {
-        let other = map_files::load(dir)?;
+    for (addition_index, dir) in additions.into_iter().enumerate() {
+        let other = original_maps
+            .next()
+            .map_or_else(|| map_files::load(dir), Ok)?;
         // Another calibration of the rig (another day's) merges too: its
         // cameras get new ids in the COLMAP model, and its session records
         // its own T_imu_cam (map.json's cameras stay the base map's).
@@ -167,44 +228,70 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
         let started = Instant::now();
-        let registration = register_map(
-            &merged.map,
-            &merged.descriptors,
-            &other.map,
-            &other.descriptors,
-            &args.config,
-        )
-        .map_err(|error| format!("{}: not registered: {error}", dir.display()))?;
+        let registration = if optimization.is_none() {
+            Some(
+                register_map(
+                    &merged.map,
+                    &merged.descriptors,
+                    &other.map,
+                    &other.descriptors,
+                    &args.config,
+                )
+                .map_err(|error| format!("{}: not registered: {error}", dir.display()))?,
+            )
+        } else {
+            None
+        };
+        let base_from_other = match (&optimization, &registration) {
+            (Some((alignment, _)), _) => &alignment.reference_from_session[addition_index + 1],
+            (_, Some(registration)) => &registration.base_from_other,
+            _ => unreachable!("each mode provides a session transform"),
+        };
         let registered_s = started.elapsed().as_secs_f64();
         let result = merge_maps(
             &merged.map,
             &merged.descriptors,
             &other.map,
             &other.descriptors,
-            &registration.base_from_other,
+            base_from_other,
             &args.config,
         )?;
         let added_landmarks = result.map.landmarks.len() - merged.map.landmarks.len();
-        let yaw = registration.base_from_other.rotation.euler_angles().2;
-        let t = registration.base_from_other.translation;
-        println!(
-            "add {}: {}/{} keyframes localized, {} agree; yaw {:.3} deg, translation \
-             [{:.3}, {:.3}, {:.3}] m; keyframe residual RMS {:.1} cm; {} images, \
-             {} landmarks fused, {} added ({:.1} s)",
-            dir.display(),
-            registration.localized_keyframes,
-            registration.keyframes,
-            registration.agreeing_keyframes,
-            yaw.to_degrees(),
-            t.x,
-            t.y,
-            t.z,
-            registration.keyframe_rms_m * 100.0,
-            result.keyframe_ids.len(),
-            result.fused_landmarks,
-            added_landmarks,
-            registered_s,
-        );
+        let yaw = base_from_other.rotation.euler_angles().2;
+        let t = base_from_other.translation;
+        if let Some(registration) = &registration {
+            println!(
+                "add {}: {}/{} keyframes localized, {} agree; yaw {:.3} deg, translation \
+                 [{:.3}, {:.3}, {:.3}] m; keyframe residual RMS {:.1} cm; {} images, \
+                 {} landmarks fused, {} added ({:.1} s)",
+                dir.display(),
+                registration.localized_keyframes,
+                registration.keyframes,
+                registration.agreeing_keyframes,
+                yaw.to_degrees(),
+                t.x,
+                t.y,
+                t.z,
+                registration.keyframe_rms_m * 100.0,
+                result.keyframe_ids.len(),
+                result.fused_landmarks,
+                added_landmarks,
+                registered_s,
+            );
+        } else {
+            println!(
+                "add {}: optimized yaw {:.3} deg, translation [{:.3}, {:.3}, {:.3}] m; \
+                 {} images, {} landmarks fused, {} added",
+                dir.display(),
+                yaw.to_degrees(),
+                t.x,
+                t.y,
+                t.z,
+                result.keyframe_ids.len(),
+                result.fused_landmarks,
+                added_landmarks,
+            );
+        }
 
         // The added map's sessions follow, with their transforms composed.
         let first_session = sessions.len();
@@ -214,7 +301,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(map_files::se3_from_json)
                 .ok_or("map.json: session without base_from_session")?;
             session["base_from_session"] =
-                map_files::se3_json(&registration.base_from_other.compose(&other_from_session));
+                map_files::se3_json(&base_from_other.compose(&other_from_session));
             if other_rig && session.get("t_imu_cam").is_none() {
                 session["t_imu_cam"] = Value::Array(
                     other
@@ -225,14 +312,21 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             if index == 0 {
-                session["registration"] = json!({
-                    "keyframes": registration.keyframes,
-                    "localized_keyframes": registration.localized_keyframes,
-                    "agreeing_keyframes": registration.agreeing_keyframes,
-                    "keyframe_rms_m": registration.keyframe_rms_m,
-                    "fused_landmarks": result.fused_landmarks,
-                    "added_landmarks": added_landmarks,
-                });
+                if let Some(registration) = &registration {
+                    session["registration"] = json!({
+                        "keyframes": registration.keyframes,
+                        "localized_keyframes": registration.localized_keyframes,
+                        "agreeing_keyframes": registration.agreeing_keyframes,
+                        "keyframe_rms_m": registration.keyframe_rms_m,
+                        "fused_landmarks": result.fused_landmarks,
+                        "added_landmarks": added_landmarks,
+                    });
+                } else {
+                    session["fusion"] = json!({
+                        "fused_landmarks": result.fused_landmarks,
+                        "added_landmarks": added_landmarks,
+                    });
+                }
             }
             sessions.push(session);
         }
@@ -254,6 +348,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         "Basalt mapper world of the first session (gravity-aligned VIO world of its sequence)"
     );
     summary["sessions"] = Value::Array(sessions);
+    if let Some((_, report)) = optimization {
+        summary["session_alignment"] = report;
+    }
     images.sort_by_key(|image| image.image_id);
     let summary = map_files::write(
         &args.out,
@@ -311,6 +408,7 @@ mod tests {
             "0",
         ])
         .expect("parsed");
+        assert_eq!(args.mode, Mode::Sequential);
         assert_eq!(args.add, [PathBuf::from("b"), PathBuf::from("c")]);
         assert_eq!(args.config.min_keyframes, 5);
         assert_eq!(args.config.fuse_radius_m, 0.0);
@@ -318,6 +416,18 @@ mod tests {
         assert!(parse(&["--add", "b", "--out", "m"]).is_err());
         assert!(parse(&["--base", "a", "--add", "b"]).is_err());
         assert!(parse(&["--base", "a", "--add", "b", "--out", "m", "--bogus", "1"]).is_err());
+        let mut optimize = vec![
+            "--base",
+            "a",
+            "--add",
+            "b",
+            "--out",
+            "m",
+            "--optimize-sessions",
+        ];
+        assert_eq!(parse(&optimize).unwrap().mode, Mode::Optimize);
+        optimize.push("--inspect-loops");
+        assert!(parse(&optimize).is_err());
     }
 
     #[test]
