@@ -1,0 +1,938 @@
+{
+  "edges": [
+    {
+      "submaps": [
+        "0",
+        "4"
+      ],
+      "unique_matches": 2,
+      "image_pairs": 2,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "0",
+        "5"
+      ],
+      "unique_matches": 3,
+      "image_pairs": 2,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "10",
+        "14"
+      ],
+      "unique_matches": 29,
+      "image_pairs": 9,
+      "supporting_image_pairs": 9,
+      "train_inliers": 21,
+      "holdout_inliers": 8,
+      "holdout_tracks": 8,
+      "holdout_median_fraction_of_camera_extent": 0.013828954646299624,
+      "inlier_threshold_fraction_of_camera_extent": 0.04,
+      "accepted": true
+    },
+    {
+      "submaps": [
+        "11",
+        "14"
+      ],
+      "unique_matches": 24,
+      "image_pairs": 14,
+      "supporting_image_pairs": 10,
+      "train_inliers": 11,
+      "holdout_inliers": 2,
+      "holdout_tracks": 6,
+      "holdout_median_fraction_of_camera_extent": 0.04464864120538412,
+      "inlier_threshold_fraction_of_camera_extent": 0.04,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "11",
+        "2"
+      ],
+      "unique_matches": 1,
+      "image_pairs": 1,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "11",
+        "8"
+      ],
+      "unique_matches": 2,
+      "image_pairs": 1,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "13",
+        "4"
+      ],
+      "unique_matches": 4,
+      "image_pairs": 5,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "2"
+      ],
+      "unique_matches": 5,
+      "image_pairs": 6,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "8"
+      ],
+      "unique_matches": 28,
+      "image_pairs": 15,
+      "supporting_image_pairs": 4,
+      "train_inliers": 4,
+      "holdout_inliers": 0,
+      "holdout_tracks": 7,
+      "holdout_median_fraction_of_camera_extent": 2.0217271950940963,
+      "inlier_threshold_fraction_of_camera_extent": 0.04,
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "0",
+        "4"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "0",
+        "5"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "0",
+        "6"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "0",
+        "7"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "10",
+        "14"
+      ],
+      "localized_views": 1,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "10",
+        "2"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "10",
+        "8"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "11",
+        "14"
+      ],
+      "localized_views": 1,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "11",
+        "2"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "11",
+        "8"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "13",
+        "4"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "13",
+        "6"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "10"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "11"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "2"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "14",
+        "8"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "2",
+        "10"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "2",
+        "11"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "2",
+        "14"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "3",
+        "7"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "4",
+        "0"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "4",
+        "13"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "5",
+        "0"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "5",
+        "6"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "6",
+        "0"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "6",
+        "13"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "6",
+        "5"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "7",
+        "0"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "7",
+        "3"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "8",
+        "10"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "8",
+        "11"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    },
+    {
+      "submaps": [
+        "8",
+        "14"
+      ],
+      "localized_views": 0,
+      "method": "pnp",
+      "accepted": false
+    }
+  ],
+  "components": [
+    {
+      "submaps": [
+        "0"
+      ],
+      "registered_images": [
+        0,
+        31
+      ],
+      "anchor_from_submap": {
+        "0": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "4"
+      ],
+      "registered_images": [
+        23,
+        0
+      ],
+      "anchor_from_submap": {
+        "4": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "2"
+      ],
+      "registered_images": [
+        22,
+        0
+      ],
+      "anchor_from_submap": {
+        "2": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "14",
+        "10"
+      ],
+      "registered_images": [
+        0,
+        21
+      ],
+      "anchor_from_submap": {
+        "14": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "10": [
+          [
+            0.17105695207642083,
+            0.017075733401060913,
+            -0.0610336277576599,
+            1.234849209969557
+          ],
+          [
+            -0.010081852718986395,
+            0.1807689064420175,
+            0.022318690634296447,
+            -0.9674862523043792
+          ],
+          [
+            0.06257028555310712,
+            -0.0175552566114158,
+            0.1704521562586687,
+            -3.589561013517583
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "5"
+      ],
+      "registered_images": [
+        0,
+        6
+      ],
+      "anchor_from_submap": {
+        "5": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "3"
+      ],
+      "registered_images": [
+        0,
+        5
+      ],
+      "anchor_from_submap": {
+        "3": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "7"
+      ],
+      "registered_images": [
+        5,
+        0
+      ],
+      "anchor_from_submap": {
+        "7": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "6"
+      ],
+      "registered_images": [
+        4,
+        0
+      ],
+      "anchor_from_submap": {
+        "6": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "1"
+      ],
+      "registered_images": [
+        0,
+        3
+      ],
+      "anchor_from_submap": {
+        "1": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "12"
+      ],
+      "registered_images": [
+        0,
+        3
+      ],
+      "anchor_from_submap": {
+        "12": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "8"
+      ],
+      "registered_images": [
+        0,
+        3
+      ],
+      "anchor_from_submap": {
+        "8": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "9"
+      ],
+      "registered_images": [
+        0,
+        3
+      ],
+      "anchor_from_submap": {
+        "9": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "11"
+      ],
+      "registered_images": [
+        0,
+        2
+      ],
+      "anchor_from_submap": {
+        "11": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "submaps": [
+        "13"
+      ],
+      "registered_images": [
+        2,
+        0
+      ],
+      "anchor_from_submap": {
+        "13": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    }
+  ]
+}

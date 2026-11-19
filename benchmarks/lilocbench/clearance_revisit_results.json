@@ -1,0 +1,77 @@
+{
+  "labeled_voxels_in_initial_map": {
+    "all": 18579,
+    "box": 47,
+    "annotated_stable": 1742
+  },
+  "visits": {
+    "lt_changes_dynamics_1": {
+      "start_timestamp_s": 1733485808.700794,
+      "frames": 45,
+      "visual_fixes": 25,
+      "poses_with_wheel": 36,
+      "pose_scores": null,
+      "single_visit_clearance": {
+        "all": 1259,
+        "box": 47,
+        "annotated_stable": 122
+      },
+      "pending_after_reload": {
+        "all": 1259,
+        "box": 47,
+        "annotated_stable": 122
+      },
+      "pending_reset_by_occupied_observation": {
+        "all": 0,
+        "box": 0,
+        "annotated_stable": 0
+      },
+      "removed_this_visit_after_reload": {
+        "all": 0,
+        "box": 0,
+        "annotated_stable": 0
+      }
+    },
+    "lt_changes_dynamics_0": {
+      "start_timestamp_s": 1733492006.1362622,
+      "frames": 49,
+      "visual_fixes": 12,
+      "poses_with_wheel": 49,
+      "pose_scores": {
+        "localized": 49,
+        "translation_rmse_m": 0.022319168413025652,
+        "rotation_rmse_deg": 0.48984796321963486
+      },
+      "single_visit_clearance": {
+        "all": 1536,
+        "box": 43,
+        "annotated_stable": 85
+      },
+      "pending_after_reload": {
+        "all": 1073,
+        "box": 4,
+        "annotated_stable": 59
+      },
+      "pending_reset_by_occupied_observation": {
+        "all": 292,
+        "box": 0,
+        "annotated_stable": 34
+      },
+      "removed_this_visit_after_reload": {
+        "all": 715,
+        "box": 43,
+        "annotated_stable": 57
+      }
+    }
+  },
+  "remove_on_first_clear_visit": {
+    "all": 2080,
+    "box": 47,
+    "annotated_stable": 150
+  },
+  "remove_after_two_clear_visits": {
+    "all": 715,
+    "box": 43,
+    "annotated_stable": 57
+  }
+}

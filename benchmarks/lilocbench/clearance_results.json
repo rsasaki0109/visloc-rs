@@ -1,0 +1,156 @@
+{
+  "lilocbench_corridor_box": {
+    "baseline": {
+      "saved_update": {
+        "initial_voxels": 18247,
+        "updated_voxels": 18006,
+        "additions": 749,
+        "removals": 990,
+        "annotated_stable_voxels_added": 2,
+        "annotated_stable_voxels_removed": 197
+      },
+      "third_saved_update": {
+        "total_voxels_removed": 2224,
+        "box_voxels_removed": 47,
+        "annotated_stable_voxels_removed": 118
+      },
+      "stable_voxels_at_start_of_third_visit": 1639,
+      "annotated_box_voxels_at_start_of_third_visit": 47
+    },
+    "patch": {
+      "saved_update": {
+        "initial_voxels": 18247,
+        "updated_voxels": 18579,
+        "additions": 749,
+        "removals": 417,
+        "annotated_stable_voxels_added": 2,
+        "annotated_stable_voxels_removed": 94
+      },
+      "third_saved_update": {
+        "total_voxels_removed": 1536,
+        "box_voxels_removed": 43,
+        "annotated_stable_voxels_removed": 85,
+        "with_history": {
+          "total_voxels_removed": 1234,
+          "box_voxels_removed": 43,
+          "annotated_stable_voxels_removed": 60,
+          "deferred_voxels": 302
+        }
+      },
+      "stable_voxels_at_start_of_third_visit": 1742,
+      "annotated_box_voxels_at_start_of_third_visit": 47
+    },
+    "separated": {
+      "saved_update": {
+        "initial_voxels": 18247,
+        "updated_voxels": 18688,
+        "additions": 749,
+        "removals": 308,
+        "annotated_stable_voxels_added": 2,
+        "annotated_stable_voxels_removed": 89
+      },
+      "third_saved_update": {
+        "total_voxels_removed": 1395,
+        "box_voxels_removed": 43,
+        "annotated_stable_voxels_removed": 79,
+        "with_history": {
+          "total_voxels_removed": 1132,
+          "box_voxels_removed": 43,
+          "annotated_stable_voxels_removed": 55,
+          "deferred_voxels": 263
+        }
+      },
+      "stable_voxels_at_start_of_third_visit": 1747,
+      "annotated_box_voxels_at_start_of_third_visit": 47
+    }
+  },
+  "bonn_holdout_box_removed": {
+    "mocap": {
+      "baseline_removal": {
+        "tp": 93,
+        "fp": 5,
+        "fn": 43,
+        "tn": 797,
+        "precision": 0.9489795918367347,
+        "recall": 0.6838235294117647,
+        "f1": 0.7948717948717948
+      },
+      "patch_removal": {
+        "tp": 93,
+        "fp": 5,
+        "fn": 43,
+        "tn": 797,
+        "precision": 0.9489795918367347,
+        "recall": 0.6838235294117647,
+        "f1": 0.7948717948717948
+      },
+      "separated_removal": {
+        "tp": 93,
+        "fp": 0,
+        "fn": 43,
+        "tn": 802,
+        "precision": 1.0,
+        "recall": 0.6838235294117647,
+        "f1": 0.8122270742358079
+      }
+    },
+    "session_alignment": {
+      "baseline_removal": {
+        "tp": 93,
+        "fp": 8,
+        "fn": 43,
+        "tn": 794,
+        "precision": 0.9207920792079208,
+        "recall": 0.6838235294117647,
+        "f1": 0.7848101265822784
+      },
+      "patch_removal": {
+        "tp": 91,
+        "fp": 7,
+        "fn": 45,
+        "tn": 795,
+        "precision": 0.9285714285714286,
+        "recall": 0.6691176470588235,
+        "f1": 0.7777777777777778
+      },
+      "separated_removal": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 136,
+        "tn": 802,
+        "precision": null,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    },
+    "short_baseline_loops": {
+      "baseline_removal": {
+        "tp": 92,
+        "fp": 3,
+        "fn": 44,
+        "tn": 799,
+        "precision": 0.968421052631579,
+        "recall": 0.6764705882352942,
+        "f1": 0.7965367965367965
+      },
+      "patch_removal": {
+        "tp": 89,
+        "fp": 3,
+        "fn": 47,
+        "tn": 799,
+        "precision": 0.967391304347826,
+        "recall": 0.6544117647058824,
+        "f1": 0.7807017543859649
+      },
+      "separated_removal": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 136,
+        "tn": 802,
+        "precision": null,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    }
+  }
+}

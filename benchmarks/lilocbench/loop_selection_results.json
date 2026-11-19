@@ -1,0 +1,103 @@
+{
+  "lilocbench": {
+    "corridor_box": {
+      "change_f1": {
+        "session_alignment": 0.29605263157894735,
+        "all_loops": 0.30985915492957744
+      },
+      "global_probe_pair_count": 15,
+      "global_depth_agreement": {
+        "session_alignment": 0.7741700751801236,
+        "all_loops": 0.7845059995954528
+      },
+      "global_depth_preferred": "all_loops",
+      "local_change_selection": {
+        "preferred": "session_alignment",
+        "depth_frame_pairs": [
+          8,
+          7
+        ],
+        "reason": "independent_signed_change_confirmation",
+        "regions": 1269,
+        "scores": {
+          "session_alignment": 0.5011820330969267,
+          "all_loops": 0.4570527974783294
+        }
+      }
+    },
+    "corridor_doors": {
+      "change_f1": {
+        "session_alignment": 0.19119878603945373,
+        "all_loops": 0.25411061285500747
+      },
+      "global_probe_pair_count": 11,
+      "global_depth_agreement": {
+        "session_alignment": 0.8991587644772229,
+        "all_loops": 0.898914834031721
+      },
+      "global_depth_preferred": "session_alignment",
+      "local_change_selection": {
+        "preferred": "all_loops",
+        "depth_frame_pairs": [
+          6,
+          5
+        ],
+        "reason": "independent_signed_change_confirmation",
+        "regions": 89,
+        "scores": {
+          "session_alignment": 0.011235955056179775,
+          "all_loops": 0.033707865168539325
+        }
+      }
+    }
+  },
+  "bonn_holdout": {
+    "holdout_box_added": {
+      "change_f1": {
+        "session_alignment": 0.3113207547169811,
+        "short_baseline_loops": 0.25252525252525254
+      },
+      "global_probe_pair_count": 7,
+      "global_depth_agreement": {
+        "session_alignment": 0.5712040235065726,
+        "short_baseline_loops": 0.4898739619037917
+      },
+      "global_depth_preferred": "session_alignment",
+      "local_change_selection": {
+        "preferred": "session_alignment",
+        "depth_frame_pairs": [
+          4,
+          3
+        ],
+        "reason": "insufficient_probe_pairs",
+        "regions": 0,
+        "scores": {}
+      }
+    },
+    "holdout_box_removed": {
+      "change_f1": {
+        "session_alignment": 0.6739130434782609,
+        "short_baseline_loops": 0.7244094488188977
+      },
+      "global_probe_pair_count": 15,
+      "global_depth_agreement": {
+        "session_alignment": 0.6474046938972778,
+        "short_baseline_loops": 0.6876397640755415
+      },
+      "global_depth_preferred": "short_baseline_loops",
+      "local_change_selection": {
+        "preferred": "session_alignment",
+        "depth_frame_pairs": [
+          8,
+          7
+        ],
+        "reason": "independent_signed_change_confirmation",
+        "regions": 738,
+        "scores": {
+          "session_alignment": 0.489159891598916,
+          "short_baseline_loops": 0.35772357723577236
+        }
+      }
+    }
+  }
+}

@@ -883,6 +883,19 @@ impl BasaltVioEstimator {
         self.dynamic_objects.as_ref()?.recorded_boxes.as_ref()
     }
 
+    /// Retain candidate decisions so replay can diagnose coverage and residual failures.
+    pub fn record_dynamic_object_decisions(&mut self) {
+        if let Some(filter) = &mut self.dynamic_objects {
+            filter.decisions.get_or_insert_with(Vec::new);
+        }
+    }
+
+    pub fn dynamic_object_decisions(
+        &self,
+    ) -> Option<&[crate::dynamic_objects::DynamicObjectDecision]> {
+        self.dynamic_objects.as_ref()?.decisions.as_deref()
+    }
+
     /// Diagnostic: world position of every landmark that is not removed and
     /// whose host keyframe is still in the window (the host's IMU pose
     /// composed with its camera's `T_imu_cam`, applied to the landmark's

@@ -552,17 +552,18 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // The cameras' mean up (optical -y) picks which planes count as
         // horizontal: within 30 degrees of it.
-        let camera_up = map
-            .keyframes
-            .values()
-            .filter_map(|keyframe| keyframe.frame.pose.as_ref())
+        let camera_up = images
+            .iter()
+            .filter_map(|image| map.keyframes.get(&image.image_id)?.frame.pose.as_ref())
             .map(|pose| pose.camera_to_world().rotation * -Vector3::y())
             .sum::<Vector3<f64>>()
             .normalize();
-        let points = map
-            .landmarks
-            .values()
-            .map(|landmark| landmark.position.coords)
+        // The seeded plane fit must sample the same landmarks across runs.
+        let mut landmarks = map.landmarks.iter().collect::<Vec<_>>();
+        landmarks.sort_unstable_by_key(|(&id, _)| id);
+        let points = landmarks
+            .into_iter()
+            .map(|(_, landmark)| landmark.position.coords)
             .collect::<Vec<_>>();
         let (up, inliers) = horizontal_plane(&points, &camera_up, 0.015, 30f64.to_radians())
             .ok_or("no horizontal plane found to level the map")?;

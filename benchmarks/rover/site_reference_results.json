@@ -1,0 +1,201 @@
+{
+  "facade_reference_fit_rmse_m": [
+    0.15234926017759948,
+    0.07749543467312023
+  ],
+  "winter_to_summer_rotation": [
+    [
+      -0.993309085685223,
+      0.11548619092855028,
+      -3.555413302486964e-19
+    ],
+    [
+      -0.11548619092855031,
+      -0.993309085685223,
+      -6.628891175232625e-20
+    ],
+    [
+      6.623299664619147e-19,
+      2.75774321598284e-18,
+      0.9999999999999999
+    ]
+  ],
+  "winter_to_summer_translation_m": [
+    0.39056730257805317,
+    -7.8897176657143495,
+    1.743589467615911
+  ],
+  "heldout_path_proximity": {
+    "summer_nearest_winter_before": {
+      "count": 102,
+      "median_m": 7.252461076510128,
+      "p90_m": 10.586574717129166,
+      "within_25cm": 0
+    },
+    "summer_nearest_winter_after": {
+      "count": 102,
+      "median_m": 0.7205169554821738,
+      "p90_m": 2.4213949945557482,
+      "within_25cm": 10
+    },
+    "winter_nearest_summer_before": {
+      "count": 108,
+      "median_m": 7.016844194063352,
+      "p90_m": 10.75181049491397,
+      "within_25cm": 0
+    },
+    "winter_nearest_summer_after": {
+      "count": 108,
+      "median_m": 0.6559135219069465,
+      "p90_m": 1.7456703266371596,
+      "within_25cm": 10
+    }
+  },
+  "survey_refinement": {
+    "training_prism_positions": [
+      1212,
+      575
+    ],
+    "winter_final_lap_to_summer_before": {
+      "count": 304,
+      "median_m": 0.7170936810615902,
+      "p90_m": 2.3313245199485806,
+      "within_25cm": 53
+    },
+    "winter_final_lap_to_summer_after": {
+      "count": 304,
+      "median_m": 0.3342240174310789,
+      "p90_m": 0.8735661163305553,
+      "within_25cm": 130
+    },
+    "summer_final_lap_to_winter_before": {
+      "count": 513,
+      "median_m": 0.6997576074992149,
+      "p90_m": 2.59394523041791,
+      "within_25cm": 99
+    },
+    "summer_final_lap_to_winter_after": {
+      "count": 513,
+      "median_m": 0.24097995803829064,
+      "p90_m": 0.6976787614413492,
+      "within_25cm": 259
+    },
+    "winter_to_summer_rotation": [
+      [
+        -0.9902426544805804,
+        -0.1393538131780156,
+        -3.607511838942725e-19
+      ],
+      [
+        0.13935381317801557,
+        -0.9902426544805804,
+        2.5737922511365927e-20
+      ],
+      [
+        6.623299664619147e-19,
+        2.75774321598284e-18,
+        0.9999999999999999
+      ]
+    ],
+    "winter_to_summer_translation_m": [
+      1.1909699833206489,
+      -7.415042487978397,
+      1.743589467615911
+    ]
+  },
+  "submap_fit": {
+    "0": {
+      "season": "winter",
+      "reference_frames": 31,
+      "survey_fit_rmse_m": 1.344940526091645,
+      "inlier_frames_within_30cm": 0,
+      "landmarks_with_three_inlier_observations": 0,
+      "used_for_update": false,
+      "first_offset_s": 0,
+      "last_offset_s": 345
+    },
+    "14": {
+      "season": "winter",
+      "reference_frames": 20,
+      "survey_fit_rmse_m": 0.4132733902675671,
+      "inlier_frames_within_30cm": 10,
+      "landmarks_with_three_inlier_observations": 150,
+      "used_for_update": true,
+      "first_offset_s": 60,
+      "last_offset_s": 297
+    },
+    "2": {
+      "season": "summer",
+      "reference_frames": 20,
+      "survey_fit_rmse_m": 0.33073779648580287,
+      "inlier_frames_within_30cm": 10,
+      "landmarks_with_three_inlier_observations": 250,
+      "used_for_update": true,
+      "first_offset_s": 54,
+      "last_offset_s": 285
+    },
+    "3": {
+      "season": "winter",
+      "reference_frames": 5,
+      "survey_fit_rmse_m": 0.358087410045966,
+      "inlier_frames_within_30cm": 3,
+      "landmarks_with_three_inlier_observations": 42,
+      "used_for_update": false,
+      "first_offset_s": 45,
+      "last_offset_s": 267
+    },
+    "4": {
+      "season": "summer",
+      "reference_frames": 21,
+      "survey_fit_rmse_m": 1.5001623739130898,
+      "inlier_frames_within_30cm": 2,
+      "landmarks_with_three_inlier_observations": 1,
+      "used_for_update": false,
+      "first_offset_s": 0,
+      "last_offset_s": 339
+    },
+    "5": {
+      "season": "winter",
+      "reference_frames": 6,
+      "survey_fit_rmse_m": 0.5069330803787634,
+      "inlier_frames_within_30cm": 0,
+      "landmarks_with_three_inlier_observations": 0,
+      "used_for_update": false,
+      "first_offset_s": 30,
+      "last_offset_s": 255
+    },
+    "6": {
+      "season": "summer",
+      "reference_frames": 4,
+      "survey_fit_rmse_m": 0.3470572064397465,
+      "inlier_frames_within_30cm": 2,
+      "landmarks_with_three_inlier_observations": 0,
+      "used_for_update": false,
+      "first_offset_s": 18,
+      "last_offset_s": 240
+    },
+    "7": {
+      "season": "summer",
+      "reference_frames": 5,
+      "survey_fit_rmse_m": 0.6211898743062018,
+      "inlier_frames_within_30cm": 2,
+      "landmarks_with_three_inlier_observations": 0,
+      "used_for_update": false,
+      "first_offset_s": 39,
+      "last_offset_s": 258
+    }
+  },
+  "sparse_map_update": {
+    "saved_summer_landmarks": 250,
+    "winter_landmarks": 150,
+    "saved_updated_landmarks": 366,
+    "winter_landmarks_added": 116,
+    "winter_near_summer_landmarks": {
+      "count": 150,
+      "median_m": 1.9408460575426276,
+      "p90_m": 3.8457904443042086,
+      "within_25cm": 7
+    },
+    "insertion_distance_m": 1.0
+  }
+}

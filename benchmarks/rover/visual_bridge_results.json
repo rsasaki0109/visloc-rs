@@ -1,0 +1,142 @@
+{
+  "windows": [
+    {
+      "window": "house:0",
+      "registered": [
+        7,
+        7
+      ],
+      "ties": [
+        {
+          "submaps": [
+            "2",
+            "house:0"
+          ],
+          "localized_views": 7,
+          "method": "shared_camera_poses",
+          "train_inliers": 5,
+          "holdout_inliers": 2,
+          "holdout_views": 2,
+          "accepted": true
+        },
+        {
+          "submaps": [
+            "14",
+            "house:0"
+          ],
+          "localized_views": 7,
+          "method": "shared_camera_poses",
+          "train_inliers": 5,
+          "holdout_inliers": 2,
+          "holdout_views": 2,
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "window": "shed:0",
+      "registered": [
+        1,
+        5
+      ],
+      "ties": []
+    },
+    {
+      "window": "north:0",
+      "registered": [
+        1,
+        1
+      ],
+      "ties": []
+    },
+    {
+      "window": "lawn:0",
+      "registered": [
+        1,
+        5
+      ],
+      "ties": []
+    }
+  ],
+  "mixed_components": [
+    {
+      "submaps": [
+        "2",
+        "14"
+      ],
+      "registered_images": [
+        22,
+        21
+      ],
+      "anchor_from_submap": {
+        "2": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "14": [
+          [
+            0.9396665554748075,
+            -0.037265076881024935,
+            0.11342269995355832,
+            -1.8040391673991993
+          ],
+          [
+            0.0408306228553505,
+            0.9459410455624205,
+            -0.027477788395564133,
+            -0.1118542299974539
+          ],
+          [
+            -0.11218848005453924,
+            0.03214782516623126,
+            0.9400036662575981,
+            -1.2126905934548367
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    }
+  ],
+  "reference_check": {
+    "scale_m_per_unit_for_scoring": 0.6664635543947501,
+    "summer_reference_images": 20,
+    "winter_all": {
+      "images": 20,
+      "distance_rmse_m": 0.10103606389365291,
+      "reference_diameter_m": 6.708581756809239
+    },
+    "winter_outside_bridge": {
+      "images": 14,
+      "distance_rmse_m": 0.10617666170301916,
+      "reference_diameter_m": 6.708581756809239
+    }
+  },
+  "saved_points": 713
+}

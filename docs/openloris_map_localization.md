@@ -374,6 +374,9 @@ depth agreement. The sequences
 have no voxel-level change labels for measuring static retention or
 transient-object recall directly.
 
+The Bonn RGB-D pilot measures moving-pixel exclusion and box addition and
+removal using manually labeled real recordings. [Labeled evaluation](bonn_labeled_map_evaluation.md)
+
 ## Results
 
 Each query is localized against a map built from another session, with

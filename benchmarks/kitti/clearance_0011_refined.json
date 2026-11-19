@@ -1,0 +1,71 @@
+{
+  "registration": {
+    "background_matches_before": 4233,
+    "background_matches_after": 4317,
+    "median_plane_residual_before_m": 0.40727713299172114,
+    "median_plane_residual_after_m": 0.020449669608035945,
+    "pivot_displacement_m": [
+      -0.06680982169157801,
+      0.0661500423899497,
+      0.4294324085566399
+    ],
+    "rotation_deg": 0.11616775268699644,
+    "accepted": true
+  },
+  "scene_voxels_in_initial_map": 3880,
+  "scene_voxels_after_update": 4210,
+  "label_target_voxels": 138,
+  "target_voxels_present_in_map": 134,
+  "stationary_track_voxels_present_in_map": {
+    "28": 62,
+    "35": 55
+  },
+  "stationary_voxels_present_in_map": 117,
+  "occupancy_difference": {
+    "tp": 131,
+    "fp": 4,
+    "fn": 3,
+    "precision": 0.9703703703703703,
+    "recall": 0.9776119402985075
+  },
+  "ray_only": {
+    "tp": 131,
+    "fp": 7,
+    "fn": 3,
+    "precision": 0.9492753623188406,
+    "recall": 0.9776119402985075
+  },
+  "saved_clearance_with_occupied_veto": {
+    "tp": 131,
+    "fp": 0,
+    "fn": 3,
+    "precision": 1.0,
+    "recall": 0.9776119402985075
+  },
+  "insertion": {
+    "labeled_static_voxels": 58,
+    "labeled_moving_voxels": 343,
+    "all_new_returns": {
+      "tp": 36,
+      "fp": 184,
+      "fn": 22,
+      "precision": 0.16363636363636364,
+      "recall": 0.6206896551724138
+    },
+    "two_scan_insertions": {
+      "tp": 22,
+      "fp": 45,
+      "fn": 36,
+      "precision": 0.3283582089552239,
+      "recall": 0.3793103448275862
+    },
+    "saved_insertions_without_free_evidence": {
+      "tp": 10,
+      "fp": 7,
+      "fn": 48,
+      "precision": 0.5882352941176471,
+      "recall": 0.1724137931034483
+    },
+    "scene_voxels_inserted": 607
+  }
+}

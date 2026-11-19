@@ -1,0 +1,14 @@
+{
+  "sequence": "0011",
+  "map_frames": [195, 197, 199, 201, 203],
+  "label_frames": [196, 198, 200, 202],
+  "replay_frames": [258, 259, 260, 261, 262, 263, 264, 265],
+  "insertion_frames": [258, 260, 262, 264],
+  "insertion_label_frames": [257, 259, 261, 263, 265, 267],
+  "moved_track": 0,
+  "stationary_tracks": [28, 35],
+  "world_region_m": [[137.0, -89.0, -0.5], [159.0, -63.0, 4.0]],
+  "voxel_m": 0.35,
+  "min_clear_scans": 2,
+  "endpoint_margin_m": 0.07
+}
