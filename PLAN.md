@@ -25,7 +25,7 @@ rejected there.
   [`docs/lamaria_gpu_handover.md`](docs/lamaria_gpu_handover.md) (LaMAria).
 - MSRV 1.88, `unsafe` forbidden, no mandatory ML or GPU runtime in the
   default build.
-- All 16 workspace crates package for crates.io (`cargo package --workspace`);
+- All 17 workspace crates package for crates.io (`cargo package --workspace`);
   nothing has been published yet. See [`docs/publishing.md`](docs/publishing.md).
 
 | Pillar | State | Evidence |
