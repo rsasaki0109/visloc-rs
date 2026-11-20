@@ -190,27 +190,42 @@ map with a planar transform fitted between the SLAM trajectory and Gazebo's
 ground truth (`align_map.py`, 0.9 cm residual). Only the goal script and the
 scoring use that transform; navigation never sees it.
 
+<p align="center">
+  <img src="assets/gz_nav2_visloc.png" alt="Two top-down drives of the Gazebo robot on the occupancy grid of its SLAM map. Left: Nav2 on visloc localization reaches the five goals in the rooms; the believed pose lies under the true path, centimetres from it. Right: a box that is not in the map blocks the hallway between the two bedrooms; Nav2 sees it with the lidar and goes round through the living room and the kitchen both ways, and still reaches all five goals." width="900">
+</p>
+
 | run | goals reached | contacts | `/map_pose` error, RMSE / median / max | drive time (sim) |
 | --- | ---: | ---: | --- | ---: |
-| visloc VIO + map localization | **5/5** | 0 | **1.6 cm** / 1.2 cm / 4.4 cm | 117 s |
-| a plain, textureless box missing from the map | 1/5 | 0 | 1.5 m / 1.4 cm / 7.4 m | (stopped) |
+| visloc VIO + map localization | **5/5** | 0 | **1.6 cm** / 1.1 cm / 4.3 cm | 116 s |
+| same, with a textured box missing from the map in the hallway | **5/5** | 0 | 1.8 cm / 1.4 cm / 4.4 cm | 130 s |
+| same, with a plain (textureless) box | **5/5** | 0 | 2.0 cm / 1.5 cm / 4.4 cm | 130 s |
 
 Each goal counts as reached by the same rule as above, with the true pose
-from Gazebo. The robot localizes in the map from its first image (401 PnP
-inliers), without an initial pose.
+from Gazebo. The robot localizes in the map from its first image (about 400
+PnP inliers), without an initial pose. The first run was repeated three
+times, each with 5/5 goals and 1.6 cm RMSE. With the box, Nav2's
+obstacle layer marks it from the lidar and the planner goes round through
+the living room and the kitchen (right panel), about 14 s longer. Map
+localization finds nothing on the box, which is not in the map, and keeps
+working on the walls around it.
 
-**A textureless obstacle that fills the view breaks the VIO.** With a plain
-box in the hallway, the robot drove up to it and stopped 0.35 m short of
-it. The box then filled most of the image, leaving about 10 keypoints.
-The VIO had nothing to track and integrated the IMU alone, and its pose ran
-off through the box and out of the apartment at an accelerating speed
-(7.4 m in 9 s), while the robot stood still. Map localization needs
-features too, so nothing corrected it. Nav2 then planned from a pose
-outside the map and failed the remaining goals. A real robot facing a
-blank wall up close is in the same situation. What the stack lacks is a
-detector for VIO that has lost tracking (too few features for too long),
-and a stop until it relocalizes. Wheel odometry would also bridge such
-gaps; this robot has none.
+**Pitfall: the map frame is not on the floor.** The SLAM map's frame and the
+VIO's `odom` start at the IMU, here 0.5 m above the floor, so `base_link` and
+the lidar's points are at z ≈ -0.5 m in both. Nav2's obstacle layer drops
+points below `min_obstacle_height`, which is set both per source and per
+layer (the layer's own defaults to 0.0). With the defaults, Nav2 marked no
+obstacle at all: the run without the box still passed, because the map has
+every wall, and with the box the robot drove into it. `gz/nav2_params.yaml`
+sets both limits to -1.5 m. A real robot with this stack needs the same, or
+a floor-level `map` frame.
+
+**Not covered: VIO that has lost tracking.** When the robot drove into the
+box (before that fix), the camera ended up about 10 cm from its face, too
+close for stereo. The VIO had nothing to track, integrated the IMU alone,
+and its pose ran off 7 m while the robot stood still. Map localization had
+no features either, so nothing corrected it. The stack has no detector for
+that (too few tracked features for too long) and no stop until it
+relocalizes. Wheel odometry would bridge such gaps; this robot has none.
 
 Gazebo renders on the CPU here (no GPU), which makes the simulation run at
 about a tenth of real time. Every node runs on simulation time, so Nav2 and

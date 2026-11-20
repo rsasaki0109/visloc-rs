@@ -24,8 +24,11 @@ All notable changes to `visloc-rs` will be documented here.
   (`ros2/visloc-ros2/gz/`: world with rendered stereo cameras, IMU and lidar,
   mapping recorder, goal runner): Nav2 on the real nodes
   (`visloc_vio_node` + `visloc_map_localize_node`) and a map from visloc's own
-  SLAM reaches 5/5 goals at 1.6 cm `/map_pose` RMSE. A textureless obstacle
-  filling the view makes the VIO diverge (no lost-tracking detection yet).
+  SLAM reaches 5/5 goals at 1.6 cm `/map_pose` RMSE, and 5/5 with an
+  unmapped box (lidar obstacle layer, detour). The Gazebo Nav2 parameters
+  lower both obstacle-height limits, since the SLAM map's frame starts at
+  the IMU, 0.5 m above the floor. No detection yet of VIO that has lost
+  tracking.
   `scripts/plot_nav_sim.py` draws the runs.
 
 - **`merge_maps` merges maps of another calibration of the rig**
