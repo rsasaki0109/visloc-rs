@@ -39,6 +39,13 @@ All notable changes to `visloc-rs` will be documented here.
   Gazebo goal runner can turn a robot that stopped in front of a bare wall
   until it relocalizes (`--spin-after`). A 3D video of the runs:
   `docs/media/gz_nav2_blackout_3d.mp4`.
+  In the public Depot warehouse (OpenRobotics, Gazebo Fuel, CC BY 4.0;
+  `gz/make_depot_world.py`, which projects its meshes into a collision grid,
+  and `--scene` for the route and goal tools): SLAM within 4.0 cm of the
+  ground truth over 115 m, 5/5 goals at 6.1 cm `/map_pose` RMSE through the
+  blackout with the monitor (20 cm max error without). Map localization now
+  carries the last map pose over an odometry reset as a projection prior
+  (`reset_prior_s`): without it the robot did not relocalize there.
   `scripts/plot_nav_sim.py` draws the runs.
 
 - **`merge_maps` merges maps of another calibration of the rig**

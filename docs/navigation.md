@@ -285,6 +285,57 @@ mask, the robot's cameras the textured one). The cyan ring is where visloc
 puts the robot; the robot's own (left) camera is in the corner:
 [media/gz_nav2_blackout_3d.mp4](media/gz_nav2_blackout_3d.mp4).
 
+### A public warehouse: the Depot
+
+The apartment's walls and floor carry random patterns made to give the
+cameras features. The same stack also runs in a realistic scene: the
+Depot, a 30 m x 15.6 m warehouse with PBR materials (brick walls, steel
+racks, crates, a concrete floor) published by OpenRobotics on Gazebo Fuel
+under CC BY 4.0. `gz/make_depot_world.py` puts the same robot in it. The
+Depot's only collision geometry is its floor, so the script projects the
+meshes (3 to 60 cm above the floor) into a grid of what the robot can hit;
+the mapping route, the contact count and the clearance check use that grid.
+Everything else is as in the apartment, with nothing tuned for the place.
+
+- **Map.** A 115 m mapping drive around the hall and between the racks;
+  visloc's SLAM puts its trajectory within 4.0 cm RMSE (9.5 cm max) of the
+  ground truth, with 25,972 landmarks.
+- **Occupancy grid.** `visual_map_to_occupancy --max-range 20`. The
+  default 8 m ray range is too short for a 30 m hall: it left most of the
+  hall unknown and marked little more than the near walls.
+- **Navigation.** Five goals across the hall, a 5 s camera blackout once the
+  robot crosses x = -4 m on the way to the second
+  (`camera_blackout.py --cross-x -4`), the chase camera on in both runs:
+
+| Depot, 5 s camera blackout | goals reached | contacts | `/map_pose` error, RMSE / max | robot during the blackout |
+| --- | ---: | ---: | --- | --- |
+| monitor off | 5/5 | 0 | 6.0 cm / **20 cm** | drives on blind for 1.5 m |
+| monitor on (`lost_min_observations 10`), reset prior, `--spin-after 5` | 5/5 (goal 2 on the 2nd try) | 0 | 6.1 cm / 14 cm | stops within about 15 cm |
+
+<p align="center">
+  <img src="assets/gz_depot_nav2_blackout.png" alt="The Depot occupancy grid built from the visloc map, with the true path and the believed pose of both runs" width="100%">
+</p>
+
+The error is larger than in the apartment (1.6 cm RMSE) because most of
+what the cameras see in the hall is metres away. The blackout run with the
+monitor first failed: after the reset, map localization found 3 to 11
+inliers on every image and never relocalized, even after three spins. Most
+of its fixes in the Depot (120 of 144 before the blackout) come from
+projection matching, which needs a prior pose, and after an odometry reset
+there was none; map-wide matching does poorly in a large hall of repeated
+bricks and racks. `visloc_map_localize_node` now keeps the body's last map
+pose over a reset and uses it, moved by the new frame's odometry, as the
+projection prior (`reset_prior_s`, 30 s, and within `projection_fresh_m` of
+travel): the monitor has just stopped the robot, so it is still about
+there. Fixes found with it pass the same quality gate and must agree like
+any others. In the run above, the three fixes that set the new correction
+were projection fixes, after the third spin had turned the robot toward a
+part of the hall the map covers well. One run each, so this shows that the
+prior can make the difference, not how often.
+
+The two runs from the chase camera:
+[media/gz_depot_blackout_3d.mp4](media/gz_depot_blackout_3d.mp4).
+
 Gazebo renders on the CPU here (no GPU), which makes the simulation run at
 about a tenth of real time. Every node runs on simulation time, so Nav2 and
 the visloc nodes see a normal-speed robot; a 2-minute drive takes about
@@ -376,6 +427,22 @@ python3 ros2/visloc-ros2/gz/camera_blackout.py --at 4.5,4.5 --duration 5 \
 ```
 
 The figure above is `plot_nav_sim.py` with `--crop 3.5,3.6,7.5,5.4`.
+
+For the Depot, fetch the model, make the world (`--gt-grid` needs
+`pycollada`; `--rgb-twin` adds the colour camera used for the 3DGS below),
+map with `drive_route.py --scene runs/gz_depot/world/scene.json`, convert
+the map with `--max-range 20`, and pass the same `--scene` to
+`nav_goals.py`:
+
+```bash
+curl -L -o runs/gz_depot/depot.zip https://fuel.gazebosim.org/1.0/OpenRobotics/models/Depot.zip
+unzip runs/gz_depot/depot.zip -d runs/gz_depot/depot_model
+```
+
+```bash
+python3 ros2/visloc-ros2/gz/make_depot_world.py --depot runs/gz_depot/depot_model \
+  --out runs/gz_depot/world --gt-grid
+```
 
 For the unmapped box, make a second world with
 `--extra-box 4.6,4.0,5.2,5.0,0.8` (add `--extra-box-plain` for the

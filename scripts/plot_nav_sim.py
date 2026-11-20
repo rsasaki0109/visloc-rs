@@ -54,9 +54,15 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--world-from-map', default='',
                         help='align_map.py JSON: the runs are in the world, the grid in the map')
+    parser.add_argument('--scene', default='',
+                        help="another world's scene.json (make_depot_world.py): its goals")
     parser.add_argument('--crop', default='',
                         help='x0,y0,x1,y1 (the runs\' frame): draw only this part, magnified')
     args = parser.parse_args()
+    goals = GOALS
+    if args.scene:
+        with open(args.scene, encoding='utf-8') as f:
+            goals = [tuple(g[:2]) for g in json.load(f)['goals']]
     to_map = lambda x, y: (x, y)  # noqa: E731
     if args.world_from_map:
         with open(args.world_from_map, encoding='utf-8') as f:
@@ -88,7 +94,7 @@ def main():
             draw.line([px(*p) for p in belief], fill=(240, 170, 60), width=2)
         if len(truth) > 1:
             draw.line([px(*p) for p in truth], fill=(33, 102, 172), width=4)
-        for gx, gy in GOALS:
+        for gx, gy in goals:
             cx, cy = px(gx, gy)
             draw.ellipse([cx - 14, cy - 14, cx + 14, cy + 14], outline=(27, 120, 55), width=4)
         sx, sy = px(*truth[0])
