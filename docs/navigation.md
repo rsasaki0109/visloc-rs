@@ -13,8 +13,9 @@ cannot get elsewhere for a camera robot.
    node is `visloc_map_localize_node`
    ([ros2/visloc-ros2](../ros2/visloc-ros2/README.md)).
 
-Everything below was measured in simulation. No real robot has been driven
-by Nav2 on visloc localization yet.
+The navigation results below were measured in simulation. No real robot has
+been driven by Nav2 on visloc localization yet. The occupancy conversion is
+also shown on a real robot's map (TUM RGB-D fr2/pioneer_360).
 
 ## Result: Nav2 on visloc localization, in simulation
 
@@ -166,6 +167,38 @@ band (0.1–1.5 m above the floor by default). It then projects them to 2D:
 
 Walls come out as dotted lines, with a cell for every textured point.
 Inflation by the robot radius closes the gaps for planning.
+
+### On real data: TUM RGB-D fr2/pioneer_360
+
+<p align="center">
+  <img src="assets/occupancy_tum_pioneer360.png" alt="Occupancy grid of a large hall built from a map of the TUM RGB-D sequence fr2/pioneer_360, a Pioneer robot with a Kinect driving loops in the middle of the hall: the hall's walls as straight dotted edges about 12.6 m apart, objects as black clusters, free space as white rays fanning out from the robot's loop, and the inside of the loop unknown, since the forward camera always faced outward." width="560">
+</p>
+
+The real-data check uses [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset)
+fr2/pioneer_360: a Pioneer robot with a Kinect drives loops in a large
+hall. The map is built with `tum_rgbd_save_map` from the sequence's
+motion-capture trajectory, so this tests the conversion on real landmarks
+(Kinect depth, ORB corners) but not SLAM. It has 3,593 landmarks and 262
+keyframes. The floor is a clear peak of landmarks 0.52 m below the camera,
+which gives `--camera-height 0.52`. The grid shows the hall's walls as
+straight edges about 12.6 m apart, and the objects in it. The loop's inside
+stays unknown: the forward camera never looked at it. Free space is sparse,
+along the rays to the landmarks, which is the limit of a sparse visual map.
+A depth sensor's obstacle layer in Nav2, or a denser map, fills it in.
+
+```bash
+cargo run --release --features image-io --example tum_rgbd_save_map -- \
+  --seq-dir rgbd_dataset_freiburg2_pioneer_360 \
+  --trajectory rgbd_dataset_freiburg2_pioneer_360/groundtruth.txt --out runs/pioneer_map \
+  --fx 520.9 --fy 521.0 --cx 325.1 --cy 249.7 \
+  --k1 0.2312 --k2 -0.7849 --p1 -0.0033 --p2 -0.0001 --k3 0.9172 \
+  --match-radius-px 12 --max-depth 6 --keyframe-m 0.05 --keyframe-deg 4 --max-hamming 70
+```
+
+```bash
+cargo run --release --example visual_map_to_occupancy -- \
+  --map-dir runs/pioneer_map --camera-height 0.52 --out runs/pioneer_map/occupancy
+```
 
 For a map from `basalt_euroc_online_slam_demo --save-map`:
 
