@@ -3158,6 +3158,50 @@ this prefix. The corresponding
 [full-sequence comparison](https://github.com/rsasaki0109/visloc-rs/actions/runs/44426858799)
 uses the ASL image stream.
 
+### Focal lengths alone on sequence_3_17
+
+In the four-condition run on the full sequence_3_17
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/44584959211)), the camera and gyroscope model
+together lowered the position RMSE from 1.478 to 1.047 m but the CP score from 79.88 to 73.10. Tags 20, 21,
+22, 23, 24 and 26, all seen after the first 20 minutes, went over 1 m of horizontal error. To separate the
+focal lengths from the stereo rotation, `solve --fix-camera-rotations` (with `--stereo-reference` and
+`--est-focal`) keeps both cameras' factory rotations and estimates only each camera's focal length per
+segment. The [`visloc_focal_ablation`](../.github/workflows/visloc_focal_ablation.yml) workflow
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/44644100044)) runs four passes from one VIO,
+one online result and one first matching (the driver's `--ba-compare --ba-compare-focal-only`), with the
+temperature terms and the rematch off. Both camera conditions keep the factory stereo translation, use 5 s
+segments with SLAM Dunk's walks (1 mrad, 0.035 px) and estimate the 3×3 gyroscope matrix:
+
+| Pass | CP score | Recall at 1 m (%) | Position RMSE (m) | Focal change, cam0 / cam1 (median %) |
+|---|---:|---:|---:|---|
+| Default (both rotations and focal lengths in 8 segments) | **79.92** | **100.0** | 1.478 | 0.43 / 0.41 |
+| Gyroscope matrix | 79.74 | **100.0** | 1.336 | 0.41 / 0.38 |
+| Matrix, focal lengths per 5 s, rotations at the factory's | 73.74 | 74.1 | 1.127 | 0.26 / 0.27 |
+| Matrix, focal lengths and cam1's rotation per 5 s (cam0 fixed) | 73.19 | 77.8 | **1.092** | 0.38 / 0.37 |
+
+Horizontal error of the six tags (m):
+
+| Tag | First seen (s) | Default | Gyroscope matrix | Focal lengths | Focal lengths and rotation |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 1252 | 0.702 | 0.790 | 1.414 | 1.267 |
+| 21 | 1306 | 0.950 | 0.991 | 1.471 | 1.564 |
+| 22 | 1378 | 0.622 | 0.657 | 1.285 | 1.394 |
+| 23 | 1477 | 0.862 | 0.817 | 0.943 | 1.609 |
+| 24 | 1612 | 0.685 | 0.675 | 1.243 | 1.355 |
+| 26 | 1760 | 0.447 | 0.702 | 1.724 | 1.186 |
+
+The default pass reproduces the earlier run (79.92 against 79.88, the same 1.478 m). The gyroscope matrix
+alone leaves the CP score where it was (−0.17) and lowers the RMSE by 0.14 m. The loss comes with the
+camera model, and already without the stereo rotation: with the focal lengths alone the score drops by 6.0
+and tags 19, 20, 21, 22, 24, 25 and 26 go over 1 m, while tags 16 to 18 (15–18 minutes) improve from
+0.65–0.96 m to 0.26–0.34 m. Adding cam1's rotation moves the score by a further −0.55 and the RMSE by
+−0.035 m. The focal-only pass also holds both rotations at the factory's, which the default pass estimates
+in 8 segments; its final cost is 6 % higher (210,612 against 197,398 with the matrix alone), so it is not
+the default pass with time-varying focal lengths added. Its focal changes stay positive throughout
+(0.04–0.45 % on cam0). Whether the late tags follow the 5 s focal segments or the factory rotations needs
+a pass with the default 8-segment rotations and 5 s focal lengths. The per-tag errors of all 27 control
+points are in the run's `control_points_by_condition.csv`.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
