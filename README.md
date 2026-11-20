@@ -436,6 +436,12 @@ cargo run --release --features image-io --example deep_localization_demo -- \
 | KITTI revisit scanner | `python scripts/run_kitti_deep_vo_revisit_smoke.py` | Public KITTI 00 revisit smoke (downloads start/revisit slices) |
 | Full local quality gate | `scripts/check.sh` | `fmt` + `clippy` + `test` + `doc` in one command |
 
+**A photo with no EXIF?** `localize_with_unknown_focal` estimates the focal
+length with P4Pf while localizing. On the 38 ETH3D courtyard photos (leave one
+out) it localizes 36 at 1.0% centre error, the same as knowing the focal
+length, where a guessed focal length gives poses 3.5 scene radii off
+([details](docs/unknown_focal_localization.md)).
+
 ### Save a VI-SLAM map and localize against it
 
 The stereo-inertial SLAM demo can save its final map, and a second sequence of

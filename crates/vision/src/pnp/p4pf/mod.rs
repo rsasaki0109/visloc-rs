@@ -596,7 +596,10 @@ mod tests {
         // must respect the range.
         if let Some(report) = estimate_pose_with_focal(&correspondences, pp, &config) {
             let f = report.estimate.focal_px;
-            assert!((1500.0..=3000.0).contains(&f), "focal {f} outside the range");
+            assert!(
+                (1500.0..=3000.0).contains(&f),
+                "focal {f} outside the range"
+            );
             assert!(report.inliers.len() < correspondences.len());
         }
     }
