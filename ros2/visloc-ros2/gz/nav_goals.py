@@ -167,6 +167,21 @@ def main():
         stamp = tf_buffer.lookup_transform('map', 'base_link', Time()).header.stamp
         return sim_s() - (stamp.sec + stamp.nanosec * 1e-9) < 0.5
 
+    def wait_localized(hold_s, deadline):
+        # Localized for hold_s seconds in a row: Nav2's own TF listener has
+        # caught up by then (a goal sent at the first map -> odom can still
+        # fail with "Initial robot pose is not available").
+        since = None
+        while sim_s() <= deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.1)
+            if not localized():
+                since = None
+            elif since is None:
+                since = sim_s()
+            elif sim_s() - since >= hold_s:
+                return
+
+    wait_localized(2.0, started + 60.0)
     for x, y, yaw in GOALS:
         t0 = sim_s()
         attempts = 0
@@ -182,8 +197,7 @@ def main():
                     or sim_s() - t0 > args.timeout):
                 break
             navigator.get_logger().info('goal failed; resending once localized again')
-            while not localized() and sim_s() - t0 <= args.timeout:
-                rclpy.spin_once(navigator, timeout_sec=0.1)
+            wait_localized(2.0, t0 + args.timeout)
         for _ in range(10):
             rclpy.spin_once(navigator, timeout_sec=0.05)
         distance = math.hypot(monitor.truth[0] - x, monitor.truth[1] - y)
