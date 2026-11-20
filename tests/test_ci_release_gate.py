@@ -96,7 +96,7 @@ class CiReleaseGateTests(unittest.TestCase):
 
     def test_publish_order_matches_docs_and_package_check(self):
         documented = re.findall(r"(?m)^\d+\. `(visloc-[a-z0-9-]+)`$", read("docs/publishing.md"))
-        self.assertEqual(len(documented), 18)
+        self.assertEqual(len(documented), 19)
         self.assertEqual(shell_package_list("scripts/publish_crates.sh"), documented)
         self.assertEqual(shell_package_list("scripts/package_check.sh"), documented)
 
