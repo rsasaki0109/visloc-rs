@@ -66,6 +66,7 @@ frame; see [the online mapper](#online-mapper-mappertrue) below.
 | `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame`, or `odom_frame -> base_frame`; with `mapper`, also `map_frame -> odom_frame` |
 | `map_pose` | `geometry_msgs/PoseStamped` | out | only with `mapper`: the same pose in `map_frame`, loop-closure corrected |
 | `map_path` | `nav_msgs/Path` | out | only with `mapper` and `publish_path`: last `path_max_length` `map_pose`s |
+| `odom_reset` | `std_msgs/Int32` | out | number of estimator resets so far (0 at start), transient-local; each reset starts a new `odom` frame, and `visloc_map_localize_node` relocalizes on it |
 
 Output stamps are the left image's header stamps.
 
@@ -94,6 +95,10 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `mapper_queue` | `64` | mapper packets waiting for the mapper; when full, new packets are dropped (counted as `mapper_dropped`) |
 | `mapper_optimize_every_k` | `100` | new keyframes between background global BA passes (the demo's `--optimize-every-k`) |
 | `mapper_trajectory_out` | none | on SIGINT/SIGTERM, write the loop-closed trajectory of every frame here (TUM) |
+| `lost_min_observations` | `0` (off) | fewer tracked observations than this in a frame is weak tracking ([lost tracking](#lost-tracking)) |
+| `lost_after_s` | `0.5` | weak tracking for this long is lost tracking |
+| `recover_after_s` | `1.0` | after a reset, tracking must hold this long before anything is published again |
+| `lost_max_speed` | `0` (off) | an estimated speed above this (m/s) is lost tracking at once |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -118,7 +123,29 @@ seed is the exception: it uses the latest gyro bias the estimator has
 published, not the previous frame's. `cam_time_offset_ns` from the
 calibration is added to camera stamps. On an estimator error the node logs
 it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
-the dropped-frame counts and the frontend/estimator time per frame.
+the dropped-frame counts, the frontend/estimator time per frame, and the
+min/avg tracked observations per frame.
+
+### Lost tracking
+
+When the cameras see nothing (a covered lens, a blank wall up close, the
+lights off), the VIO integrates the IMU alone and its pose runs away, while
+a robot driving on it goes on as if nothing happened. With
+`lost_min_observations` (and/or `lost_max_speed`) the node watches every
+estimate: fewer tracked observations than that for `lost_after_s`, or a
+speed above `lost_max_speed`, counts as lost tracking. The node then resets
+the estimator, as on an estimator error, and publishes nothing (no
+`odom`, `pose`, TF) until tracking has held for `recover_after_s`. A
+navigation stack loses the robot's pose and stops it instead of driving
+blind. Each reset, from the monitor or an estimator error, bumps
+`odom_reset`; `visloc_map_localize_node` then drops its `map -> odom` and
+localizes every image until it has a new one. A dip shorter than
+`lost_after_s` is still published. Off by default. In Gazebo, a 5 s camera
+blackout with `lost_min_observations 20 lost_max_speed 1.0` stopped the
+robot within 7 cm, where without it the robot drove 1.5 m blind with up to
+43 cm of error ([docs/navigation.md](../../docs/navigation.md)); in normal
+driving there, frames went down to 5 observations, but never for 0.5 s:
+all 9 resets of that run fell in the blackout.
 
 ### Monocular (`mono:=true`)
 
@@ -414,6 +441,7 @@ measurements behind the defaults.
 | `image` | `sensor_msgs/Image` | in | raw images of the map's `camera` (cam0 by default), the same stream the VIO uses |
 | `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of a body frame, e.g. `visloc_vio_node`'s or a ground robot's wheel odometry; its `header.frame_id` names the odometry frame and its `child_frame_id` the body |
 | `/tf_static` | `tf2_msgs/TFMessage` | in | only with `extrinsics tf`: where the camera sits relative to the body |
+| `odom_reset` | `std_msgs/Int32` | in | `visloc_vio_node`'s reset count (transient-local): on a change, the correction is dropped and the node localizes every image until it has a new one |
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once the correction is set |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once the correction is set (not `pose`, which `visloc_vio_node` publishes) |
 | `map_fix` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose of each image localized with `min_inliers`, stamped with the image (for `visloc_wheel_calibration_node`) |

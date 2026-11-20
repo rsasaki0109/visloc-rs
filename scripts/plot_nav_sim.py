@@ -54,6 +54,8 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--world-from-map', default='',
                         help='align_map.py JSON: the runs are in the world, the grid in the map')
+    parser.add_argument('--crop', default='',
+                        help='x0,y0,x1,y1 (the runs\' frame): draw only this part, magnified')
     args = parser.parse_args()
     to_map = lambda x, y: (x, y)  # noqa: E731
     if args.world_from_map:
@@ -91,6 +93,13 @@ def main():
             draw.ellipse([cx - 14, cy - 14, cx + 14, cy + 14], outline=(27, 120, 55), width=4)
         sx, sy = px(*truth[0])
         draw.rectangle([sx - 8, sy - 8, sx + 8, sy + 8], fill=(27, 120, 55))
+        if args.crop:
+            x0, y0, x1, y1 = (float(v) for v in args.crop.split(','))
+            xs, ys = zip(*(px(x, y) for x in (x0, x1) for y in (y0, y1)))
+            panel = panel.crop((int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))))
+            zoom = max(1, 1200 // panel.width)
+            panel = panel.resize((panel.width * zoom, panel.height * zoom), Image.NEAREST)
+            draw = ImageDraw.Draw(panel)
         draw.text((14, 10), title, fill=(0, 0, 0), font=font)
         panels.append(panel)
 

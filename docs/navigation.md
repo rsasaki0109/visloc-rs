@@ -219,13 +219,48 @@ every wall, and with the box the robot drove into it. `gz/nav2_params.yaml`
 sets both limits to -1.5 m. A real robot with this stack needs the same, or
 a floor-level `map` frame.
 
-**Not covered: VIO that has lost tracking.** When the robot drove into the
-box (before that fix), the camera ended up about 10 cm from its face, too
-close for stereo. The VIO had nothing to track, integrated the IMU alone,
-and its pose ran off 7 m while the robot stood still. Map localization had
-no features either, so nothing corrected it. The stack has no detector for
-that (too few tracked features for too long) and no stop until it
-relocalizes. Wheel odometry would bridge such gaps; this robot has none.
+**VIO that has lost tracking.** When the robot drove into the box (before
+that fix), the camera ended up about 10 cm from its face, too close for
+stereo. The VIO had nothing to track, integrated the IMU alone, and its pose
+ran off 7 m while the robot stood still. Map localization had no features
+either, so nothing corrected it. `visloc_vio_node` now has a lost-tracking
+monitor for that (off by default; `nav.launch.py lost_min_observations:=20
+lost_max_speed:=1.0`). Too few tracked observations for 0.5 s, or an
+implausible speed, resets the estimator. The node then publishes no odometry
+and no `odom -> base_link` until tracking has held for 1 s, so Nav2 loses
+the robot's pose and stops it. Each reset is announced on `odom_reset`, on
+which `visloc_map_localize_node` drops its `map -> odom` and relocalizes
+(before, it applied its old correction to the VIO's new `odom` frame after
+every reset, including the resets that already followed estimator errors).
+
+To test it, `gz/camera_blackout.py` blanks both cameras for 5 simulated
+seconds as the robot drives down the hallway (from world (4.5, 4.5), on the
+way to the second goal); `nav_goals.py --retries 3` sends a goal Nav2 gave
+up on again once the robot is localized, as a supervisor would:
+
+| 5 s camera blackout in the hallway | goals reached | contacts | `/map_pose` error, RMSE / max | robot during the blackout |
+| --- | ---: | ---: | --- | --- |
+| monitor off | 5/5 | 0 | 5.6 cm / **43 cm** | drives on blind for 1.5 m |
+| monitor on (`lost_min_observations 20`, `lost_max_speed 1.0`) | 5/5 (goal 2 on the 2nd try) | 0 | 1.5 cm / 4.4 cm | stops within 7 cm |
+
+<p align="center">
+  <img src="assets/gz_nav2_blackout.png" alt="The hallway, magnified. Monitor off: the believed pose drifts up to 0.4 m to the side of the true path during the blackout and snaps back when the cameras return. Monitor on: no believed pose during the blackout, and the true path is straight" width="100%">
+</p>
+
+Without the monitor, the VIO carried on on the IMU alone. The robot drove
+on, steering on a pose that drifted up to 43 cm off, 35 cm of it across a
+hallway 0.9 m wide. It snapped back when the cameras returned. Here
+the hallway was straight and empty, so the robot got through; it was luck.
+With the monitor, tracking counted as lost 0.5 s into the blackout and Nav2
+aborted the goal; the robot stopped about 7 cm on. The estimator was reset
+every 0.5 s while the images stayed blank (9 resets). 1 s after the
+cameras came back, the VIO published again, map localization had its new
+`map -> odom` at once, and the second try reached the goal. The error
+column counts only the poses that were published. Outside the blackout the
+monitor never fired: frames went down to 5 tracked observations in normal
+driving, but not for 0.5 s. A gap longer than a few seconds still needs
+someone (or a behavior tree) to resend the goal, and the robot stays where
+it stopped until the cameras see again; wheel odometry would let it go on.
 
 Gazebo renders on the CPU here (no GPU), which makes the simulation run at
 about a tenth of real time. Every node runs on simulation time, so Nav2 and
@@ -306,6 +341,18 @@ python3 ros2/visloc-ros2/gz/nav_goals.py --world-from-map runs/gz_nav/map/world_
 If Nav2's bringup stalls (the launch never logs `lifecycle_manager_navigation`
 "Managed nodes are active"; here about one launch in three), stop everything
 and launch again.
+
+For the camera blackout, launch with `camera_suffix:=image
+lost_min_observations:=20 lost_max_speed:=1.0` (or without the last two for
+the run without the monitor), run the relay in another shell, and add
+`--retries 3` to `nav_goals.py`:
+
+```bash
+python3 ros2/visloc-ros2/gz/camera_blackout.py --at 4.5,4.5 --duration 5 \
+  --log runs/gz_nav/blackout.json
+```
+
+The figure above is `plot_nav_sim.py` with `--crop 3.5,3.6,7.5,5.4`.
 
 For the unmapped box, make a second world with
 `--extra-box 4.6,4.0,5.2,5.0,0.8` (add `--extra-box-plain` for the

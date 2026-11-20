@@ -27,8 +27,14 @@ All notable changes to `visloc-rs` will be documented here.
   SLAM reaches 5/5 goals at 1.6 cm `/map_pose` RMSE, and 5/5 with an
   unmapped box (lidar obstacle layer, detour). The Gazebo Nav2 parameters
   lower both obstacle-height limits, since the SLAM map's frame starts at
-  the IMU, 0.5 m above the floor. No detection yet of VIO that has lost
-  tracking.
+  the IMU, 0.5 m above the floor. `visloc_vio_node` detects lost tracking
+  (`lost_min_observations`, `lost_max_speed`; off by default): it resets the
+  estimator and publishes nothing until tracking holds again, and announces
+  each reset on `odom_reset`, on which `visloc_map_localize_node`
+  relocalizes (it used to keep its old `map -> odom` across a VIO reset). A
+  5 s camera blackout in Gazebo: the robot stops within 7 cm and goes on
+  1 s after the cameras come back (5/5 goals, 4.4 cm max error), instead of
+  driving 1.5 m blind with up to 43 cm of error.
   `scripts/plot_nav_sim.py` draws the runs.
 
 - **`merge_maps` merges maps of another calibration of the rig**
