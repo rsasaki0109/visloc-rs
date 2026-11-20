@@ -14,7 +14,9 @@ robot's odometry is the VIO, its localization visloc's.
 Arguments: world, map (a `--save-map` directory with `occupancy.yaml`),
 nodes (directory of the visloc ROS 2 binaries), calibration (Basalt
 calibration of the rig; default `calibration.json` next to the world),
-config (Basalt VIO config), params_file.
+config (Basalt VIO config), params_file, log_level (Nav2's), camera_suffix
+(`image` to read through `camera_blackout.py`), lost_min_observations and
+lost_max_speed (`visloc_vio_node`'s lost-tracking monitor; 0 is off).
 """
 
 import os
@@ -34,6 +36,9 @@ SIM = {'use_sim_time': True}
 def _setup(context):
     get = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
     world, map_dir, nodes = get('world'), get('map'), get('nodes')
+    cam = get('camera_suffix')
+    lost = ['--lost_min_observations', get('lost_min_observations'),
+            '--lost_max_speed', get('lost_max_speed')]
     calibration = get('calibration') or os.path.join(os.path.dirname(world), 'calibration.json')
     return [
         ExecuteProcess(cmd=['gz', 'sim', '-s', '-r', '--headless-rendering', world],
@@ -45,12 +50,12 @@ def _setup(context):
              parameters=[SIM]),
         ExecuteProcess(cmd=[os.path.join(nodes, 'visloc_vio_node'), '--calibration', calibration,
                             '--config', get('config'),
-                            '--remap', 'left/image_raw=/cam0/image_raw',
-                            '--remap', 'right/image_raw=/cam1/image_raw', '--remap', 'imu=/imu',
-                            '--publish_path', 'false'],
+                            '--remap', f'left/image_raw=/cam0/{cam}',
+                            '--remap', f'right/image_raw=/cam1/{cam}', '--remap', 'imu=/imu',
+                            '--publish_path', 'false', *lost],
                        output='screen', name='visloc_vio_node'),
         ExecuteProcess(cmd=[os.path.join(nodes, 'visloc_map_localize_node'), '--map', map_dir,
-                            '--remap', 'image=/cam0/image_raw', '--publish_map_cloud', 'false'],
+                            '--remap', f'image=/cam0/{cam}', '--publish_map_cloud', 'false'],
                        output='screen', name='visloc_map_localize_node'),
         Node(package='nav2_map_server', executable='map_server', name='map_server', output='log',
              parameters=[{'yaml_filename': os.path.join(map_dir, 'occupancy.yaml')}, SIM]),
@@ -72,6 +77,13 @@ def generate_launch_description():
         DeclareLaunchArgument('config', default_value=os.path.join(
             REPO, 'configs', 'basalt', 'variants', 'official_euroc_ds', 'euroc_config.json')),
         DeclareLaunchArgument('params_file', default_value=os.path.join(HERE, 'nav2_params.yaml')),
+        DeclareLaunchArgument('camera_suffix', default_value='image_raw',
+                              description='the visloc nodes read /cam0/<this> and /cam1/<this> '
+                                          '(image: through camera_blackout.py)'),
+        DeclareLaunchArgument('lost_min_observations', default_value='0',
+                              description="visloc_vio_node's lost-tracking monitor (0: off)"),
+        DeclareLaunchArgument('lost_max_speed', default_value='0',
+                              description="visloc_vio_node's lost-tracking speed check, m/s (0: off)"),
         DeclareLaunchArgument('log_level', default_value='info', description="Nav2's log level"),
         OpaqueFunction(function=_setup),
         IncludeLaunchDescription(

@@ -114,6 +114,9 @@ def main():
     parser.add_argument('--timeout', type=float, default=240.0, help='simulated seconds per goal')
     parser.add_argument('--tolerance', type=float, default=0.3)
     parser.add_argument('--label', default='')
+    parser.add_argument('--retries', type=int, default=0,
+                        help='send a goal Nav2 failed again, up to this many times, once the '
+                             'robot is localized again (as a supervisor would)')
     parser.add_argument('--record', default='',
                         help='CSV of true and believed poses (scripts/plot_nav_sim.py reads it)')
     args = parser.parse_args()
@@ -135,14 +138,31 @@ def main():
     sim_s = lambda: clock.now().nanoseconds * 1e-9  # noqa: E731
     started = sim_s()
     results = []
+    def localized():
+        # map -> base_link known and recent: visloc publishes map -> odom
+        # with every odometry message, so a stale one means no odometry.
+        if not tf_buffer.can_transform('map', 'base_link', Time()):
+            return False
+        stamp = tf_buffer.lookup_transform('map', 'base_link', Time()).header.stamp
+        return sim_s() - (stamp.sec + stamp.nanosec * 1e-9) < 0.5
+
     for x, y, yaw in GOALS:
         t0 = sim_s()
-        navigator.goToPose(map_goal(navigator, t, x, y, yaw))
-        while not navigator.isTaskComplete():
-            rclpy.spin_once(navigator, timeout_sec=0.05)
-            if sim_s() - t0 > args.timeout:
-                navigator.cancelTask()
-        result = navigator.getResult()
+        attempts = 0
+        while True:
+            attempts += 1
+            navigator.goToPose(map_goal(navigator, t, x, y, yaw))
+            while not navigator.isTaskComplete():
+                rclpy.spin_once(navigator, timeout_sec=0.05)
+                if sim_s() - t0 > args.timeout:
+                    navigator.cancelTask()
+            result = navigator.getResult()
+            if (result == TaskResult.SUCCEEDED or attempts > args.retries
+                    or sim_s() - t0 > args.timeout):
+                break
+            navigator.get_logger().info('goal failed; resending once localized again')
+            while not localized() and sim_s() - t0 <= args.timeout:
+                rclpy.spin_once(navigator, timeout_sec=0.1)
         for _ in range(10):
             rclpy.spin_once(navigator, timeout_sec=0.05)
         distance = math.hypot(monitor.truth[0] - x, monitor.truth[1] - y)
@@ -151,6 +171,7 @@ def main():
             'nav2_result': {TaskResult.SUCCEEDED: 'succeeded', TaskResult.CANCELED: 'canceled',
                             TaskResult.FAILED: 'failed'}.get(result, str(result)),
             'sim_time_s': round(sim_s() - t0, 1),
+            'attempts': attempts,
             'true_distance_m': round(distance, 3),
             'reached': result == TaskResult.SUCCEEDED and distance <= args.tolerance,
         }
