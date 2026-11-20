@@ -3205,8 +3205,8 @@ reach 0.92 and 1.24 m) and the recall at 1 m falls to 74.1 %, the same as with t
 pass has the lowest final cost of the five, so the solver prefers it. The rotations decide the rest:
 holding them at the factory's costs another 3.0 points on the earlier tags (tag 0 at 0.96 m, tags 7–9 at
 0.44–0.54 m against 0.14–0.45 m) and raises the cost by 7 %. cam1's rotation per 5 s on top moves the score by
-−0.5. With the 5 s focal lengths, tags 16–18 (15–18 minutes) improve from 0.65–0.96 m to 0.27–0.40 m in every
-variant, so the focal walk fits the middle of the recording better and the last ten minutes worse. The
+−0.5. With the 5 s focal lengths, tags 16–18 (15–18 minutes) improve from 0.65–0.96 m in every
+variant (0.26–0.50 m across the three), so the focal walk fits the middle of the recording better and the last ten minutes worse. The
 per-tag errors of all 27 control points are in each run's `control_points_by_condition.csv`.
 
 ## Usage
