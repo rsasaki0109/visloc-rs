@@ -138,6 +138,10 @@ def main():
     parser.add_argument('--retries', type=int, default=0,
                         help='send a goal Nav2 failed again, up to this many times, once the '
                              'robot is localized again (as a supervisor would)')
+    parser.add_argument('--spin-after', type=float, default=0.0,
+                        help='while waiting to resend a goal: if the robot has odometry but no '
+                             'map pose for this long (simulated s), turn it 90 degrees on the '
+                             'spot to look for the map (0: off)')
     parser.add_argument('--record', default='',
                         help='CSV of true and believed poses (scripts/plot_nav_sim.py reads it)')
     args = parser.parse_args()
@@ -167,15 +171,36 @@ def main():
         stamp = tf_buffer.lookup_transform('map', 'base_link', Time()).header.stamp
         return sim_s() - (stamp.sec + stamp.nanosec * 1e-9) < 0.5
 
+    def has_odometry():
+        # odom -> base_link recent: the VIO publishes, map localization may not yet.
+        if not tf_buffer.can_transform('odom', 'base_link', Time()):
+            return False
+        stamp = tf_buffer.lookup_transform('odom', 'base_link', Time()).header.stamp
+        return sim_s() - (stamp.sec + stamp.nanosec * 1e-9) < 0.5
+
+    spins = []
+
     def wait_localized(hold_s, deadline):
         # Localized for hold_s seconds in a row: Nav2's own TF listener has
         # caught up by then (a goal sent at the first map -> odom can still
         # fail with "Initial robot pose is not available").
         since = None
+        lost_since = sim_s()
         while sim_s() <= deadline:
             rclpy.spin_once(navigator, timeout_sec=0.1)
             if not localized():
                 since = None
+                # Stopped where the cameras see too little of the map to
+                # relocalize (a bare wall): turn on the spot, on odometry
+                # alone, until the map comes into view.
+                if (args.spin_after > 0 and sim_s() - lost_since >= args.spin_after
+                        and has_odometry()):
+                    navigator.get_logger().info('not relocalized: spinning to look around')
+                    spins.append(round(sim_s(), 1))
+                    navigator.spin(spin_dist=math.pi / 2, time_allowance=30)
+                    while not navigator.isTaskComplete():
+                        rclpy.spin_once(navigator, timeout_sec=0.05)
+                    lost_since = sim_s()
             elif since is None:
                 since = sim_s()
             elif sim_s() - since >= hold_s:
@@ -219,6 +244,7 @@ def main():
         'reached': sum(r['reached'] for r in results),
         'goal_count': len(results),
         'contacts': monitor.contacts,
+        'relocalization_spins_at_s': spins,
         'drive_sim_time_s': round(sim_s() - started, 1),
         'pose_error_m': {
             'samples': len(errors),
