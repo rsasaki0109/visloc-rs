@@ -72,9 +72,11 @@ def generate_launch_description():
         DeclareLaunchArgument('config', default_value=os.path.join(
             REPO, 'configs', 'basalt', 'variants', 'official_euroc_ds', 'euroc_config.json')),
         DeclareLaunchArgument('params_file', default_value=os.path.join(HERE, 'nav2_params.yaml')),
+        DeclareLaunchArgument('log_level', default_value='info', description="Nav2's log level"),
         OpaqueFunction(function=_setup),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav2_launch),
             launch_arguments={'params_file': LaunchConfiguration('params_file'),
-                              'use_sim_time': 'True', 'autostart': 'True'}.items()),
+                              'use_sim_time': 'True', 'autostart': 'True',
+                              'log_level': LaunchConfiguration('log_level')}.items()),
     ])
