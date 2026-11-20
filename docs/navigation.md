@@ -13,9 +13,19 @@ cannot get elsewhere for a camera robot.
    node is `visloc_map_localize_node`
    ([ros2/visloc-ros2](../ros2/visloc-ros2/README.md)).
 
-The navigation results below were measured in simulation. No real robot has
-been driven by Nav2 on visloc localization yet. The occupancy conversion is
-also shown on a real robot's map (TUM RGB-D fr2/pioneer_360).
+The navigation results below were measured in simulation, at two levels:
+
+- **A lightweight simulation** (`visloc_navigation::sim`): no rendering;
+  the camera detects 3D texture points. It runs in real time and is
+  deterministic, which makes it useful for comparing localization sources.
+- **Gazebo**: rendered stereo images, an IMU and a lidar. The robot is
+  driven by visloc-rs's real robot nodes (`visloc_vio_node`,
+  `visloc_map_localize_node`) on a map made by visloc's own stereo-inertial
+  SLAM ([below](#in-gazebo-rendered-cameras-and-the-real-nodes)).
+
+No real robot has been driven by Nav2 on visloc localization yet. The
+occupancy conversion is also shown on a real robot's map (TUM RGB-D
+fr2/pioneer_360).
 
 ## Result: Nav2 on visloc localization, in simulation
 
@@ -146,6 +156,149 @@ python3 scripts/plot_nav_sim.py --map runs/nav_sim/map/occupancy.yaml \
 RViz shows the run with the `map` fixed frame: `/map`, `/plan`,
 `/local_costmap/costmap`, `/scan` and `/map_pose`.
 
+## In Gazebo: rendered cameras and the real nodes
+
+<p align="center">
+  <img src="assets/gz_apartment_camera_and_map.png" alt="Left: a grey-scale image from the simulated robot's left camera in Gazebo, looking down a doorway between textured walls, with a textured floor. Right: the occupancy grid built from the map that visloc's stereo-inertial SLAM made of the Gazebo apartment: the five rooms' walls as dotted black lines, the free floor white, the furniture and the areas the camera never saw grey." width="900">
+</p>
+
+The same apartment in [Gazebo](https://gazebosim.org) Harmonic, with nothing
+of the lightweight simulation left but the floor plan. Gazebo renders the
+cameras, so the whole camera pipeline runs: feature extraction, stereo VIO,
+SLAM and map-based localization.
+
+- **World** (`ros2/visloc-ros2/gz/make_world.py`): the apartment's walls and
+  furniture with procedurally generated textures, one hallway wall bare.
+- **Robot**: a differential drive, 0.2 m radius, with on `imu_link`, 0.5 m
+  up, a stereo pair (640 x 480 grey, 90 degrees, 12 cm baseline, 20 Hz)
+  and an IMU (200 Hz, with noise and bias), and a 2D lidar for Nav2's
+  obstacle layers. There is no wheel odometry.
+- **Map**: the robot is driven once around every room (`drive_route.py`)
+  while `record_euroc.py` records the stereo images and the IMU.
+  `basalt_euroc_online_slam_demo --save-map` builds the map from that
+  recording (0.9 cm trajectory error online; 4,355 frames, 22,536
+  landmarks), and `visual_map_to_occupancy` converts it (right panel).
+- **Navigation** (`nav.launch.py`): `visloc_vio_node` on the stereo pair and
+  the IMU gives `odom -> imu_link`. `visloc_map_localize_node` on the left
+  camera, against the saved map, gives `map -> odom`. Nav2 plans on the
+  converted map. This is the stack a real robot would run, except for the
+  base driver.
+
+The map is in the SLAM's own frame, which starts where mapping started. The
+goals are the same five rooms, written in the world and converted to the
+map with a planar transform fitted between the SLAM trajectory and Gazebo's
+ground truth (`align_map.py`, 0.9 cm residual). Only the goal script and the
+scoring use that transform; navigation never sees it.
+
+| run | goals reached | contacts | `/map_pose` error, RMSE / median / max | drive time (sim) |
+| --- | ---: | ---: | --- | ---: |
+| visloc VIO + map localization | **5/5** | 0 | **1.6 cm** / 1.2 cm / 4.4 cm | 117 s |
+| a plain, textureless box missing from the map | 1/5 | 0 | 1.5 m / 1.4 cm / 7.4 m | (stopped) |
+
+Each goal counts as reached by the same rule as above, with the true pose
+from Gazebo. The robot localizes in the map from its first image (401 PnP
+inliers), without an initial pose.
+
+**A textureless obstacle that fills the view breaks the VIO.** With a plain
+box in the hallway, the robot drove up to it and stopped 0.35 m short of
+it. The box then filled most of the image, leaving about 10 keypoints.
+The VIO had nothing to track and integrated the IMU alone, and its pose ran
+off through the box and out of the apartment at an accelerating speed
+(7.4 m in 9 s), while the robot stood still. Map localization needs
+features too, so nothing corrected it. Nav2 then planned from a pose
+outside the map and failed the remaining goals. A real robot facing a
+blank wall up close is in the same situation. What the stack lacks is a
+detector for VIO that has lost tracking (too few features for too long),
+and a stop until it relocalizes. Wheel odometry would also bridge such
+gaps; this robot has none.
+
+Gazebo renders on the CPU here (no GPU), which makes the simulation run at
+about a tenth of real time. Every node runs on simulation time, so Nav2 and
+the visloc nodes see a normal-speed robot; a 2-minute drive takes about
+20 minutes.
+
+### Reproduce in Gazebo
+
+Needs ROS 2 Jazzy, Nav2 and `ros-jazzy-ros-gz` (Gazebo Harmonic). Build the
+nodes and the SLAM:
+
+```bash
+cargo build --release --manifest-path ros2/visloc-ros2/Cargo.toml \
+  --bin visloc_vio_node --bin visloc_map_localize_node
+```
+
+```bash
+cargo build --release --example basalt_euroc_online_slam_demo --example visual_map_to_occupancy
+```
+
+Make the world, then map. In one shell, start Gazebo and the bridge; in a
+second, record; in a third, drive the route, then stop the recorder with
+Ctrl-C:
+
+```bash
+python3 ros2/visloc-ros2/gz/make_world.py --out runs/gz_nav/world
+```
+
+```bash
+(cd runs/gz_nav/world && gz sim -s -r --headless-rendering apartment.sdf) &
+ros2 run ros_gz_bridge parameter_bridge --ros-args \
+  -p config_file:=ros2/visloc-ros2/gz/bridge.yaml -p use_sim_time:=true
+```
+
+```bash
+python3 ros2/visloc-ros2/gz/record_euroc.py --out runs/gz_nav/mapping
+```
+
+```bash
+python3 ros2/visloc-ros2/gz/drive_route.py
+```
+
+Build the map, its occupancy grid, and the world-from-map transform for the
+goals:
+
+```bash
+target/release/examples/basalt_euroc_online_slam_demo \
+  --euroc-dir runs/gz_nav/mapping \
+  --calibration runs/gz_nav/world/calibration.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir runs/gz_nav/slam --save-map runs/gz_nav/map
+```
+
+```bash
+target/release/examples/visual_map_to_occupancy \
+  --map-dir runs/gz_nav/map --camera-height 0.5 --out runs/gz_nav/map/occupancy
+```
+
+```bash
+python3 ros2/visloc-ros2/gz/align_map.py --trajectory runs/gz_nav/slam/trajectory_online.tum \
+  --ground-truth runs/gz_nav/mapping/mav0/state_groundtruth_estimate0/data.csv \
+  --out runs/gz_nav/map/world_from_map.json
+```
+
+Navigate: launch Gazebo, the visloc nodes and Nav2, then send the goals from
+a second shell:
+
+```bash
+ros2 launch ros2/visloc-ros2/gz/nav.launch.py world:=runs/gz_nav/world/apartment.sdf \
+  map:=runs/gz_nav/map nodes:=ros2/visloc-ros2/target/release
+```
+
+```bash
+python3 ros2/visloc-ros2/gz/nav_goals.py --world-from-map runs/gz_nav/map/world_from_map.json \
+  --out runs/gz_nav/nav.json --record runs/gz_nav/nav.csv
+```
+
+For the unmapped box, make a second world with
+`--extra-box 4.6,4.0,5.2,5.0,0.8` (add `--extra-box-plain` for the
+textureless one), launch on it, and pass the same `--extra-box` to
+`nav_goals.py`, which needs it to count contacts. To draw a run on the map:
+
+```bash
+python3 scripts/plot_nav_sim.py --map runs/gz_nav/map/occupancy.yaml \
+  --world-from-map runs/gz_nav/map/world_from_map.json \
+  --run "visloc=runs/gz_nav/nav.csv" --out runs/gz_nav/nav.png
+```
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every
@@ -221,6 +374,9 @@ Replace `visloc_nav_sim_node` with the real nodes: the robot's base driver
 (`odom -> base_link`), `visloc_vio_node` and `visloc_map_localize_node`
 (`map -> odom`), and a depth camera or a laser for the obstacle layers.
 Then run Nav2's `navigation_launch.py` with `map_server` on the converted
-map, and no AMCL. This has not been tried on a robot yet. The OpenLORIS
+map, and no AMCL. `ros2/visloc-ros2/gz/nav.launch.py` is that setup in
+Gazebo, without wheel odometry; on a robot, add the base driver's odometry
+and keep the VIO for `odom -> base_link` or the other way round. This has
+not been tried on a robot yet. The OpenLORIS
 results in [openloris_map_localization.md](openloris_map_localization.md)
 are the localization half of it, with no navigation.

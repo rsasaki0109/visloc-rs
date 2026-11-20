@@ -20,7 +20,13 @@ All notable changes to `visloc-rs` will be documented here.
   AMCL, and `tools/nav_sim_goals.py`. Nav2 Jazzy in simulation: 5/5 goals at
   3.8 cm pose RMSE and 0 collisions on visloc localization, 0/5 on wheel
   odometry alone, 5/5 with an unmapped obstacle (replanned). ROS-free:
-  `examples/nav_sim_build_map.rs`, `examples/nav_sim_drive.rs`.
+  `examples/nav_sim_build_map.rs`, `examples/nav_sim_drive.rs`. In Gazebo
+  (`ros2/visloc-ros2/gz/`: world with rendered stereo cameras, IMU and lidar,
+  mapping recorder, goal runner): Nav2 on the real nodes
+  (`visloc_vio_node` + `visloc_map_localize_node`) and a map from visloc's own
+  SLAM reaches 5/5 goals at 1.6 cm `/map_pose` RMSE. A textureless obstacle
+  filling the view makes the VIO diverge (no lost-tracking detection yet).
+  `scripts/plot_nav_sim.py` draws the runs.
 
 - **`merge_maps` merges maps of another calibration of the rig**
   (another day's): a camera that differs from the base map's under the same
