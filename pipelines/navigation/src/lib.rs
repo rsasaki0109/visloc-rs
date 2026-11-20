@@ -13,7 +13,10 @@
 //! - [`sim`]: a deterministic simulation of a camera-carrying
 //!   differential-drive robot (textured floor plan, drifting wheel odometry,
 //!   synthetic camera detections, range scans, a mapping run), for testing
-//!   localization and navigation end to end without a robot.
+//!   localization and navigation end to end without a robot;
+//!   [`sim_robot`] localizes that robot in its map with visloc's
+//!   localization pipeline and keeps `map -> odom`, as a navigation stack
+//!   expects from its localization.
 //!
 //! Planning and control are left to the navigation stack; see
 //! `docs/navigation.md` for running Nav2 on visloc-rs localization.
@@ -21,6 +24,7 @@
 pub mod grid;
 pub mod occupancy;
 pub mod sim;
+pub mod sim_robot;
 
 pub use grid::{GridCounts, GridGeometry, MapServerError, OccupancyGrid, FREE, OCCUPIED, UNKNOWN};
 pub use occupancy::{

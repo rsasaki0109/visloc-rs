@@ -16,6 +16,8 @@
 //! * [`queue`] -- bounded drop-oldest hand-off queue;
 //! * [`wheel_odom`] -- wheel odometry calibrated against the VIO while
 //!   driving;
+//! * [`nav_sim`] -- messages of the simulated, visloc-localized robot
+//!   that `visloc_nav_sim_node` drives for Nav2;
 //! * [`dds`] -- the `ros2-client` shell (node, QoS, pub/sub threads).
 //!
 //! The binaries `visloc_vio_node` and `visloc_localize_node` wire these
@@ -27,6 +29,7 @@ pub mod image;
 pub mod localize;
 pub mod map_localize;
 pub mod msgs;
+pub mod nav_sim;
 pub mod params;
 pub mod queue;
 pub mod sync;

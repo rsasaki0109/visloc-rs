@@ -548,10 +548,10 @@ pub struct OdometryConfig {
 impl Default for OdometryConfig {
     fn default() -> Self {
         Self {
-            left_scale_error: 0.01,
-            right_scale_error: -0.01,
+            left_scale_error: 0.0025,
+            right_scale_error: -0.0025,
             track: 0.35,
-            track_error: 0.03,
+            track_error: 0.02,
             noise: 0.02,
         }
     }

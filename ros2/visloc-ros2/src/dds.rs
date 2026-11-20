@@ -36,6 +36,8 @@ impl_message!(
     msgs::TfMessage,
     msgs::DiagnosticArray,
     msgs::Int32,
+    msgs::Twist,
+    msgs::LaserScan,
 );
 
 /// Sensor-input QoS: best-effort, volatile, keep-last `depth`.

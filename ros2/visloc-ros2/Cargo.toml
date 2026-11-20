@@ -31,6 +31,10 @@ path = "src/bin/visloc_vio_node.rs"
 name = "visloc_localize_node"
 path = "src/bin/visloc_localize_node.rs"
 
+[[bin]]
+name = "visloc_nav_sim_node"
+path = "src/bin/visloc_nav_sim_node.rs"
+
 [dependencies]
 # Graceful shutdown (final mapper optimization) on SIGINT/SIGTERM; the
 # handler is installed only with `mapper:=true`.
@@ -45,6 +49,7 @@ visloc-basalt = { path = "../../pipelines/basalt", features = ["basalt-lm-worksp
 visloc-core = { path = "../../crates/core" }
 visloc-io = { path = "../../crates/io" }
 visloc-localization = { path = "../../pipelines/localization" }
+visloc-navigation = { path = "../../pipelines/navigation" }
 visloc-vision = { path = "../../crates/vision" }
 
 

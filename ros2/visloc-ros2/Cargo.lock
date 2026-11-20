@@ -1812,6 +1812,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "visloc-navigation"
+version = "0.4.0"
+dependencies = [
+ "nalgebra",
+ "visloc-core",
+ "visloc-localization",
+ "visloc-vision",
+]
+
+[[package]]
 name = "visloc-ros2"
 version = "0.4.0"
 dependencies = [
@@ -1826,6 +1836,7 @@ dependencies = [
  "visloc-core",
  "visloc-io",
  "visloc-localization",
+ "visloc-navigation",
  "visloc-vision",
 ]
 
