@@ -65,6 +65,7 @@ class Monitor:
         self.errors = []
         self.contacts = 0
         self.in_contact = False
+        self.rows = []  # time, true x y yaw, believed x y (world)
         node.create_subscription(Odometry, '/ground_truth', self.on_truth, qos_profile_sensor_data)
         node.create_subscription(PoseWithCovarianceStamped, '/map_pose', self.on_estimate, 10)
 
@@ -86,6 +87,8 @@ class Monitor:
             return
         x, y = self.to_world(msg.pose.pose.position.x, msg.pose.pose.position.y)
         self.errors.append(math.hypot(x - self.truth[0], y - self.truth[1]))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.rows.append((stamp, *self.truth, x, y))
 
 
 def map_goal(navigator, t, x, y, yaw):
@@ -109,6 +112,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=240.0, help='simulated seconds per goal')
     parser.add_argument('--tolerance', type=float, default=0.3)
     parser.add_argument('--label', default='')
+    parser.add_argument('--record', default='',
+                        help='CSV of true and believed poses (scripts/plot_nav_sim.py reads it)')
     args = parser.parse_args()
     with open(args.world_from_map, encoding='utf-8') as f:
         t = json.load(f)
@@ -163,6 +168,11 @@ def main():
     }
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2)
+    if args.record:
+        with open(args.record, 'w', encoding='utf-8') as f:
+            f.write('time_s,true_x,true_y,true_yaw,est_x,est_y,est_yaw,collisions\n')
+            for t, tx, ty, tyaw, ex, ey in monitor.rows:
+                f.write(f'{t:.3f},{tx:.4f},{ty:.4f},{tyaw:.4f},{ex:.4f},{ey:.4f},,0\n')
     print(json.dumps(report, indent=2))
     rclpy.shutdown()
 
