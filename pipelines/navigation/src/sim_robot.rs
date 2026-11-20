@@ -30,7 +30,8 @@ use visloc_vision::ransac::PnPRansac;
 /// The localization pipeline: descriptor matching and P3P-RANSAC, as
 /// `basalt_euroc_localize_demo` localizes a robot in a saved map (a
 /// minimal solver that, unlike DLT, handles a view of a single wall).
-type Pipeline = LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
+type Pipeline =
+    LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
 
 use crate::sim::{
     CameraNoise, CameraRig, DiffDrive, DriveConfig, OdometryConfig, Pose2, ScanConfig, SimRng,
@@ -206,7 +207,9 @@ impl SimRobot {
             confidence: Some(0.999),
         };
         let pipeline = LocalizationPipeline::with_pose_estimator(
-            BruteForceMatcher { ratio: localization.ratio },
+            BruteForceMatcher {
+                ratio: localization.ratio,
+            },
             AllLandmarksSelector,
             ransac,
             localization,
@@ -292,16 +295,17 @@ impl SimRobot {
 
     fn localize(&mut self, stamp_ns: i64, odom: &SE3) -> LocalizationEvent {
         let truth = self.robot.pose;
-        let (query, _) = self
-            .rig
-            .observe(&self.world, &truth, &self.config.camera_noise, &mut self.rng);
+        let (query, _) = self.rig.observe(
+            &self.world,
+            &truth,
+            &self.config.camera_noise,
+            &mut self.rng,
+        );
         let predicted = self.correction.map_from_body(odom);
         let started = Instant::now();
         let result = match &predicted {
             Some(map_from_base) => {
-                let prior = self
-                    .rig
-                    .camera_pose(&Pose2::from_se3(map_from_base));
+                let prior = self.rig.camera_pose(&Pose2::from_se3(map_from_base));
                 let center = prior.camera_center_world();
                 self.pipeline
                     .localize_with_candidate_selector_and_descriptor_store_and_pose_prior(

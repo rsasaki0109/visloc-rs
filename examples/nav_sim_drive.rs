@@ -71,7 +71,12 @@ struct ModeResult {
 fn drive(mode: LocalizationMode, laps: usize) -> ModeResult {
     let world = World::apartment(1);
     let rig = CameraRig::forward(0.5);
-    let run = build_map(&world, &rig, &apartment_mapping_route(), &MappingConfig::default());
+    let run = build_map(
+        &world,
+        &rig,
+        &apartment_mapping_route(),
+        &MappingConfig::default(),
+    );
     let descriptors = LandmarkDescriptorStore::from_visual_map(&run.map);
     let start = Pose2::new(1.5, 2.5, 0.0);
     let config = SimRobotConfig {
@@ -141,12 +146,23 @@ fn run() -> Result<(), String> {
         match flag.as_str() {
             "--laps" => laps = value.parse().map_err(|_| format!("bad --laps {value}"))?,
             "--out" => out = Some(PathBuf::from(value)),
-            other => return Err(format!("unknown argument {other}; usage: [--laps N] [--out DIR]")),
+            other => {
+                return Err(format!(
+                    "unknown argument {other}; usage: [--laps N] [--out DIR]"
+                ))
+            }
         }
     }
     println!(
         "{:<13} {:>9} {:>10} {:>9} {:>9} {:>7} {:>16} {:>11}",
-        "mode", "reached", "collisions", "rmse_m", "max_m", "time_s", "fixes_accepted", "latency_ms"
+        "mode",
+        "reached",
+        "collisions",
+        "rmse_m",
+        "max_m",
+        "time_s",
+        "fixes_accepted",
+        "latency_ms"
     );
     for (name, mode) in [
         ("ground_truth", LocalizationMode::GroundTruth),

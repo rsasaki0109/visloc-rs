@@ -12,6 +12,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
 | `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and corrects the VIO odometry into the map frame. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
 | `visloc_wheel_calibration_node` | A robot's wheel odometry calibrated while driving, against `visloc_vio_node` and `visloc_map_localize_node`'s localizations: where the wheel odometry is measured relative to `base_link`, the lean of `base_link`, and the map's scale. Publishes the wheel odometry as `base_link`'s pose and `odom -> base_link`, for `visloc_map_localize_node`. |
+| `visloc_nav_sim_node` | A simulated camera robot (`visloc_navigation::sim`) localized by visloc in its map, for driving with Nav2 without a robot: takes `cmd_vel`, publishes wheel odometry, a depth scan and `map -> odom` (in place of AMCL). See [docs/navigation.md](../../docs/navigation.md). |
 
 This crate is **not** a member of the root Cargo workspace (it is listed in
 the root `[workspace] exclude` and declares its own `[workspace]`), has its
@@ -926,6 +927,36 @@ enough for the lean only, and the VIO turns 180° only at the end of the
 36 s session. A saved calibration from a drive with turns and straight
 runs stays the best start; these sessions are too short for refining to
 improve on it.
+
+## `visloc_nav_sim_node`
+
+A camera robot in the simulated apartment of `visloc_navigation::sim`,
+localized in a map saved by `nav_sim_build_map`
+(`cargo run --release --example nav_sim_build_map -- --out runs/nav_sim/map`)
+with visloc's localization pipeline and `OdomCorrection`. It presents the
+robot to Nav2 the way a base driver plus a localization node do, so Nav2
+runs unchanged with no AMCL. `launch/nav_sim.launch.py` starts it with
+Nav2's `map_server` (on the map's `occupancy.yaml`) and navigation servers
+(`launch/nav_sim_nav2_params.yaml`). `tools/nav_sim_goals.py` sends goals
+and scores the drive against the ground truth. Results and commands:
+[docs/navigation.md](../../docs/navigation.md).
+
+| topic | type | dir | notes |
+|---|---|---|---|
+| `cmd_vel` | `geometry_msgs/Twist` | in | zero after `cmd_timeout_s` without one |
+| `odom` | `nav_msgs/Odometry` | out | wheel odometry, `odom -> base_link` |
+| `scan` | `sensor_msgs/LaserScan` | out | depth-camera slice, 87 degrees, 4 m, frame `base_link`; `+inf` beyond range |
+| `/tf` | `tf2_msgs/TFMessage` | out | `odom -> base_link`; `map -> odom` once localized |
+| `ground_truth` | `nav_msgs/Odometry` | out | true pose in `map` (evaluation) |
+| `map_pose` | `geometry_msgs/PoseStamped` | out | the pose the robot believes, `map -> odom -> base_link` |
+| `collisions` | `std_msgs/Int32` | out | simulation steps a wall stopped the robot |
+
+Parameters: `map_dir` (required), `mode` (`visloc`, `odometry` or
+`ground_truth`: where `map -> odom` comes from), `world_seed`, `start_x`,
+`start_y`, `start_yaw`, `extra_box` (`x0,y0,x1,y1,height`, an obstacle the
+map lacks), `rate_hz` (20), `camera_rate_hz` (5), `cmd_timeout_s` (0.5),
+`record` (a CSV of true and believed poses), and the frame names. Stamps
+are wall-clock time, so run Nav2 with `use_sim_time: false`.
 
 ## Tests
 

@@ -93,8 +93,16 @@ fn odometry(stamp: Time, frame: &str, child: &str, pose: &Pose2, v: f64, w: f64)
         },
         twist: TwistWithCovariance {
             twist: Twist {
-                linear: RosVector3 { x: v, y: 0.0, z: 0.0 },
-                angular: RosVector3 { x: 0.0, y: 0.0, z: w },
+                linear: RosVector3 {
+                    x: v,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                angular: RosVector3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: w,
+                },
             },
             covariance: Covariance6::diagonal(1e-3, 1e-3),
         },
@@ -103,12 +111,26 @@ fn odometry(stamp: Time, frame: &str, child: &str, pose: &Pose2, v: f64, w: f64)
 
 /// The wheel odometry message (`odom -> base_link`, velocities in the base).
 pub fn odom_msg(stamp: Time, frames: &NavSimFrames, step: &StepOutput) -> Odometry {
-    odometry(stamp, &frames.odom, &frames.base, &step.odom, step.linear, step.angular)
+    odometry(
+        stamp,
+        &frames.odom,
+        &frames.base,
+        &step.odom,
+        step.linear,
+        step.angular,
+    )
 }
 
 /// The true pose in the map frame, for evaluation.
 pub fn ground_truth_msg(stamp: Time, frames: &NavSimFrames, step: &StepOutput) -> Odometry {
-    odometry(stamp, &frames.map, &frames.base, &step.ground_truth, 0.0, 0.0)
+    odometry(
+        stamp,
+        &frames.map,
+        &frames.base,
+        &step.ground_truth,
+        0.0,
+        0.0,
+    )
 }
 
 /// The pose the robot believes (`map -> odom -> base_link`), once known.
@@ -130,7 +152,12 @@ pub fn tf_msg(stamp: Time, frames: &NavSimFrames, step: &StepOutput) -> TfMessag
 
 /// A scan from [`visloc_navigation::sim::World::scan`]: beams beyond range
 /// are `+inf` (REP-117), for an obstacle layer with `inf_is_valid` to clear.
-pub fn scan_msg(stamp: Time, frame: &str, config: &ScanConfig, ranges: &[Option<f64>]) -> LaserScan {
+pub fn scan_msg(
+    stamp: Time,
+    frame: &str,
+    config: &ScanConfig,
+    ranges: &[Option<f64>],
+) -> LaserScan {
     let increment = if ranges.len() > 1 {
         config.fov / (ranges.len() - 1) as f64
     } else {
@@ -170,8 +197,11 @@ pub fn record_row(step: &StepOutput, collisions: usize) -> String {
 /// Header of [`record_row`]'s CSV.
 pub const RECORD_HEADER: &str = "time_s,true_x,true_y,true_yaw,est_x,est_y,est_yaw,collisions";
 
+/// An axis-aligned box: lower corner, upper corner, height.
+pub type BoxSpec = ((f64, f64), (f64, f64), f64);
+
 /// An axis-aligned box `x0,y0,x1,y1,height` (an obstacle the map lacks).
-pub fn parse_box(text: &str) -> Result<((f64, f64), (f64, f64), f64), String> {
+pub fn parse_box(text: &str) -> Result<BoxSpec, String> {
     let values = text
         .split(',')
         .map(|v| v.trim().parse::<f64>())
@@ -179,7 +209,9 @@ pub fn parse_box(text: &str) -> Result<((f64, f64), (f64, f64), f64), String> {
         .map_err(|_| format!("bad box `{text}`: want x0,y0,x1,y1,height"))?;
     match values[..] {
         [x0, y0, x1, y1, h] if x1 > x0 && y1 > y0 && h > 0.0 => Ok(((x0, y0), (x1, y1), h)),
-        _ => Err(format!("bad box `{text}`: want x0,y0,x1,y1,height with x1 > x0, y1 > y0, height > 0")),
+        _ => Err(format!(
+            "bad box `{text}`: want x0,y0,x1,y1,height with x1 > x0, y1 > y0, height > 0"
+        )),
     }
 }
 
@@ -220,7 +252,12 @@ mod tests {
     #[test]
     fn scan_marks_missing_beams_infinite() {
         let config = ScanConfig::default();
-        let scan = scan_msg(Time::default(), "base_link", &config, &[Some(1.0), None, Some(2.5)]);
+        let scan = scan_msg(
+            Time::default(),
+            "base_link",
+            &config,
+            &[Some(1.0), None, Some(2.5)],
+        );
         assert_eq!(scan.ranges[1], f32::INFINITY);
         assert!((scan.angle_min + scan.angle_increment * 2.0 - scan.angle_max).abs() < 1e-6);
         assert!(parse_box("4.6,4.0,5.2,5.0,0.8").is_ok());

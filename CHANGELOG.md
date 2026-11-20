@@ -6,6 +6,22 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Robot navigation with Nav2** (docs/navigation.md). New crate
+  `visloc-navigation`: `OccupancyMapper` builds the 2D occupancy grid of a
+  visual map from its landmarks and camera-to-landmark rays (a 2.5D log-odds
+  grid, so low furniture survives rays passing over it), written in ROS
+  `map_server` format; `examples/visual_map_to_occupancy.rs` converts a saved
+  map for Nav2. `visloc_navigation::sim` simulates a camera robot (textured
+  apartment, differential drive, drifting wheel odometry, synthetic
+  detections, depth scan, mapping run) and `sim_robot` localizes it with
+  visloc's pipeline (P3P-RANSAC) and `OdomCorrection`. New ROS 2 node
+  `visloc_nav_sim_node` (with `sensor_msgs/LaserScan` and
+  `geometry_msgs/Twist`), `launch/nav_sim.launch.py`, Nav2 parameters without
+  AMCL, and `tools/nav_sim_goals.py`. Nav2 Jazzy in simulation: 5/5 goals at
+  3.8 cm pose RMSE and 0 collisions on visloc localization, 0/5 on wheel
+  odometry alone, 5/5 with an unmapped obstacle (replanned). ROS-free:
+  `examples/nav_sim_build_map.rs`, `examples/nav_sim_drive.rs`.
+
 - **`merge_maps` merges maps of another calibration of the rig**
   (another day's): a camera that differs from the base map's under the same
   id is added under a new id (`MergedMap::camera_ids`), instead of failing

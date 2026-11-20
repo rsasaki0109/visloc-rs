@@ -16,16 +16,30 @@ struct Drive {
 
 /// Living room, through the doorway into the kitchen, and back.
 fn route() -> Vec<Pose2> {
-    [(3.0, 1.7), (5.0, 1.8), (6.6, 2.0), (7.5, 3.0), (8.0, 1.0), (6.6, 2.0), (5.0, 1.8), (3.0, 2.0)]
-        .iter()
-        .map(|&(x, y)| Pose2::new(x, y, 0.0))
-        .collect()
+    [
+        (3.0, 1.7),
+        (5.0, 1.8),
+        (6.6, 2.0),
+        (7.5, 3.0),
+        (8.0, 1.0),
+        (6.6, 2.0),
+        (5.0, 1.8),
+        (3.0, 2.0),
+    ]
+    .iter()
+    .map(|&(x, y)| Pose2::new(x, y, 0.0))
+    .collect()
 }
 
 fn drive(mode: LocalizationMode) -> Drive {
     let world = World::apartment(1);
     let rig = CameraRig::forward(0.5);
-    let run = build_map(&world, &rig, &apartment_mapping_route(), &MappingConfig::default());
+    let run = build_map(
+        &world,
+        &rig,
+        &apartment_mapping_route(),
+        &MappingConfig::default(),
+    );
     let descriptors = LandmarkDescriptorStore::from_visual_map(&run.map);
     let config = SimRobotConfig {
         mode,

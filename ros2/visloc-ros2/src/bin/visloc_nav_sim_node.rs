@@ -87,7 +87,10 @@ fn run() -> Result<(), String> {
         args.parsed_or("start_y", 2.5)?,
         args.parsed_or("start_yaw", 0.0)?,
     );
-    let extra_box = args.string("extra_box").map(|text| parse_box(&text)).transpose()?;
+    let extra_box = args
+        .string("extra_box")
+        .map(|text| parse_box(&text))
+        .transpose()?;
     let rate_hz: f64 = args.parsed_or("rate_hz", 20.0)?;
     let camera_rate_hz: f64 = args.parsed_or("camera_rate_hz", 5.0)?;
     let cmd_timeout = Duration::from_secs_f64(args.parsed_or("cmd_timeout_s", 0.5)?);
@@ -138,7 +141,14 @@ fn run() -> Result<(), String> {
         start.yaw,
         extra_box.map_or(String::new(), |b| format!(", extra box {b:?}"))
     );
-    let mut robot = SimRobot::new(world, CameraRig::forward(0.5), map, descriptors, start, config);
+    let mut robot = SimRobot::new(
+        world,
+        CameraRig::forward(0.5),
+        map,
+        descriptors,
+        start,
+        config,
+    );
     let scan_config = robot.config.scan;
 
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
@@ -193,17 +203,31 @@ fn run() -> Result<(), String> {
         let stamp = now_time();
         publish_logged(&tf_pub, tf_msg(stamp, &frames, &step), "tf");
         publish_logged(&odom_pub, odom_msg(stamp, &frames, &step), "odom");
-        publish_logged(&truth_pub, ground_truth_msg(stamp, &frames, &step), "ground_truth");
+        publish_logged(
+            &truth_pub,
+            ground_truth_msg(stamp, &frames, &step),
+            "ground_truth",
+        );
         if let Some(pose) = map_pose_msg(stamp, &frames, &step) {
             publish_logged(&map_pose_pub, pose, "map_pose");
         }
-        if step_index % 2 == 0 {
+        if step_index.is_multiple_of(2) {
             let ranges = robot.scan();
-            publish_logged(&scan_pub, scan_msg(stamp, &frames.base, &scan_config, &ranges), "scan");
+            publish_logged(
+                &scan_pub,
+                scan_msg(stamp, &frames.base, &scan_config, &ranges),
+                "scan",
+            );
         }
         let collisions = robot.robot.collisions;
-        if collisions != last_collisions || step_index % (rate_hz as u64).max(1) == 0 {
-            publish_logged(&collisions_pub, Int32 { data: collisions as i32 }, "collisions");
+        if collisions != last_collisions || step_index.is_multiple_of((rate_hz as u64).max(1)) {
+            publish_logged(
+                &collisions_pub,
+                Int32 {
+                    data: collisions as i32,
+                },
+                "collisions",
+            );
             last_collisions = collisions;
         }
         if let Some(file) = recorder.as_mut() {

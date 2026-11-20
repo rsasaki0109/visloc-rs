@@ -7,7 +7,7 @@
 
 One panel per run, over the occupancy grid Nav2 planned on: the true path
 (solid) and the pose the robot believed (thin), the goals (circles), and
-optional boxes (`--box x0,y0,x1,y1`, an obstacle missing from the map). The
+an obstacle missing from the map, per run (`--run TITLE=CSV=x0,y0,x1,y1`). The
 CSVs are `visloc_nav_sim_node --record` files. Needs Pillow only.
 """
 
@@ -18,7 +18,7 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 GOALS = [(3.0, 6.0), (8.5, 6.0), (8.0, 1.0), (4.0, 1.0), (1.5, 2.5)]
-SCALE = 6  # pixels per grid cell
+SCALE = 4  # pixels per grid cell
 
 
 def read_map(yaml_path):
@@ -45,8 +45,8 @@ def read_csv(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--map', required=True)
-    parser.add_argument('--run', action='append', required=True, help='TITLE=CSV')
-    parser.add_argument('--box', action='append', default=[], help='x0,y0,x1,y1 (all panels)')
+    parser.add_argument('--run', action='append', required=True,
+                        help='TITLE=CSV or TITLE=CSV=x0,y0,x1,y1 (an unmapped box)')
     parser.add_argument('--out', required=True)
     args = parser.parse_args()
 
@@ -60,11 +60,11 @@ def main():
 
     panels = []
     for spec in args.run:
-        title, path = spec.split('=', 1)
+        title, path, *boxes = spec.split('=')
         truth, belief = read_csv(path)
         panel = base.copy()
         draw = ImageDraw.Draw(panel)
-        for box in args.box:
+        for box in boxes:
             x0, y0, x1, y1 = (float(v) for v in box.split(','))
             (a, b), (c, d) = px(x0, y1), px(x1, y0)
             draw.rectangle([a, b, c, d], fill=(214, 96, 77), outline=(140, 40, 30), width=3)
@@ -92,7 +92,7 @@ def main():
     y = panels[0].height + 10
     items = [((33, 102, 172), 'true path'), ((240, 170, 60), 'believed pose'),
              ((27, 120, 55), 'start / goals')]
-    if args.box:
+    if any(len(spec.split('=')) > 2 for spec in args.run):
         items.append(((214, 96, 77), 'obstacle not in the map'))
     x = 14
     for color, label in items:
