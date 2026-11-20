@@ -101,7 +101,13 @@ VIO.
 
 ## Try it
 
-Requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
+**In the browser, nothing to install:** [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/)
+(drop your photos, get camera poses and points, export a COLMAP dataset; the
+photos never leave the device), [VIO](https://rsasaki0109.github.io/visloc-rs/slam/)
+(live on a phone, or on a recorded walk) and a
+[Gaussian splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+
+Locally: requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
 
 ```bash
 # Photos -> camera poses, Gaussian splat and mesh (GPU via wgpu)
@@ -216,6 +222,8 @@ Configuration, caveats, the ablation and the command that reproduces the
 table: [EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
 
 ### Run the SfM demo
+
+To try it without installing anything, the [browser SfM](https://rsasaki0109.github.io/visloc-rs/sfm/) runs the same SIFT, matching, verification and incremental mapper on your photos in WebAssembly (WebGPU where available).
 
 Reconstruct an unordered photo set in one command — SIFT features estimated
 in-process, COLMAP text model (`cameras.txt`, `images.txt`, `points3D.txt`)
@@ -536,7 +544,8 @@ boundaries, feature overview, full demos table, minimal Rust example, repository
 layout, roadmap, further-reading index, and complete benchmark snapshot that
 previously lived here.
 
-- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and the [VIO in your browser](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere).
+- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and in your browser the [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/), the [VIO](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere) and the [splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+- **Reproduce a result:** [reproducibility contract](docs/reproducibility.md) (what is bit-identical, what is not, and the rules new code follows).
 - **Understand supported configurations:** [feature matrix](docs/feature_matrix.md), [API stability](docs/api_stability.md), [COLMAP compatibility](docs/colmap_compatibility.md), and [migration notes](docs/migration.md).
 - **Inspect VO and loop-closure evidence:** [KITTI multi-sequence](docs/kitti_multiseq_benchmark.md), [KITTI loop closure](docs/kitti_loop_closure_benchmark.md), [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md), [TUM RGB-D](docs/tum_rgbd_benchmark.md), and [tracking persistence](docs/tracking_persistence_benchmark.md).
 - **Inspect VI-SLAM (Basalt Rust port) evidence:** [VI-SLAM benchmark details](docs/vi_slam_benchmarks.md), [localizing against a saved map](docs/basalt_map_localization.md), [faithful-port final closure report](work/m11_basalt_faithful_port_final_closure_20260914.md), and [upstream oracle / provenance](benchmarks/basalt/README.md).
