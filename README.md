@@ -101,7 +101,13 @@ VIO.
 
 ## Try it
 
-Requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
+**In the browser, nothing to install:** [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/)
+(drop your photos, get camera poses and points, export a COLMAP dataset; the
+photos never leave the device), [VIO](https://rsasaki0109.github.io/visloc-rs/slam/)
+(live on a phone, or on a recorded walk) and a
+[Gaussian splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+
+Locally: requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
 
 ```bash
 # Photos -> camera poses, Gaussian splat and mesh (GPU via wgpu)
@@ -216,6 +222,8 @@ Configuration, caveats, the ablation and the command that reproduces the
 table: [EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
 
 ### Run the SfM demo
+
+To try it without installing anything, the [browser SfM](https://rsasaki0109.github.io/visloc-rs/sfm/) runs the same SIFT, matching, verification and incremental mapper on your photos in WebAssembly (WebGPU where available).
 
 Reconstruct an unordered photo set in one command — SIFT features estimated
 in-process, COLMAP text model (`cameras.txt`, `images.txt`, `points3D.txt`)
@@ -428,6 +436,12 @@ cargo run --release --features image-io --example deep_localization_demo -- \
 | KITTI revisit scanner | `python scripts/run_kitti_deep_vo_revisit_smoke.py` | Public KITTI 00 revisit smoke (downloads start/revisit slices) |
 | Full local quality gate | `scripts/check.sh` | `fmt` + `clippy` + `test` + `doc` in one command |
 
+**A photo with no EXIF?** `localize_with_unknown_focal` estimates the focal
+length with P4Pf while localizing. On the 38 ETH3D courtyard photos (leave one
+out) it localizes 36 at 1.0% centre error, the same as knowing the focal
+length, where a guessed focal length gives poses 3.5 scene radii off
+([details](docs/unknown_focal_localization.md)).
+
 ### Save a VI-SLAM map and localize against it
 
 The stereo-inertial SLAM demo can save its final map, and a second sequence of
@@ -536,7 +550,8 @@ boundaries, feature overview, full demos table, minimal Rust example, repository
 layout, roadmap, further-reading index, and complete benchmark snapshot that
 previously lived here.
 
-- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and the [VIO in your browser](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere).
+- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and in your browser the [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/), the [VIO](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere) and the [splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+- **Reproduce a result:** [reproducibility contract](docs/reproducibility.md) (what is bit-identical, what is not, and the rules new code follows).
 - **Understand supported configurations:** [feature matrix](docs/feature_matrix.md), [API stability](docs/api_stability.md), [COLMAP compatibility](docs/colmap_compatibility.md), and [migration notes](docs/migration.md).
 - **Inspect VO and loop-closure evidence:** [KITTI multi-sequence](docs/kitti_multiseq_benchmark.md), [KITTI loop closure](docs/kitti_loop_closure_benchmark.md), [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md), [TUM RGB-D](docs/tum_rgbd_benchmark.md), and [tracking persistence](docs/tracking_persistence_benchmark.md).
 - **Inspect VI-SLAM (Basalt Rust port) evidence:** [VI-SLAM benchmark details](docs/vi_slam_benchmarks.md), [localizing against a saved map](docs/basalt_map_localization.md), [faithful-port final closure report](work/m11_basalt_faithful_port_final_closure_20260914.md), and [upstream oracle / provenance](benchmarks/basalt/README.md).
