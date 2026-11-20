@@ -8,11 +8,15 @@
 One panel per run, over the occupancy grid Nav2 planned on: the true path
 (solid) and the pose the robot believed (thin), the goals (circles), and
 an obstacle missing from the map, per run (`--run TITLE=CSV=x0,y0,x1,y1`). The
-CSVs are `visloc_nav_sim_node --record` files. Needs Pillow only.
+CSVs are `visloc_nav_sim_node --record` files, or `gz/nav_goals.py --record`
+files with `--world-from-map` (their poses, the goals and the boxes are in the
+world, the grid in the SLAM map's frame). Needs Pillow only.
 """
 
 import argparse
 import csv
+import json
+import math
 import os
 
 from PIL import Image, ImageDraw, ImageFont
@@ -48,7 +52,16 @@ def main():
     parser.add_argument('--run', action='append', required=True,
                         help='TITLE=CSV or TITLE=CSV=x0,y0,x1,y1 (an unmapped box)')
     parser.add_argument('--out', required=True)
+    parser.add_argument('--world-from-map', default='',
+                        help='align_map.py JSON: the runs are in the world, the grid in the map')
     args = parser.parse_args()
+    to_map = lambda x, y: (x, y)  # noqa: E731
+    if args.world_from_map:
+        with open(args.world_from_map, encoding='utf-8') as f:
+            t = json.load(f)
+        c, s = math.cos(t['yaw']), math.sin(t['yaw'])
+        to_map = lambda x, y: (c * (x - t['x']) + s * (y - t['y']),  # noqa: E731
+                               -s * (x - t['x']) + c * (y - t['y']))
 
     grid, resolution, ox, oy = read_map(args.map)
     width, height = grid.size
@@ -56,6 +69,7 @@ def main():
     font = ImageFont.load_default(size=22) if hasattr(ImageFont, 'load_default') else None
 
     def px(x, y):
+        x, y = to_map(x, y)
         return ((x - ox) / resolution * SCALE, (height - (y - oy) / resolution) * SCALE)
 
     panels = []
@@ -66,8 +80,8 @@ def main():
         draw = ImageDraw.Draw(panel)
         for box in boxes:
             x0, y0, x1, y1 = (float(v) for v in box.split(','))
-            (a, b), (c, d) = px(x0, y1), px(x1, y0)
-            draw.rectangle([a, b, c, d], fill=(214, 96, 77), outline=(140, 40, 30), width=3)
+            corners = [px(x0, y0), px(x1, y0), px(x1, y1), px(x0, y1)]
+            draw.polygon(corners, fill=(214, 96, 77), outline=(140, 40, 30), width=3)
         if len(belief) > 1:
             draw.line([px(*p) for p in belief], fill=(240, 170, 60), width=2)
         if len(truth) > 1:

@@ -9,8 +9,8 @@ The floor plan is `visloc_navigation::sim::World::apartment`'s: a 10 m x 7 m
 apartment, five rooms joined by 1 m doorways, a sofa, a table, a shelf and a
 bed, one hallway wall left bare. Walls and furniture carry procedurally
 generated textures (shapes, strokes, noise; seeded), so a camera finds
-features, as on real walls. `--extra-box x0,y0,x1,y1,h` adds an untextured box
-that is not in the map.
+features, as on real walls. `--extra-box x0,y0,x1,y1,h` adds a box that is
+not in the map, with a texture of its own (`--extra-box-plain`: a plain one).
 
 The robot (`robot`): a 0.2 m radius differential drive (`gz-sim-diff-drive-
 system` on `/cmd_vel`), with on `imu_link` (on the robot's axis, 0.5 m up)
@@ -198,6 +198,8 @@ def main():
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--start', default='1.5,2.5,0', help='robot start x,y,yaw')
     parser.add_argument('--extra-box', default='', help='x0,y0,x1,y1,h: an obstacle not in the map')
+    parser.add_argument('--extra-box-plain', action='store_true',
+                        help='give the extra box no texture (a camera sees no features on it)')
     parser.add_argument('--real-time-factor', type=float, default=1.0,
                         help='target speed of the simulation (below 1 slows it down)')
     args = parser.parse_args()
@@ -222,7 +224,11 @@ def main():
                                 x1 - x0, y1 - y0, h, 0, f'textures/{name}'))
     if args.extra_box:
         x0, y0, x1, y1, h = (float(v) for v in args.extra_box.split(','))
-        plain_texture(os.path.join(tex_dir, 'extra.png'), (170, 60, 50))
+        if args.extra_box_plain:
+            plain_texture(os.path.join(tex_dir, 'extra.png'), (170, 60, 50))
+        else:
+            texture(os.path.join(tex_dir, 'extra.png'), args.seed * 1000 + 500,
+                    max(x1 - x0, y1 - y0), h)
         models.append(box_model('unmapped_box', (x0 + x1) / 2, (y0 + y1) / 2, h / 2,
                                 x1 - x0, y1 - y0, h, 0, 'textures/extra.png'))
     floor = 'floor.png'
