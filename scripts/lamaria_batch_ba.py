@@ -1730,6 +1730,16 @@ def cmd_solve(a):
             phys_est = [1 - reference]
     est_cams = phys_est
     n_seg, seg_of_kf = camera_segments(kf_ns, a.ext_segments, a.ext_seg_seconds, time_chunks=reference is not None)
+    # --focal-seg-seconds: the focal lengths per time chunk, each camera's rotation still in --ext-segments equal
+    # keyframe segments (the chunks of one segment tied by --rot-tie-sigma)
+    rot_group = None
+    focal_seconds = getattr(a, "focal_seg_seconds", 0.0) or 0.0
+    if focal_seconds > 0:
+        if reference is not None or a.ext_seg_seconds > 0 or not a.est_focal:
+            raise SystemExit("--focal-seg-seconds needs --est-focal, without --stereo-reference or --ext-seg-seconds")
+        n_seg, seg_of_kf = camera_segments(kf_ns, 1, focal_seconds, time_chunks=True)
+        kf_group = np.arange(len(kf_ns)) * max(a.ext_segments, 1) // len(kf_ns)
+        rot_group = kf_group[np.minimum(np.searchsorted(seg_of_kf, np.arange(n_seg)), len(kf_ns) - 1)]
     fixed = None  # the calibration a solve before ended with (--init-states), held as it is with --fix-calib
     if getattr(a, "init_states_file", None):
         st = np.load(a.init_states_file)
@@ -1869,6 +1879,10 @@ def cmd_solve(a):
     if a.ext_seg_sigma_cams:
         sig = dict(zip(chosen_cams, (float(v) for v in a.ext_seg_sigma_cams.split(","))))
         seg_w = np.array([1.0 / np.radians(sig[ca // n_seg]) ** 2 for ca, _ in rot_pairs])
+    if rot_group is not None and fixed is None:  # chunks of one rotation segment rotate together
+        tie = 1.0 / np.radians(a.rot_tie_sigma) ** 2
+        base = np.broadcast_to(np.asarray(seg_w, dtype=np.float64), (len(rot_pairs),))
+        seg_w = np.where([rot_group[ca % n_seg] == rot_group[cb % n_seg] for ca, cb in rot_pairs], tie, base)
     # the rotation's three parameters within each camera's slot of the border
     rot_idx = (np.arange(rp.n_ext)[:, None] * npar + np.arange(3)[None, :]).ravel()
     foc_pair_w = 1.0 / a.focal_seg_sigma ** 2
@@ -2176,6 +2190,12 @@ def cmd_solve(a):
         "gyro_scale_per_degree": gm[21:24].tolist(),
         "seconds": time.time() - t0,
     }
+    if rot_group is not None:  # how far the tied chunks of a rotation segment ended apart
+        summary["rotation_segment_of_chunk"] = rot_group.tolist()
+        summary["rotation_tie_spread_deg"] = max(
+            (float(np.degrees(np.linalg.norm(so3_log(r_ic[c * n_seg + i].T @ r_ic[c * n_seg + j]))))
+             for c in phys_est for i in range(n_seg) for j in [int(np.flatnonzero(rot_group == rot_group[i])[0])]),
+            default=0.0)
     if reference is not None or (fixed is not None and not np.array_equal(t_ic, t_factory)):
         summary["stereo_segment_keyframes"] = np.bincount(seg_of_kf, minlength=n_seg).tolist()
         offsets = t_ic[n_seg:] - t_ic[:n_seg]
@@ -2635,6 +2655,12 @@ def main():
                        help="also estimate each estimated camera's focal length scale, per time segment")
         s.add_argument("--focal-seg-sigma", type=float, default=0.0005,
                        help="prior on the focal length change between consecutive segments (relative)")
+        s.add_argument("--focal-seg-seconds", type=float, default=0.0,
+                       help="estimate the focal lengths in time chunks of this many seconds, keeping each camera's "
+                            "rotation in --ext-segments segments (needs --est-focal; 0: off)")
+        s.add_argument("--rot-tie-sigma", type=float, default=1e-4,
+                       help="with --focal-seg-seconds, prior on the rotation change between chunks of one rotation "
+                            "segment (deg)")
         s.add_argument("--focal-seg-sigma-px", type=float,
                        help="focal drift sigma in pixels per segment, converted to the log-scale prior")
         s.add_argument("--focal-sigma", type=float, default=0.01, help="prior on each focal length scale (relative)")

@@ -614,8 +614,8 @@ def main() -> int:
     parser.add_argument("--ba-compare-focal-only", action="store_true",
                         help="with --ba-compare, --ba-stereo-reference, --ba-stereo-fixed-translation and "
                              "--ba-est-gyro-m, also run the gyro-only pass and the pass that keeps both cameras' "
-                             "factory rotations and estimates only the focal lengths per segment, from the shared "
-                             "inputs")
+                             "factory rotations and estimates only the focal lengths per segment, and the pass with "
+                             "the default 8-segment rotations and the focal lengths per 5 s, from the shared inputs")
     parser.add_argument("--ba-compare-stereo-translation", action="store_true",
                         help="with --ba-compare and --ba-stereo-fixed-translation, also estimate translation "
                              "with the same stereo settings and save the trajectory under --log-dir")
@@ -858,7 +858,10 @@ def main() -> int:
                         variants = [("camera_only", camera_options), ("gyro_only", ["--est-gyro-m"])]
                     if args.ba_compare_focal_only:  # the same pass with both rotations held at the factory's
                         variants = [("gyro_only", ["--est-gyro-m"]),
-                                    ("focal_only", [*sequence_pass_args, "--fix-camera-rotations"])]
+                                    ("focal_only", [*sequence_pass_args, "--fix-camera-rotations"]),
+                                    # the default 8-segment rotations, the focal lengths per 5 s
+                                    ("focal_5s_rot_8", ["--est-gyro-m", "--focal-seg-seconds", "5",
+                                                        "--focal-seg-sigma-px", "0.035"])]
                     if variants:
                         for name, options in variants:
                             variant_work = work / f"ba_{name}"
@@ -904,6 +907,7 @@ def main() -> int:
                                           (work / "ba_free_translation", "free_translation_"),
                                           (work / "ba_camera_only", "camera_only_"),
                                           (work / "ba_focal_only", "focal_only_"),
+                                          (work / "ba_focal_5s_rot_8", "focal_5s_rot_8_"),
                                           (work / "ba_gyro_only", "gyro_only_")):
                     for diagnostic in sorted([*directory.glob("*.log"), *directory.glob("*_summary.json")]):
                         (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
