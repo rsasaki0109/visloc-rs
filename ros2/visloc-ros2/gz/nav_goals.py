@@ -19,9 +19,11 @@ import json
 import math
 import os
 import sys
+import time
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from lifecycle_msgs.srv import GetState
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
 from rclpy.parameter import Parameter
@@ -106,6 +108,25 @@ def map_goal(navigator, t, x, y, yaw):
     return pose
 
 
+def wait_until_active(node, server):
+    """Waits for a lifecycle node to be active. Unlike
+    BasicNavigator.waitUntilNav2Active, retries a get_state call whose
+    response was lost (it then waits forever on a loaded machine)."""
+    client = node.create_client(GetState, f'{server}/get_state')
+    while not client.wait_for_service(timeout_sec=1.0):
+        node.get_logger().info(f'waiting for {server}/get_state')
+    while True:
+        future = client.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+        if future.done() and future.result().current_state.label == 'active':
+            break
+        if not future.done():
+            client.remove_pending_request(future)
+        time.sleep(1.0)
+    node.get_logger().info(f'{server} is active')
+    node.nav_to_pose_client.wait_for_server()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--world-from-map', required=True)
@@ -129,7 +150,7 @@ def main():
     monitor = Monitor(navigator, t, obstacles(args.extra_box))
     tf_buffer = Buffer()
     TransformListener(tf_buffer, navigator)
-    navigator.waitUntilNav2Active(localizer='robot_localization')
+    wait_until_active(navigator, 'bt_navigator')
     # Nav2 rejects goals until it can look up the robot in the map: wait for
     # visloc's first map -> odom on /tf, not only for its /map_pose.
     while not (monitor.errors and tf_buffer.can_transform('map', 'base_link', Time())):
