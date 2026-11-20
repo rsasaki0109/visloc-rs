@@ -42,8 +42,9 @@ controller_server:
     use_sim_time: true
 # Obstacle heights: the SLAM map's frame, and the VIO's odom, start at the IMU
 # (0.5 m above the floor), so base_link and the 2D lidar's points are at
-# z ~ -0.5 m in map and odom. A band starting at -0.1 drops every scan point
-# and Nav2 marks no obstacle at all.
+# z ~ -0.5 m in map and odom. A band starting at -0.1 (or at the obstacle
+# layer's own min_obstacle_height, 0.0 by default: "The point is too low")
+# drops every scan point and Nav2 marks no obstacle at all. Both are set.
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -62,6 +63,8 @@ local_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
+        min_obstacle_height: -1.5
+        max_obstacle_height: 1.0
         observation_sources: scan
         scan: {topic: /scan, max_obstacle_height: 1.0, min_obstacle_height: -1.5, clearing: true, marking: true,
           data_type: LaserScan, raytrace_max_range: 5.0, raytrace_min_range: 0.0, obstacle_max_range: 4.5,
@@ -82,6 +85,8 @@ global_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
+        min_obstacle_height: -1.5
+        max_obstacle_height: 1.0
         observation_sources: scan
         scan: {topic: /scan, max_obstacle_height: 1.0, min_obstacle_height: -1.5, clearing: true, marking: true,
           data_type: LaserScan, raytrace_max_range: 5.0, raytrace_min_range: 0.0, obstacle_max_range: 4.5,
