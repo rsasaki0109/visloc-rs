@@ -27,8 +27,8 @@ use visloc_ros2::map_localize::{
     Matching, OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Odometry, PointCloud2, PoseWithCovarianceStamped, TfMessage,
-    Time,
+    DiagnosticArray, Header, Image, Int32, Odometry, PointCloud2, PoseWithCovarianceStamped,
+    TfMessage, Time,
 };
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::queue::DropOldestQueue;
@@ -90,7 +90,9 @@ PARAMETERS (--name value  or  -p name:=value):
 TOPICS (remap with --remap from=to or -r from:=to):
   in : image (sensor_msgs/Image, raw), odom (nav_msgs/Odometry, gravity-aligned;
        its header.frame_id and child_frame_id name the odometry and body frames),
-       /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
+       /tf_static (tf2_msgs/TFMessage, with extrinsics tf), odom_reset (std_msgs/Int32,
+       from visloc_vio_node: when it changes, the odometry restarted in a new frame, and
+       the map pose starts over from new fixes)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, after two agreeing fixes), map_fix (geometry_msgs/
        PoseWithCovarianceStamped, the body pose of each image localized with min_inliers,
@@ -176,6 +178,7 @@ fn run() -> Result<(), String> {
     let fix_topic = args.topic("map_fix");
     let diagnostics_topic = args.topic("/diagnostics");
     let map_cloud_topic = args.topic("map_cloud");
+    let odom_reset_topic = args.topic("odom_reset");
     args.finish()?;
 
     let map = load_basalt_map(&map_dir)?;
@@ -210,6 +213,7 @@ fn run() -> Result<(), String> {
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let image_sub = ros.subscription::<Image>(&image_topic, sensor_qos(2))?;
     let odom_sub = ros.subscription::<Odometry>(&odom_topic, sensor_qos(50))?;
+    let odom_reset_sub = ros.subscription::<Int32>(&odom_reset_topic, latched_qos(1))?;
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let fix_pub = ros.publisher::<PoseWithCovarianceStamped>(&fix_topic, output_qos(10))?;
@@ -233,6 +237,24 @@ fn run() -> Result<(), String> {
         |listener| Arc::clone(listener.transforms()),
     );
     let body_frame = Arc::new(Mutex::new(None::<String>));
+
+    // A VIO reset: the odometry frame starts over, so the correction does.
+    {
+        let core = Arc::clone(&core);
+        let topic = odom_reset_topic.clone();
+        let mut last = None::<i32>;
+        spawn_receiver("odom-reset-rx", odom_reset_sub, move |msg: Int32| {
+            if last.is_some_and(|count| count != msg.data) {
+                core.lock().unwrap_or_else(|e| e.into_inner()).reset();
+                eprintln!(
+                    "visloc_map_localize_node: odometry reset ({} on {topic}); map pose unset \
+                     until new fixes",
+                    msg.data
+                );
+            }
+            last = Some(msg.data);
+        })?;
+    }
 
     // Odometry: pair with fixes, then publish map -> odom and the map pose.
     let odom_messages = Arc::new(AtomicU64::new(0));

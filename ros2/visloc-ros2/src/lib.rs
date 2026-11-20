@@ -34,6 +34,7 @@ pub mod params;
 pub mod queue;
 pub mod sync;
 pub mod tf_tree;
+pub mod tracking;
 pub mod vio;
 pub mod vio_mapper;
 pub mod wheel_odom;
