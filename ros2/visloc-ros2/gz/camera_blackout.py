@@ -10,7 +10,8 @@ the visloc nodes from them). The first time the robot's true pose
 (`/ground_truth`) comes within --radius of --at (world frame), every image
 of the next --duration seconds of simulation time is replaced by a uniform
 one (--value): the VIO and the map localization see no features at all.
-Writes the blackout's start and end stamps to --log.
+With --cross-x instead, the blackout starts when the robot's true x first
+reaches that value. Writes the blackout's start and end stamps to --log.
 """
 
 import argparse
@@ -28,7 +29,7 @@ class Blackout(Node):
     def __init__(self, args):
         super().__init__('camera_blackout')
         self.args = args
-        self.at = tuple(float(v) for v in args.at.split(','))
+        self.at = tuple(float(v) for v in args.at.split(',')) if args.at else None
         self.start_ns = None
         self.end_ns = None
         self.blanked = 0
@@ -45,7 +46,11 @@ class Blackout(Node):
         if self.start_ns is not None:
             return
         p = msg.pose.pose.position
-        if math.hypot(p.x - self.at[0], p.y - self.at[1]) <= self.args.radius and self.last_stamp_ns:
+        if self.at is not None:
+            hit = math.hypot(p.x - self.at[0], p.y - self.at[1]) <= self.args.radius
+        else:
+            hit = p.x >= self.args.cross_x
+        if hit and self.last_stamp_ns:
             self.start_ns = self.last_stamp_ns
             self.end_ns = self.start_ns + int(self.args.duration * 1e9)
             self.get_logger().info(
@@ -70,12 +75,16 @@ class Blackout(Node):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--at', required=True, help='x,y in the world: where the blackout starts')
+    parser.add_argument('--at', default='', help='x,y in the world: where the blackout starts')
+    parser.add_argument('--cross-x', type=float, default=None,
+                        help='or: start when the true x first reaches this')
     parser.add_argument('--radius', type=float, default=0.3)
     parser.add_argument('--duration', type=float, default=5.0, help='simulated seconds')
     parser.add_argument('--value', type=int, default=16, help='grey level of the blank images')
     parser.add_argument('--log', default='')
     args = parser.parse_args()
+    if bool(args.at) == (args.cross_x is not None):
+        parser.error('give one of --at and --cross-x')
     rclpy.init()
     node = Blackout(args)
     try:

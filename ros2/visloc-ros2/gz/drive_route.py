@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Drive the Gazebo robot along the apartment's mapping route on its true pose.
 
-    python3 ros2/visloc-ros2/gz/drive_route.py
+    python3 ros2/visloc-ros2/gz/drive_route.py [--scene runs/gz_depot/world/scene.json]
 
 The route is `visloc_navigation::sim::apartment_mapping_route` (every room,
 start and end at (1.5, 2.5)); the controller turns toward the next waypoint
 and drives while facing it, as `sim::waypoint_command` does. It steers on
 `/ground_truth`, standing in for a person driving the robot while it maps.
-Exits when the route is done.
+`--scene` takes the route of another world instead (make_depot_world.py's
+scene.json). Exits when the route is done.
 """
 
+import argparse
+import json
 import math
 import sys
 
@@ -56,6 +59,13 @@ class Driver(Node):
 
 
 def main():
+    global ROUTE  # noqa: PLW0603
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--scene', default='', help="a world's scene.json (its 'route')")
+    args = parser.parse_args()
+    if args.scene:
+        with open(args.scene, encoding='utf-8') as f:
+            ROUTE = [tuple(p) for p in json.load(f)['route']]
     rclpy.init()
     node = Driver()
     while rclpy.ok() and not node.done:

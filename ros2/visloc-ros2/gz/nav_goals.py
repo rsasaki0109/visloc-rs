@@ -11,7 +11,9 @@ the robot's true distance to it at the end (`/ground_truth`); a goal is
 reached when Nav2 succeeds and the robot is truly within --tolerance. Over
 the drive: the error of `visloc_map_localize_node`'s `/map_pose` against the
 ground truth, and contacts (the true pose closer than the robot's radius to
-a wall or a piece of furniture). Runs on simulation time.
+a wall or a piece of furniture). Runs on simulation time. `--scene` takes
+another world's goals and obstacle grid (make_depot_world.py's scene.json
+and gt_grid.npy) instead of the apartment's.
 """
 
 import argparse
@@ -61,10 +63,30 @@ def obstacles(extra_box):
     return segments
 
 
+class GridClearance:
+    """Distance from a point to the nearest occupied cell of a scene's grid."""
+
+    def __init__(self, scene_path):
+        import numpy as np  # noqa: PLC0415
+        from scipy import ndimage  # noqa: PLC0415
+        with open(scene_path, encoding='utf-8') as f:
+            grid = json.load(f)['grid']
+        occupied = np.load(os.path.join(os.path.dirname(scene_path), grid['file'])).astype(bool)
+        self.res, self.x0, self.y0 = grid['resolution'], grid['x0'], grid['y0']
+        self.dist = ndimage.distance_transform_edt(~occupied) * self.res
+
+    def __call__(self, x, y):
+        i, j = int((x - self.x0) / self.res), int((y - self.y0) / self.res)
+        if 0 <= j < self.dist.shape[0] and 0 <= i < self.dist.shape[1]:
+            return float(self.dist[j, i])
+        return 0.0
+
+
 class Monitor:
-    def __init__(self, node, world_from_map, segments):
+    def __init__(self, node, world_from_map, segments, grid=None):
         self.t = world_from_map
         self.segments = segments
+        self.grid = grid
         self.truth = None
         self.errors = []
         self.contacts = 0
@@ -80,7 +102,10 @@ class Monitor:
     def on_truth(self, msg):
         p = msg.pose.pose
         self.truth = (p.position.x, p.position.y, yaw_of(p.orientation))
-        clearance = min(segment_distance(self.truth, a, b) - half for a, b, half in self.segments)
+        if self.grid is not None:
+            clearance = self.grid(self.truth[0], self.truth[1])
+        else:
+            clearance = min(segment_distance(self.truth, a, b) - half for a, b, half in self.segments)
         touching = clearance < RADIUS - 0.01
         if touching and not self.in_contact:
             self.contacts += 1
@@ -132,6 +157,8 @@ def main():
     parser.add_argument('--world-from-map', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--extra-box', default='')
+    parser.add_argument('--scene', default='',
+                        help="another world's scene.json: its goals and obstacle grid")
     parser.add_argument('--timeout', type=float, default=240.0, help='simulated seconds per goal')
     parser.add_argument('--tolerance', type=float, default=0.3)
     parser.add_argument('--label', default='')
@@ -151,7 +178,13 @@ def main():
     rclpy.init()
     navigator = BasicNavigator()
     navigator.set_parameters([Parameter('use_sim_time', value=True)])
-    monitor = Monitor(navigator, t, obstacles(args.extra_box))
+    goals = GOALS
+    if args.scene:
+        with open(args.scene, encoding='utf-8') as f:
+            goals = [tuple(g) for g in json.load(f)['goals']]
+        monitor = Monitor(navigator, t, [], GridClearance(args.scene))
+    else:
+        monitor = Monitor(navigator, t, obstacles(args.extra_box))
     tf_buffer = Buffer()
     TransformListener(tf_buffer, navigator)
     wait_until_active(navigator, 'bt_navigator')
@@ -207,7 +240,7 @@ def main():
                 return
 
     wait_localized(2.0, started + 60.0)
-    for x, y, yaw in GOALS:
+    for x, y, yaw in goals:
         t0 = sim_s()
         attempts = 0
         while True:
