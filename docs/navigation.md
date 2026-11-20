@@ -303,6 +303,10 @@ python3 ros2/visloc-ros2/gz/nav_goals.py --world-from-map runs/gz_nav/map/world_
   --out runs/gz_nav/nav.json --record runs/gz_nav/nav.csv
 ```
 
+If Nav2's bringup stalls (the launch never logs `lifecycle_manager_navigation`
+"Managed nodes are active"; here about one launch in three), stop everything
+and launch again.
+
 For the unmapped box, make a second world with
 `--extra-box 4.6,4.0,5.2,5.0,0.8` (add `--extra-box-plain` for the
 textureless one), launch on it, and pass the same `--extra-box` to
