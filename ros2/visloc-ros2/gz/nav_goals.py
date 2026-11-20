@@ -26,6 +26,8 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_world import THICK, apartment  # noqa: E402
@@ -122,8 +124,12 @@ def main():
     navigator = BasicNavigator()
     navigator.set_parameters([Parameter('use_sim_time', value=True)])
     monitor = Monitor(navigator, t, obstacles(args.extra_box))
+    tf_buffer = Buffer()
+    TransformListener(tf_buffer, navigator)
     navigator.waitUntilNav2Active(localizer='robot_localization')
-    while not monitor.errors:
+    # Nav2 rejects goals until it can look up the robot in the map: wait for
+    # visloc's first map -> odom on /tf, not only for its /map_pose.
+    while not (monitor.errors and tf_buffer.can_transform('map', 'base_link', Time())):
         rclpy.spin_once(navigator, timeout_sec=0.1)
     clock = navigator.get_clock()
     sim_s = lambda: clock.now().nanoseconds * 1e-9  # noqa: E731
