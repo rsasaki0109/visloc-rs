@@ -34,7 +34,11 @@ All notable changes to `visloc-rs` will be documented here.
   relocalizes (it used to keep its old `map -> odom` across a VIO reset). A
   5 s camera blackout in Gazebo: the robot stops within 7 cm and goes on
   1 s after the cameras come back (5/5 goals, 4.4 cm max error), instead of
-  driving 1.5 m blind with up to 43 cm of error.
+  driving 1.5 m blind with up to 43 cm of error. A threshold of 20
+  observations raised a false alarm under extra CPU load; 10 did not. The
+  Gazebo goal runner can turn a robot that stopped in front of a bare wall
+  until it relocalizes (`--spin-after`). A 3D video of the runs:
+  `docs/media/gz_nav2_blackout_3d.mp4`.
   `scripts/plot_nav_sim.py` draws the runs.
 
 - **`merge_maps` merges maps of another calibration of the rig**

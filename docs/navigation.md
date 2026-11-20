@@ -224,7 +224,7 @@ that fix), the camera ended up about 10 cm from its face, too close for
 stereo. The VIO had nothing to track, integrated the IMU alone, and its pose
 ran off 7 m while the robot stood still. Map localization had no features
 either, so nothing corrected it. `visloc_vio_node` now has a lost-tracking
-monitor for that (off by default; `nav.launch.py lost_min_observations:=20
+monitor for that (off by default; `nav.launch.py lost_min_observations:=10
 lost_max_speed:=1.0`). Too few tracked observations for 0.5 s, or an
 implausible speed, resets the estimator. The node then publishes no odometry
 and no `odom -> base_link` until tracking has held for 1 s, so Nav2 loses
@@ -236,12 +236,16 @@ every reset, including the resets that already followed estimator errors).
 To test it, `gz/camera_blackout.py` blanks both cameras for 5 simulated
 seconds as the robot drives down the hallway (from world (4.5, 4.5), on the
 way to the second goal); `nav_goals.py --retries 3` sends a goal Nav2 gave
-up on again once the robot is localized, as a supervisor would:
+up on again once the robot has been localized for 2 s, as a supervisor
+would. Two pairs of runs, the second with a chase camera rendered for the
+video below (more CPU load, so the VIO dropped a few frames):
 
 | 5 s camera blackout in the hallway | goals reached | contacts | `/map_pose` error, RMSE / max | robot during the blackout |
 | --- | ---: | ---: | --- | --- |
 | monitor off | 5/5 | 0 | 5.6 cm / **43 cm** | drives on blind for 1.5 m |
 | monitor on (`lost_min_observations 20`, `lost_max_speed 1.0`) | 5/5 (goal 2 on the 2nd try) | 0 | 1.5 cm / 4.4 cm | stops within 7 cm |
+| monitor off, with the chase camera | 5/5 | 0 | 1.9 cm / **13 cm** | drives on blind |
+| monitor on (`lost_min_observations 10`), with the chase camera | 5/5 (goal 2 on the 2nd try) | 0 | 1.4 cm / 4.1 cm | stops |
 
 <p align="center">
   <img src="assets/gz_nav2_blackout.png" alt="The hallway, magnified. Monitor off: the believed pose drifts up to 0.4 m to the side of the true path during the blackout and snaps back when the cameras return. Monitor on: no believed pose during the blackout, and the true path is straight" width="100%">
@@ -256,11 +260,30 @@ aborted the goal; the robot stopped about 7 cm on. The estimator was reset
 every 0.5 s while the images stayed blank (9 resets). 1 s after the
 cameras came back, the VIO published again, map localization had its new
 `map -> odom` at once, and the second try reached the goal. The error
-column counts only the poses that were published. Outside the blackout the
-monitor never fired: frames went down to 5 tracked observations in normal
-driving, but not for 0.5 s. A gap longer than a few seconds still needs
-someone (or a behavior tree) to resend the goal, and the robot stays where
-it stopped until the cameras see again; wheel odometry would let it go on.
+column counts only the poses that were published. How far the blind
+robot's pose drifts differs from run to run (43 cm, then 13 cm): it is
+the IMU alone, integrated for 5 s.
+
+**A false alarm, and getting out of it.** With `lost_min_observations 20`
+and the chase camera's extra load, the monitor fired before the blackout:
+the VIO dropped frames and tracked 19 observations for 0.5 s at the second
+goal's start. The robot stopped facing a nearly bare wall, where map
+localization found 11 inliers (it needs more), so it never relocalized and
+the goal timed out. Two changes: the threshold went down to 10, and
+`nav_goals.py --spin-after 5` turns the robot 90 degrees with Nav2's Spin
+behavior (on odometry alone) when it has had odometry but no map pose for
+5 s, until the map comes into view. With both, the second pair of runs
+above had no false alarm (the 9 resets all fell in the blackout) and needed
+no spin. In normal driving frames went down to 5 tracked observations,
+briefly. A gap longer than a few seconds still needs someone (or a behavior
+tree) to resend the goal, and the robot stays where it stopped until the
+cameras see again; wheel odometry would let it go on.
+
+The second pair of runs as seen from a camera following the robot (Gazebo,
+rendered for the video only; it sees a plain floor through a visibility
+mask, the robot's cameras the textured one). The cyan ring is where visloc
+puts the robot; the robot's own (left) camera is in the corner:
+[media/gz_nav2_blackout_3d.mp4](media/gz_nav2_blackout_3d.mp4).
 
 Gazebo renders on the CPU here (no GPU), which makes the simulation run at
 about a tenth of real time. Every node runs on simulation time, so Nav2 and
@@ -343,9 +366,9 @@ If Nav2's bringup stalls (the launch never logs `lifecycle_manager_navigation`
 and launch again.
 
 For the camera blackout, launch with `camera_suffix:=image
-lost_min_observations:=20 lost_max_speed:=1.0` (or without the last two for
+lost_min_observations:=10 lost_max_speed:=1.0` (or without the last two for
 the run without the monitor), run the relay in another shell, and add
-`--retries 3` to `nav_goals.py`:
+`--retries 3 --spin-after 5` to `nav_goals.py`:
 
 ```bash
 python3 ros2/visloc-ros2/gz/camera_blackout.py --at 4.5,4.5 --duration 5 \

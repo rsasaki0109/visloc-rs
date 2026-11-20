@@ -143,9 +143,12 @@ localizes every image until it has a new one. A dip shorter than
 `lost_after_s` is still published. Off by default. In Gazebo, a 5 s camera
 blackout with `lost_min_observations 20 lost_max_speed 1.0` stopped the
 robot within 7 cm, where without it the robot drove 1.5 m blind with up to
-43 cm of error ([docs/navigation.md](../../docs/navigation.md)); in normal
-driving there, frames went down to 5 observations, but never for 0.5 s:
-all 9 resets of that run fell in the blackout.
+43 cm of error ([docs/navigation.md](../../docs/navigation.md)). Leave a
+margin: under extra CPU load the VIO dropped frames, tracked 19
+observations for 0.5 s in normal driving and the monitor fired. With 10, no
+false alarm in the runs there. A robot stopped in front of a bare wall may
+not relocalize where it stands; something must turn it (the Gazebo goal
+runner's `--spin-after`).
 
 ### Monocular (`mono:=true`)
 
