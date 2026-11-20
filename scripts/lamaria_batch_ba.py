@@ -1716,6 +1716,11 @@ def cmd_solve(a):
     fix_translation = getattr(a, "fix_stereo_translation", False)
     if fix_translation and reference is None:
         raise SystemExit("--fix-stereo-translation needs --stereo-reference")
+    # --fix-camera-rotations: both cameras keep the factory rotation, only the focal lengths vary per segment
+    fix_rotations = getattr(a, "fix_camera_rotations", False)
+    if fix_rotations and (reference is None or not a.est_focal):
+        raise SystemExit("--fix-camera-rotations needs --stereo-reference and --est-focal")
+    fixed_phys = set() if reference is None else {0, 1} if fix_rotations else {reference}
     if reference is not None:
         if 1 - reference not in phys_est:
             raise SystemExit("--stereo-reference requires the other camera in --est-extrinsic")
@@ -1752,11 +1757,12 @@ def cmd_solve(a):
         est_cams = [c * n_seg + s for c in phys_est for s in range(n_seg)]
         print(f"  {n_seg} time segments per camera rotation", flush=True)
     ref_cams = [] if reference is None else list(range(reference * n_seg, (reference + 1) * n_seg))
+    fixed_rot_cams = [c * n_seg + s for c in sorted(fixed_phys) for s in range(n_seg)]
     trans_cams = [] if reference is None or fixed is not None or fix_translation else list(
         range((1 - reference) * n_seg, (2 - reference) * n_seg))
     rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
                       obs_sigma, a.huber, a.band, est_focal=a.est_focal,
-                      fixed_rotations=ref_cams, translation_cams=trans_cams)
+                      fixed_rotations=fixed_rot_cams, translation_cams=trans_cams)
     omega = [float(v) for v in a.omega_coriolis.split(",")] if a.omega_coriolis else None
     imu_data = np.loadtxt(a.imu, delimiter=",", comments="#")
     init_st = getattr(a, "init_states", None)
@@ -1844,7 +1850,7 @@ def cmd_solve(a):
         for c_ in phys_est:
             last = c_ * init["n_seg"] + init["n_seg"] - 1
             segment = slice(c_ * n_seg, (c_ + 1) * n_seg)
-            if c_ != reference:
+            if c_ not in fixed_phys:
                 r_ic[segment] = init["r_ic"][last]
             if rp.est_trans[c_ * n_seg] and init.get("t_ic") is not None:
                 t_ic[segment] = init["t_ic"][last]
@@ -1859,7 +1865,7 @@ def cmd_solve(a):
     # consecutive time segments of a camera rotate alike, within --ext-seg-sigma
     seg_pairs = [(c * n_seg + s, c * n_seg + s + 1) for c in phys_est for s in range(n_seg - 1)]
     seg_w = 1.0 / np.radians(a.ext_seg_sigma) ** 2
-    rot_pairs = [(ca, cb) for ca, cb in seg_pairs if ca // n_seg != reference]
+    rot_pairs = [(ca, cb) for ca, cb in seg_pairs if ca // n_seg not in fixed_phys]
     if a.ext_seg_sigma_cams:
         sig = dict(zip(chosen_cams, (float(v) for v in a.ext_seg_sigma_cams.split(","))))
         seg_w = np.array([1.0 / np.radians(sig[ca // n_seg]) ** 2 for ca, _ in rot_pairs])
@@ -2605,6 +2611,9 @@ def main():
         s.add_argument("--stereo-reference", type=int, choices=(0, 1),
                        help="fix this camera's transform to the IMU and estimate the other camera's rotation "
                             "and translation in each segment (both focal scales can still vary with --est-focal)")
+        s.add_argument("--fix-camera-rotations", action="store_true",
+                       help="with --stereo-reference and --est-focal, keep both cameras' factory rotations and "
+                            "estimate only the focal lengths per segment")
         s.add_argument("--fix-stereo-translation", action="store_true",
                        help="with --stereo-reference, keep the factory translation while allowing rotation drift")
         s.add_argument("--stereo-walk-sigma", type=float, default=0.0005,

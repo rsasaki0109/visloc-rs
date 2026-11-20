@@ -611,6 +611,11 @@ def main() -> int:
     parser.add_argument("--ba-compare-camera-gyro", action="store_true",
                         help="with --ba-compare, --ba-stereo-reference and --ba-est-gyro-m, also run the "
                              "camera-only and gyro-only batch passes from the shared inputs")
+    parser.add_argument("--ba-compare-focal-only", action="store_true",
+                        help="with --ba-compare, --ba-stereo-reference, --ba-stereo-fixed-translation and "
+                             "--ba-est-gyro-m, also run the gyro-only pass and the pass that keeps both cameras' "
+                             "factory rotations and estimates only the focal lengths per segment, from the shared "
+                             "inputs")
     parser.add_argument("--ba-compare-stereo-translation", action="store_true",
                         help="with --ba-compare and --ba-stereo-fixed-translation, also estimate translation "
                              "with the same stereo settings and save the trajectory under --log-dir")
@@ -663,6 +668,13 @@ def main() -> int:
             and not args.ba_fuse_accelerometers):
         parser.error("--ba-compare-camera-gyro requires --ba-compare, --ba-stereo-reference and --ba-est-gyro-m, "
                      "without --ba-fuse-accelerometers")
+    if args.ba_compare_focal_only and not (
+            args.ba_compare and args.ba_stereo_reference is not None and args.ba_stereo_fixed_translation
+            and args.ba_est_gyro_m and not args.ba_fuse_accelerometers):
+        parser.error("--ba-compare-focal-only requires --ba-compare, --ba-stereo-reference, "
+                     "--ba-stereo-fixed-translation and --ba-est-gyro-m, without --ba-fuse-accelerometers")
+    if args.ba_compare_camera_gyro and args.ba_compare_focal_only:
+        parser.error("--ba-compare-camera-gyro and --ba-compare-focal-only both run a gyro-only pass; pick one")
     if args.ba_compare_stereo_translation and not (args.ba_compare and args.ba_stereo_fixed_translation):
         parser.error("--ba-compare-stereo-translation needs --ba-compare and --ba-stereo-fixed-translation")
 
@@ -839,10 +851,16 @@ def main() -> int:
                         share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
                                            **chain_options, pass_args=sequence_pass_args)
+                    variants = []
                     if args.ba_compare_camera_gyro:
                         camera_options = sequence_pass_args.copy()
                         camera_options.remove("--est-gyro-m")
-                        for name, options in (("camera_only", camera_options), ("gyro_only", ["--est-gyro-m"])):
+                        variants = [("camera_only", camera_options), ("gyro_only", ["--est-gyro-m"])]
+                    if args.ba_compare_focal_only:  # the same pass with both rotations held at the factory's
+                        variants = [("gyro_only", ["--est-gyro-m"]),
+                                    ("focal_only", [*sequence_pass_args, "--fix-camera-rotations"])]
+                    if variants:
+                        for name, options in variants:
                             variant_work = work / f"ba_{name}"
                             share_ba_inputs(baseline_work, variant_work, None if low_light else learned)
                             log(f"{seq}: {name} batch pass")
@@ -885,6 +903,7 @@ def main() -> int:
                 for directory, prefix in ((work / "ba", ""), (work / "ba_baseline", "baseline_"),
                                           (work / "ba_free_translation", "free_translation_"),
                                           (work / "ba_camera_only", "camera_only_"),
+                                          (work / "ba_focal_only", "focal_only_"),
                                           (work / "ba_gyro_only", "gyro_only_")):
                     for diagnostic in sorted([*directory.glob("*.log"), *directory.glob("*_summary.json")]):
                         (args.log_dir / seq).mkdir(parents=True, exist_ok=True)

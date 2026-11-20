@@ -1,0 +1,248 @@
+# sequence_3_17: time-varying focal lengths alone against focal lengths and the stereo rotation.
+#
+# One job runs the VIO, the online windows and the first matching once, then four batch passes from those
+# shared inputs (temperature terms and the rematch off):
+#   baseline      the default pass
+#   gyro_only     the default pass and the 3x3 gyroscope response matrix
+#   focal_only    the matrix; both cameras' factory rotations and translations held, each camera's focal
+#                 length per 5 s segment (--fix-camera-rotations)
+#   focal_rotation the matrix; cam0 fixed, cam1's rotation and both focal lengths per 5 s segment, the
+#                 stereo translation at the factory's (the driver's main pass)
+# and scores each with the official control-point evaluator, the SE(3) position RMSE against the pseudo-GT on
+# common timestamps, and the horizontal error of every control point (tags 20-24 and 26 in the summary).
+name: visloc-rs focal-length ablation
+
+on:
+  push:
+    branches: [claude/determined-lovelace-pwgdae]
+    paths: [.github/workflows/visloc_focal_ablation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SPLIT: training
+  SEQUENCE: sequence_3_17
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lamaria-release-rt
+
+      - name: Build the VIO
+        run: cargo build --locked --profile release-rt --example basalt_euroc_vio_demo
+
+      - name: Upload the VIO
+        uses: actions/upload-artifact@v7
+        with:
+          name: basalt-euroc-vio-demo
+          path: target/release-rt/examples/basalt_euroc_vio_demo
+          if-no-files-found: error
+          retention-days: 7
+
+  sequence:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          df -h / /mnt
+          if [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
+            sudo mkdir -p /mnt/lamaria && sudo chown "$USER" /mnt/lamaria && echo "WORK=/mnt/lamaria" >> "$GITHUB_ENV"
+          else
+            echo "WORK=$RUNNER_TEMP/lamaria" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the BA's dependencies
+        run: |
+          python -m pip install --quiet --disable-pip-version-check \
+            numpy==2.5.3 scipy==1.18.1 opencv-python-headless==5.0.0.93 gtsam==4.3.0 numba==0.68.0 \
+            projectaria-tools==2.4.0 zstandard==0.25.0
+
+      - name: Download the VIO
+        uses: actions/download-artifact@v8
+        with:
+          name: basalt-euroc-vio-demo
+          path: bin
+
+      - name: Run the four passes
+        run: |
+          chmod +x bin/basalt_euroc_vio_demo
+          python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
+            --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
+            --threads 4 --ba-jobs 4 --ba-threads 2 \
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs \
+            --ba-est-gyro-m --ba-stereo-reference 0 --ba-stereo-fixed-translation --ba-stereo-paper-priors \
+            --ba-compare --ba-compare-focal-only --no-ba-temperature --no-ba-rematch
+          test -s "out/slam/$SEQUENCE.txt"
+
+      - name: Score control points
+        shell: bash
+        run: |
+          evaluator="$RUNNER_TEMP/lamaria-eval"
+          git init -q "$evaluator"
+          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          python -m pip install --quiet --disable-pip-version-check \
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ \
+            pycolmap==3.13.0.dev0 pyceres==2.6 tqdm==4.67.3
+          echo "EVALUATOR=$evaluator" >> "$GITHUB_ENV"
+
+          results="out/logs/$SEQUENCE"
+          refs="$RUNNER_TEMP/lamaria-reference"
+          mkdir -p "$results" "$refs"
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          curl -fsSL --retry 3 "$data/ground_truth/sparse/$SEQUENCE.json" -o "$refs/control_points.json"
+          curl -fsSL --retry 3 "$data/aria_calibrations/training/$SEQUENCE.json" -o "$refs/calibration.json"
+          curl -fsSL --retry 3 "$data/ground_truth/pseudo_dense/$SEQUENCE.txt" -o "$refs/reference.txt"
+          echo "REFS=$refs" >> "$GITHUB_ENV"
+
+          cp "out/slam/$SEQUENCE.txt" "$results/focal_rotation_estimate.txt"
+          for label in baseline gyro_only focal_only focal_rotation; do
+            log="$results/cp_$label.log"
+            python "$evaluator/evaluate_wrt_control_points.py" --estimate "$results/${label}_estimate.txt" \
+              --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
+              --corresponding_sensor imu --output_path "$results/cp_$label" 2>&1 | tee "$log"
+            test -n "$(sed -n 's/.*CP Score: //p' "$log")"
+          done
+
+      - name: Report
+        shell: bash
+        run: |
+          PYTHONPATH="$EVALUATOR" python - "$REFS" "out/logs/$SEQUENCE" <<'PY' | tee "out/logs/$SEQUENCE/focal_ablation.json"
+          import csv
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          import numpy as np
+
+          from lamaria.structs.sparse_eval import SparseEvalResult
+          from lamaria.utils.metrics import calculate_error
+
+          refs, results = Path(sys.argv[1]), Path(sys.argv[2])
+          labels = ["baseline", "gyro_only", "focal_only", "focal_rotation"]
+          summaries = {"baseline": "baseline_ba2_summary.json", "gyro_only": "gyro_only_ba2_summary.json",
+                       "focal_only": "focal_only_ba2_summary.json", "focal_rotation": "ba2_summary.json"}
+          watch = [20, 21, 22, 23, 24, 26]
+
+          def samples(path):
+              values = np.loadtxt(path, usecols=(0, 1, 2, 3), ndmin=2)
+              times, indices = np.unique(values[:, 0], return_index=True)
+              return times, values[indices, 1:]
+
+          # each pass as configured: the matrix where asked, rotations and translations held where asked
+          for name in labels:
+              s = json.loads((results / summaries[name]).read_text())
+              matrix = np.array(s["gyro_m"])
+              rot = s["camera_rotation_change_deg"]
+              moved = {c: float(np.abs(np.array(v)).max()) for c, v in rot.items()}
+              ok = (name == "baseline") == (not matrix.any())
+              if name == "focal_only":
+                  ok &= all(v == 0 for v in moved.values()) and not np.any(s["stereo_offset_change_imu_mm"])
+              if name == "focal_rotation":
+                  ok &= moved.get("cam1", 0) > 0 and moved.get("cam0", 0) == 0
+                  ok &= not np.any(s["stereo_offset_change_imu_mm"])
+              if not ok:
+                  raise ValueError(f"unexpected solver configuration for {name}: {moved}")
+
+          raw = json.loads((refs / "control_points.json").read_text())
+          time_by_image = {name: int(ns) for stream in raw["timestamps"].values() for ns, name in stream.items()}
+          first_seen = {}
+          for info in raw["control_points"].values():
+              times = sorted(time_by_image[name] for name in info["image_names"])
+              for tag in info["tag_id"]:
+                  first_seen[int(tag)] = times[0]
+          start_ns = int((results / "baseline_estimate.txt").read_text().split()[0])
+
+          ref_t, ref_p = samples(refs / "reference.txt")
+          positions, common = {}, np.ones(len(ref_t), dtype=bool)
+          for name in labels:
+              t, p = samples(results / f"{name}_estimate.txt")
+              right = np.clip(np.searchsorted(t, ref_t), 1, len(t) - 1)
+              left = right - 1
+              span = t[right] - t[left]
+              common &= (ref_t >= t[0]) & (ref_t <= t[-1]) & (span <= 100_000_000)
+              w = (ref_t - t[left]) / span
+              positions[name] = p[left] + w[:, None] * (p[right] - p[left])
+          if common.sum() < 3 or common.mean() < 0.5:
+              raise ValueError("insufficient common coverage")
+
+          metrics, per_tag = {}, {}
+          for name in labels:
+              log = (results / f"cp_{name}.log").read_text()
+              x = positions[name][common] - positions[name][common].mean(axis=0)
+              y = ref_p[common] - ref_p[common].mean(axis=0)
+              u, _, vh = np.linalg.svd(x.T @ y)
+              rotation = u @ np.diag([1, 1, np.linalg.det(u @ vh)]) @ vh
+              result = SparseEvalResult.load_from_npy(results / f"cp_{name}" / "sparse_eval_result.npy")
+              per_tag[name] = {int(tag): float(e) if np.isfinite(e) else None
+                               for tag, e in zip(result.cp_summary, calculate_error(result), strict=True)}
+              metrics[name] = {
+                  "cp_score": float(re.search(r"CP Score: ([\d.]+)", log).group(1)),
+                  "cp_recall_1m": float(re.search(r"CP Recall @ 1m: ([\d.]+)", log).group(1)),
+                  "se3_position_rmse_m": float(np.sqrt(np.mean(np.sum((x @ rotation - y) ** 2, axis=1)))),
+                  "watched_tags_m": {str(tag): per_tag[name].get(tag) for tag in watch},
+              }
+          tags = sorted(per_tag["baseline"], key=lambda tag: (first_seen.get(tag, 0), tag))
+          with (results / "control_points_by_condition.csv").open("w", newline="") as f:
+              w = csv.writer(f)
+              w.writerow(["tag_id", "first_detection_s", *labels])
+              for tag in tags:
+                  w.writerow([tag, round((first_seen[tag] - start_ns) / 1e9, 1),
+                              *[per_tag[name].get(tag) for name in labels]])
+          print(json.dumps({"matched_reference_poses": int(common.sum()), "total_reference_poses": len(common),
+                            "metrics": metrics}, indent=2))
+
+          def m(v):
+              return "missing" if v is None else f"{v:.3f}"
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              print("### sequence_3_17: focal lengths alone and with the stereo rotation\n", file=out)
+              print("| Pass | CP score | Recall at 1 m (%) | Position RMSE (m) |", file=out)
+              print("|---|---:|---:|---:|", file=out)
+              for name in labels:
+                  r = metrics[name]
+                  print(f"| {name} | {r['cp_score']:.2f} | {r['cp_recall_1m']:.2f} | {r['se3_position_rmse_m']:.3f} |",
+                        file=out)
+              print("\n| Tag | First seen (s) | " + " | ".join(labels) + " |", file=out)
+              print("|---:|---:|" + "---:|" * len(labels), file=out)
+              for tag in watch:
+                  print(f"| {tag} | {(first_seen[tag] - start_ns) / 1e9:.0f} | "
+                        + " | ".join(m(per_tag[name].get(tag)) for name in labels) + " |", file=out)
+          PY
+
+      - name: Upload the estimates and the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: focal-ablation-${{ env.SEQUENCE }}
+          path: |
+            out/slam/*.txt
+            out/logs
+          if-no-files-found: warn
+          retention-days: 14

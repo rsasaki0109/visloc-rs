@@ -112,8 +112,10 @@ class NormalEquationsTest(unittest.TestCase):
             for stereo in (False, True):
                 with self.subTest(focal=focal, stereo=stereo):
                     self._check(focal, stereo)
+        with self.subTest(focal_only=True):  # --fix-camera-rotations: both rotations held, translation too
+            self._check(True, False, focal_only=True)
 
-    def _check(self, focal, stereo):
+    def _check(self, focal, stereo, focal_only=False):
         rng = np.random.default_rng(9)
         cams = two_cameras()
         n_kf, n_lm = 4, 6
@@ -132,12 +134,19 @@ class NormalEquationsTest(unittest.TestCase):
         obs_z = rng.uniform(100, 600, size=(len(obs_kf), 2))  # far off: some Huber-weighted, some behind
         sigma = rng.uniform(0.5, 2.0, size=len(obs_kf))  # per-observation pixel noise
         rp = lb.Reprojection(np.array(obs_kf), np.array(obs_cam), np.array(obs_lm), obs_z, n_lm, cams,
-                             [0, 1] if stereo else [1], sigma, 2.0, 64, numpy_pairs=True, est_focal=focal,
-                             fixed_rotations=[0] if stereo else (), translation_cams=[1] if stereo else ())
+                             [0, 1] if stereo or focal_only else [1], sigma, 2.0, 64, numpy_pairs=True,
+                             est_focal=focal,
+                             fixed_rotations=[0, 1] if focal_only else [0] if stereo else (),
+                             translation_cams=[1] if stereo else ())
         if focal:
             rp.set_focal([0.0, 0.01])
         rp.active[3] = False
         res, jx, jl, w = rp.linearize(r_wi, t_wi, r_ic, t_ic, pts)
+        if focal_only:
+            self.assertEqual(rp.n_par, 4)
+            np.testing.assert_array_equal(jx[:, :, 6:9], 0)
+            for c in (0, 1):
+                self.assertTrue(np.any(jx[rp.cam == c, :, -1]))
         if stereo:
             np.testing.assert_array_equal(jx[rp.cam == 0, :, 6:12], 0)
             if focal:
