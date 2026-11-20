@@ -72,6 +72,8 @@ PARAMETERS (--name value  or  -p name:=value):
                          failure, and with <= 0 always, match map-wide             [20]
   projection_fresh_s     ... only within this many seconds of the newest fix          [5]
   projection_fresh_m     ... and this many metres of odometry travel from it          [2]
+  reset_prior_s          after a VIO reset (odom_reset), the last map pose is the
+                         prior for this many seconds (0: off)                         [30]
   prior_wait_ms          longest wait for the odometry of an image's stamp before
                          matching map-wide instead                                    [300]
   match_threads          threads of the map-wide search                               [1]
@@ -152,6 +154,7 @@ fn run() -> Result<(), String> {
         args.parsed_or("projection_fresh_s", options.projection_fresh_s)?;
     options.projection_fresh_m =
         args.parsed_or("projection_fresh_m", options.projection_fresh_m)?;
+    options.reset_prior_s = args.parsed_or("reset_prior_s", options.reset_prior_s)?;
     let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
     let duplicate_radius = args.parsed_or("duplicate_radius", 0.0f64)?;
