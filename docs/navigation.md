@@ -551,6 +551,10 @@ until it comes.
 
 ### Reproduce the 3DGS simulator
 
+`scripts/make_gs_tum_dataset.sh WORK_DIR` does the first steps (download,
+undistort, SfM, metric alignment, crop) in one go, writing `WORK_DIR/train`.
+Step by step:
+
 ```bash
 for s in 360 slam slam3; do
   curl -L https://cvg.cit.tum.de/rgbd/dataset/freiburg2/rgbd_dataset_freiburg2_pioneer_$s.tgz | tar -xz -C runs/gs_tum/data
