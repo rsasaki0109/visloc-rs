@@ -50,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--steps" => cfg.steps = next()?.parse()?,
             "--eval-every" => eval_every = next()?.parse()?,
             "--no-densify" => cfg.densify = None,
+            "--ssim-weight" => cfg.ssim_weight = next()?.parse()?,
+            "--ssim-every" => cfg.ssim_every = next()?.parse()?,
             "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
             // brush 0.3's refine strategy, mean noise and learning rates.
@@ -84,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             steps: cfg.steps,
             seed: cfg.seed,
             ssim_weight: cfg.ssim_weight,
+            ssim_every: cfg.ssim_every,
             sh_degree_interval: cfg.sh_degree_interval,
             background: cfg.background,
             normal_weight: cfg.normal_weight,

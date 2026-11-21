@@ -1611,6 +1611,7 @@ dependencies = [
  "naga",
  "nalgebra",
  "pollster",
+ "rayon",
  "thiserror",
  "visloc-gsplat-core",
  "wgpu",

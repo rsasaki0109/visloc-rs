@@ -661,6 +661,12 @@ differentiating against). Structure:
   defaults: 514 s, ATE 3.81 cm, PSNR 28.87 / SSIM 0.955 (23 views); with
   stride 2 / 400 frames: 726 s, ATE 5.55 cm, PSNR 29.98 / SSIM 0.955 (45
   views) -- more views help the splat, shorter baselines hurt the ATE.
+- **CPU training (2026-11-21)**: without a GPU the trainer runs on lavapipe,
+  where `rasterize_backward`'s subgroup reductions and atomics were 77% of
+  a step. On a CPU adapter the renderer now runs both rasterizers on the
+  host with rayon: TUM RGB-D pioneer (600 x 440, 7k steps) in 46 minutes
+  instead of 2 h 11 min, at the same PSNR (24.66 / 24.61 dB). Profile, settings and checks in
+  [gsplat_cpu_training.md](gsplat_cpu_training.md).
 
 ### Stage 4 — Browser (optional, non-blocking)
 - wasm + WebGPU build of the renderer; training only if stage 2/3 land cleanly.
