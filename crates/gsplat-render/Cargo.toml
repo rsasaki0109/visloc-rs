@@ -22,12 +22,13 @@ default = []
 # (edition2024, Rust >= 1.85). Build the GPU path on a current toolchain:
 #   cargo build -p visloc-gsplat-render --features gpu
 # Same toolchain-boundary pattern as the root `onnx-inference` feature.
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:rayon"]
 
 [dependencies]
 bytemuck = { workspace = true, optional = true }
 nalgebra = { workspace = true }
 pollster = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
 visloc-gsplat-core = { path = "../gsplat-core", version = "0.4.0" }
 wgpu = { workspace = true, optional = true }

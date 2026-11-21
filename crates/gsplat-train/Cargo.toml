@@ -76,6 +76,11 @@ name = "gsplat_euroc"
 path = "examples/gsplat_euroc.rs"
 required-features = ["gpu", "euroc"]
 
+[[example]]
+name = "raster_parity"
+path = "examples/raster_parity.rs"
+required-features = ["gpu"]
+
 [lib]
 doctest = false
 

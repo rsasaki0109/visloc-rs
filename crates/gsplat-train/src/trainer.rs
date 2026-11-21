@@ -818,6 +818,17 @@ impl Trainer {
         let queue = st.renderer.ctx.queue.clone();
         // Ordered after the previous step's loss work, before this one's.
         queue.write_buffer(&self.gt, 0, bytemuck::cast_slice(&self.gt_host[vi]));
+        let ssim_on =
+            self.cfg.ssim_weight > 0.0 && self.step.is_multiple_of(self.cfg.ssim_every.max(1));
+        if self.cfg.ssim_every > 1 {
+            // Pure L1 on the steps without SSIM.
+            let w = if ssim_on {
+                1.0 - self.cfg.ssim_weight
+            } else {
+                1.0f32
+            };
+            queue.write_buffer(&self.loss_uniforms, 4, bytemuck::bytes_of(&w.to_bits()));
+        }
         {
             let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("loss"),
@@ -881,7 +892,7 @@ impl Trainer {
                 pass.set_bind_group(0, &st.loss_bind, &[]);
                 let (x, y) = groups_2d(npix);
                 pass.dispatch_workgroups(x, y, 1);
-                if self.cfg.ssim_weight > 0.0 {
+                if ssim_on {
                     self.ssim.encode(&mut pass, &st.ssim_bind);
                 }
                 if let (Some(a), Some((_, b_bwd, b_adam))) = (&self.appearance, &app_binds) {
