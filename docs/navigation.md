@@ -641,9 +641,20 @@ Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). First, the
 real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a simple 3D model drawn into the
-render, hidden where the splat's depth is in front of it. An inset shows the
-camera image the robot localizes with, and the cyan ring is where visloc
-puts the robot.
+render, hidden where the splat's depth is in front of it.
+
+The overlays show the localization itself:
+
+- **Green rays** run from the robot's camera to the map landmarks that its
+  latest localization matched (its PnP inliers, from
+  `visloc_map_localize_node`'s new `dump_inliers` CSV). White dots are the
+  map's other landmarks within 12 m.
+- **The inset** is the camera image that was localized, with the matched
+  keypoints circled.
+- **The cyan ring** is where visloc puts the robot.
+
+The video is of a third run with the same settings. It reached 4/4 goals with
+no contacts, at 4.1 / 1.7 / 34 cm `/map_pose` error (RMSE / median / max).
 
 ## The occupancy grid of a visual map
 
