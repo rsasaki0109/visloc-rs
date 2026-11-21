@@ -11,7 +11,8 @@ onto them, by Umeyama's method, and applies it to the whole model. The
 ground truth is used only for those 7 numbers; every pose stays the SfM's.
 The residual is how far the SfM's own trajectory is from the ground truth.
 
-Image names must be `<sequence>_<timestamp>.png`, where the sequence is the
+The photos' names must be `<sequence>_<timestamp>.png` (`gsplat_photos`
+renames them `frame_NNNNN`; its `image_names.txt` maps them back), where the sequence is the
 part after `rgbd_dataset_freiburg2_pioneer_` (`360`, `slam`, `slam3`).
 
 Writes OUT/sparse/0 (the model in metres, COLMAP text), OUT/images (links to
@@ -72,8 +73,17 @@ def main():
     p.add_argument('--images', default='', help="the model's image folder (default: ../../images of --model)")
     p.add_argument('--data', required=True, help='folder of the rgbd_dataset_freiburg2_pioneer_* sequences')
     p.add_argument('--out', required=True)
+    p.add_argument('--names', default='', help="gsplat_photos' image_names.txt (its frame names -> the photos'); "
+                   'default: next to --model')
     args = p.parse_args()
     images = read_images(os.path.join(args.model, 'images.txt'))
+    names = args.names or os.path.abspath(os.path.join(args.model, '..', '..', 'image_names.txt'))
+    original = {}
+    if os.path.exists(names):
+        for line in open(names, encoding='utf-8'):
+            frame, path = line.split(maxsplit=1)
+            original[frame] = os.path.basename(path.strip())
+    photo = lambda name: original.get(name, name)  # noqa: E731
     gt = {}
     for name in os.listdir(args.data):
         if name.startswith('rgbd_dataset_freiburg2_pioneer_'):
@@ -81,7 +91,7 @@ def main():
             gt[name[len('rgbd_dataset_freiburg2_pioneer_'):]] = g
     src, dst, ids = [], [], []
     for iid, im in images.items():
-        seq, ts = im['name'][:-4].split('_', 1)
+        seq, ts = photo(im['name'])[:-4].split('_', 1)
         g = gt[seq]
         k = bisect.bisect_left(g[:, 0], float(ts))
         k = min(range(max(k - 1, 0), min(k + 1, len(g) - 1) + 1), key=lambda j: abs(g[j, 0] - float(ts)))
@@ -119,7 +129,7 @@ def main():
             q = rot2qvec(Rcw_new)
             f.write(f"{iid} {' '.join(f'{v:.9f}' for v in q)} {' '.join(f'{v:.9f}' for v in tcw)} "
                     f"{im['cam']} {im['name']}\n{im['points']}\n")
-            seq, ts = im['name'][:-4].split('_', 1)
+            seq, ts = photo(im['name'])[:-4].split('_', 1)
             qwc = rot2qvec(Rcw_new.T)
             tum.setdefault(seq, []).append(f"{ts} {c[0]:.6f} {c[1]:.6f} {c[2]:.6f} "
                                            f"{qwc[1]:.8f} {qwc[2]:.8f} {qwc[3]:.8f} {qwc[0]:.8f}\n")
