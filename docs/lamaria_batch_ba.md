@@ -3209,6 +3209,37 @@ holding them at the factory's costs another 3.0 points on the earlier tags (tag 
 variant (0.26–0.50 m across the three), so the focal walk fits the middle of the recording better and the last ten minutes worse. The
 per-tag errors of all 27 control points are in each run's `control_points_by_condition.csv`.
 
+### The accelerometer matrix with the 5 s focal lengths
+
+SLAM Dunk estimates the accelerometer's response together with the camera drift. If the 5 s focal lengths
+trade with the scale, the accelerometer's 3×3 matrix (`--est-accel-m`) could take that back. The focal
+ablation workflow ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/44864728230)) ran four
+passes per sequence from shared inputs, with the temperature terms and the rematch off: the default pass,
+the gyroscope matrix, the gyroscope matrix and the focal lengths per 5 s chunk with the default 8-segment
+rotations (`--focal-seg-seconds 5`), and the same with the accelerometer matrix:
+
+| Sequence | Pass | CP score | Recall at 1 m (%) | Position RMSE (m) | Final cost |
+|---|---|---:|---:|---:|---:|
+| sequence_3_17 | Default | **79.92** | **100.0** | 1.478 | 198,684 |
+| | Gyroscope matrix | 79.74 | **100.0** | 1.336 | 197,398 |
+| | Matrix, focal 5 s, rotations 8 | 76.76 | 74.1 | 1.188 | 196,948 |
+| | Matrix, focal 5 s, rotations 8, accelerometer matrix | 73.87 | 74.1 | **1.046** | **196,364** |
+| sequence_1_19 | Default | 81.92 | 100.0 | **0.517** | 77,965 |
+| | Gyroscope matrix | 83.25 | 100.0 | 0.545 | 72,296 |
+| | Matrix, focal 5 s, rotations 8 | **83.90** | 100.0 | 0.568 | 72,593 |
+| | Matrix, focal 5 s, rotations 8, accelerometer matrix | 83.76 | 100.0 | 0.568 | **60,951** |
+
+sequence_3_17's six late tags with the accelerometer matrix (m): 20 1.196, 21 1.464, 22 1.163, 23 1.350,
+24 1.212, 26 1.103, all still over 1 m (without it 1.03–1.52). The matrix's diagonal comes out at −0.24,
+−0.09 and −0.05 % on sequence_3_17 and +0.03, +0.05 and −0.12 % on sequence_1_19, and the focal lengths
+move by less than 0.02 % with it. It does not take the late tags back; it lowers the cost and the RMSE
+further and the CP score by another 2.9. On sequence_1_19, where no tag goes over 1 m in any pass, the
+gyroscope matrix gains 1.3 and the 5 s focal lengths another 0.7.
+
+On sequence_3_17 every model that lowers the RMSE against the pseudo-GT (1.478 → 1.046 m) loses on the
+control points, in the last ten minutes. The two references disagree there: the camera and IMU models fit
+the pseudo-GT better and the surveyed points worse. None of them is enabled.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
