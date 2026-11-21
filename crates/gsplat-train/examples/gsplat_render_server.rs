@@ -14,7 +14,9 @@
 //! Each request is one line of 12 numbers, the world-to-camera rotation
 //! (row-major) and translation of the splat's frame, in COLMAP's convention
 //! (`x_cam = R x_world + t`, camera x right, y down, z forward). The reply is
-//! `width * height * 3` bytes of 8-bit RGB, row by row, with nothing else.
+//! `width * height * 3` bytes of 8-bit RGB, row by row, with nothing else;
+//! with `--depth`, followed by `width * height` little-endian f32 median
+//! depths (camera z in the splat's units, 0 where nothing is hit).
 //! Diagnostics go to stderr. The process ends at the end of stdin.
 //! `ros2/visloc-ros2/gs/gs_sim.py` drives it.
 
@@ -66,11 +68,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ply: Option<PathBuf> = None;
     let mut camera: Option<String> = None;
     let mut sh_degree: Option<u32> = None;
+    let mut with_depth = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--ply" => ply = args.next().map(PathBuf::from),
             "--camera" => camera = args.next(),
             "--sh-degree" => sh_degree = args.next().and_then(|v| v.parse().ok()),
+            "--depth" => with_depth = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -107,7 +111,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let rotation = Matrix3::new(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
         let translation = Vector3::new(v[9], v[10], v[11]);
-        let image = renderer.render(&CameraView::new(rotation, translation, camera), [0.0; 3]);
+        let view = CameraView::new(rotation, translation, camera);
+        let (image, depth) = if with_depth {
+            let (image, depth, _) = renderer.render_depth(&view, [0.0; 3]);
+            (image, Some(depth))
+        } else {
+            (renderer.render(&view, [0.0; 3]), None)
+        };
         bytes.clear();
         bytes.extend(
             image
@@ -115,6 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)),
         );
+        if let Some(depth) = depth {
+            bytes.extend(depth.iter().flat_map(|d| d.to_le_bytes()));
+        }
         out.write_all(&bytes)?;
         out.flush()?;
     }
