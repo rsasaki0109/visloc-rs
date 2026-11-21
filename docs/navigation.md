@@ -336,6 +336,20 @@ prior can make the difference, not how often.
 The two runs from the chase camera:
 [media/gz_depot_blackout_3d.mp4](media/gz_depot_blackout_3d.mp4).
 
+The visual map has no colour. For a colour view, the same mapping drive also
+recorded a colour camera at cam0's pose (`make_depot_world.py --rgb-twin`,
+5 Hz; no visloc node reads it). Those 2,102 images, posed by the SLAM
+trajectory (not by ground truth), went into a COLMAP model, and
+`gsplat_train` turned that into a 3D Gaussian splat: 7,000 steps, 311k
+Gaussians, held-out PSNR 22.1 dB, about 95 minutes on the CPU (lavapipe
+Vulkan). The splat looks right from about the camera's height, where the
+images were taken. From a chase camera 1.9 m up it blurs: no image saw the
+place from there. So this video renders it at the robot's camera pose, through
+the "monitor on" run, next to what the robot's camera saw:
+[media/gz_depot_3dgs_fpv.mp4](media/gz_depot_3dgs_fpv.mp4).
+
+![The Depot's colour 3DGS at the robot's camera pose, next to the robot's camera image and the minimap](assets/gz_depot_3dgs_fpv.jpg)
+
 Gazebo renders on the CPU here (no GPU), which makes the simulation run at
 about a tenth of real time. Every node runs on simulation time, so Nav2 and
 the visloc nodes see a normal-speed robot; a 2-minute drive takes about
