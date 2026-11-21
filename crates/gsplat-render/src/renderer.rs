@@ -1116,7 +1116,22 @@ impl Renderer {
         // Keys are the raw f32 depth bits (monotonic for positive z), values are
         // the global gaussian ids, so ascending key order is nearest-first
         // (front-to-back). Full 32-bit keys: eight ping-pong passes.
+        //
+        // `project_forward` appends visible gaussians in whatever order its
+        // atomic counter hands out slots, and the sort is stable, so equal
+        // depths (a densification clone has exactly its parent's depth) would
+        // keep that order and change from run to run. Sorting by gaussian id
+        // first makes ties nearest-first by id, and the frame deterministic.
         if nv > 0 {
+            let id_bits =
+                crate::sort::key_bits_for((self.num_gaussians() as u32).saturating_sub(1));
+            self.sort_in_place(
+                &self.scratch.global_from_compact,
+                &self.scratch.depths,
+                &self.depth_pairs,
+                nv,
+                id_bits,
+            );
             self.sort_in_place(
                 &self.scratch.depths,
                 &self.scratch.global_from_compact,

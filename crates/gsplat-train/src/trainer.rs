@@ -1056,9 +1056,13 @@ impl Trainer {
             p.mark(&dev, "noise");
         }
         self.step += 1;
+        // The last step's model is the result: densifying (or resetting
+        // opacity) right before it is saved leaves fresh, untrained splits
+        // and clones in it (Inria saves before densifying, too).
+        let last = self.step == self.cfg.steps;
 
         if let Some(b) = self.cfg.brush_refine.clone() {
-            if self.step.is_multiple_of(b.refine_every.max(1)) {
+            if !last && self.step.is_multiple_of(b.refine_every.max(1)) {
                 self.brush_refine_now(&b)?;
                 let dev = self.st().renderer.ctx.device.clone();
                 if let Some(p) = self.profile.as_mut() {
@@ -1069,7 +1073,7 @@ impl Trainer {
             let s = self.step;
             let at_densify = s >= d.start && s <= d.stop && s.is_multiple_of(d.interval);
             let at_reset = s < d.stop && s.is_multiple_of(d.opacity_reset_interval);
-            if at_densify || at_reset {
+            if !last && (at_densify || at_reset) {
                 self.densify_now(&d, at_densify, at_reset)?;
                 let dev = self.st().renderer.ctx.device.clone();
                 if let Some(p) = self.profile.as_mut() {
