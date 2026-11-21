@@ -212,6 +212,10 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The workspace checks run as three parallel jobs. As one job they took
+  # about 14.5 min on a 4-core runner: `cargo test` runs its 189 test
+  # binaries one after another (visloc-slam's unit tests alone take ~4 min),
+  # and the example/demo/docs steps followed. Same steps, same commands.
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -232,16 +236,44 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # visloc-slam's tests run in `rust-slam`.
       - name: Test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --exclude visloc-slam
+
+      - name: API stability allowlist
+        run: cargo test --test api_stability -- --nocapture
+
+  rust-slam:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test visloc-slam
+        run: cargo test -p visloc-slam --all-targets
 
       - name: Experimental feasible BA backtracking
         env:
           VISLOC_SFM_BA_FEASIBLE_BACKTRACK: '1'
         run: cargo test -p visloc-slam --lib generalized_rig_factor_tests -- --nocapture
 
-      - name: API stability allowlist
-        run: cargo test --test api_stability -- --nocapture
+  rust-extras:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Python tests
         run: |

@@ -17,6 +17,7 @@
 - Prefer trait boundaries for replaceable feature extraction, matching, pose estimation, map providers, tracking, mapping, and fusion inputs.
 - Add complexity only when a runnable example or test needs it.
 - Use `nalgebra` for geometry and avoid `unsafe`.
+- Keep results deterministic: seed every RNG from config, keep parallel paths bit-identical to the serial ones, and follow the rules in [docs/reproducibility.md](docs/reproducibility.md).
 
 ## Local Checks
 

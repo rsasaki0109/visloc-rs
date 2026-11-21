@@ -45,6 +45,89 @@ All notable changes to `visloc-rs` will be documented here.
     - VLAD retrieval was as good and cheaper there with the default SIFT.
   - Details in docs/gps_prior_sfm.md.
 
+- **Localize a photo whose focal length is unknown**
+  (`LocalizationPipeline::localize_with_unknown_focal`, `UnknownFocalLocalization`):
+  P4Pf RANSAC (`visloc_vision::pnp::estimate_pose_with_focal`, minimal solver
+  vendored from OpenMVG-rs) estimates the focal length from the 2D-3D
+  correspondences, then the usual estimator and quality gate run with it.
+  Leave-one-out on the browser SfM's courtyard sample: 36/38 localized at a
+  1.03% median centre error, like the true-focal oracle (1.13%), against
+  351% with the no-EXIF prior (docs/unknown_focal_localization.md,
+  `bindings/sfm-web/examples/unknown_focal_loo.rs`).
+
+- **`merge_maps` merges maps of another calibration of the rig**
+  (another day's): a camera that differs from the base map's under the same
+  id is added under a new id (`MergedMap::camera_ids`), instead of failing
+  with `CameraMismatch`. `basalt_map_merge` records such a session's
+  `t_imu_cam` in `map.json`. `scripts/euroc_stereo_to_rgbd.py` turns a
+  rectified stereo sequence and its SLAM trajectory into the RGB-D layout of
+  `tum_rgbd_save_map` (`--keep-world` keeps a visual-inertial world), and
+  `fetch_kitti_raw_drive.py --colour-frames` fetches the colour cameras of
+  chosen frames. Three KITTI raw drives on two days merge into one district map at
+  1.12 m RMSE against the OXTS (docs/basalt_map_localization.md, GIF under
+  KITTI's CC BY-NC-SA 3.0). `render_map_merge_gif.py --zoom` adds a
+  close-up of where a session joined, `--drive` a street-level drive along a
+  session's trajectory.
+
+- **Maps from TUM RGB-D sequences, merged across sessions**
+  (`examples/tum_rgbd_save_map.rs`). It saves a map in the layout
+  `basalt_euroc_online_slam_demo --save-map` writes, from the RGB images,
+  their depth and a trajectory (the virtual-stereo VO), levelled by the
+  Kinect's accelerometer or, without one, the map's largest horizontal
+  plane. `basalt_map_merge` merges four parts of fr3_long_office_household,
+  each seeing one side of the desks, into the whole office at 13.1 cm RMSE
+  against ground truth (docs/tum_rgbd_benchmark.md).
+- **Map-merge GIFs** (`scripts/render_map_merge_gif.py`): separate SLAM maps
+  growing in their own frames, then moved by the merge's transforms; with
+  `--cloud`, RGB-D colour clouds (`scripts/rgbd_map_cloud.py`). EuRoC's five
+  Machine Hall flights in one map at 6.2 cm RMSE (README), OpenLORIS-Scene's
+  office over three days at 4.6 cm.
+
+- **CUDA trainer: Mip-Splatting's 3D smoothing filter (opt-in,
+  `gsplat_train_cuda --filter3d 0.2`, `CudaTrainer::set_filter3d`).**
+  - **How.** Each gaussian's covariance gains `0.2 (z / fx)^2`, the finest
+    footprint a training camera gives it. Its opacity is scaled so its
+    integral stays the same. The filter is recomputed every 100 steps and
+    after each refine.
+  - **The step.** It renders and differentiates the filtered parameters,
+    then chains the gradients to the raw ones (ABI 18).
+  - **Output.** Renders, meshes and the written splat carry the filter.
+  - **Evaluation at other resolutions.** `--eval-zoom <dir>` scores the
+    held-out views on images at another resolution.
+  - **Mip-NeRF 360, nine scenes, at the training resolution.** Level:
+    27.89 dB on average against 27.86, with 0.4% more training time.
+  - **Trained on `images_4`, rendered at 2x** (`images_2`): bonsai
+    +1.38 dB and room +0.76 dB. At 0.5x (`images_8`) both gain
+    +0.36-0.38 dB (docs/gsplat_cuda.md, "Mip-Splatting's 3D filter").
+
+- **`visloc_vio_node` with the online mapper, through `ros2 bag play` on ROS 2
+  Jazzy** (EuRoC V1_01, 1.0x, Fast DDS):
+  - stereo: shutdown trajectory 0.0355 m (live `map_pose` 0.0385 m), the
+    same as the DDS-free replay;
+  - mono: 0.034 m;
+  - all 2,912 frames processed in both runs, no mapper packet dropped, and
+    `map -> odom` on `/tf` for every frame (ros2/visloc-ros2/README.md).
+
+- **`visloc_vio_node` runs monocular-inertial VIO (opt-in, `mono:=true`).**
+  - The calibration is cut to one camera (`mono_camera`, default 0), and only
+    `left/image_raw` is subscribed. Every image is a frame once IMU data
+    covers it (`VioInputs::new_mono`).
+  - With `mapper:=true` the online mapper runs on the one-camera rig.
+  - `SensorPacket::right` and `StereoPair::right` are now `Option`.
+  - `euroc_mapper_replay --mono` measures it on V1_01 (0.5 s averaged tilt):
+    VIO 0.088 m, live `map_pose` 0.086 m, shutdown trajectory 0.040 m, the
+    same as the demo's `--mono` run. No packet was dropped.
+
+- **GNSS fusion: an opt-in robust kernel on the VO factors**
+  (`GnssPoseGraphConfig::vo_robust`, `kitti_raw_gnss_vo_fusion --vo-robust
+  cauchy:<c>|huber:<delta>`). A corrupted VO step is down-weighted instead
+  of the correct fixes around it being rejected.
+  - KITTI raw 0027 (a truck crossing) with native fixes: batch 0.61 →
+    0.18 m (Cauchy 3), fixes rejected 17 → 0, window 0.87 → 0.19 m.
+  - With degraded GNSS it changes nothing to two decimals.
+  - On 0020 the max error grows (1.21 → 1.79 m), so it stays off by default
+    (docs/gnss_fusion.md, "Robust VO factors").
+
 - **Monocular-inertial online SLAM: `basalt_euroc_online_slam_demo --mono`.**
   The online mapper (loop closure, global BA) now runs on a one-camera rig.
   - **What changed.** The mapper's stereo stage, both batch
@@ -148,6 +231,37 @@ All notable changes to `visloc-rs` will be documented here.
   `--gpus all` (NVIDIA Container Toolkit) on the GPU, otherwise on Mesa's
   software Vulkan device (docs/docker.md).
 
+### Fixed
+
+- **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
+  2011_10_03_0042 the stereo VO stopped for good at pair ~326.
+  - **Cause.** `kabsch_n` converted its rotation with nalgebra's
+    `UnitQuaternion::from_matrix`, an iterative projection with no iteration
+    limit. On a ~180° rotation from a bad RANSAC sample it cycles forever.
+  - **Fix.** The same projection, capped at 1,000 iterations, falls back to
+    the matrix itself, which is already a rotation. Every converging case
+    gives the same bits as before.
+  - **Result.** The whole drive now runs (1,170 frames in 423 s), and its
+    first 260 poses are byte-identical. Its accuracy over the full highway
+    drive is poor (263 m ATE against OXTS); only the first 260 frames were
+    ever tuned.
+  - Every other unbounded `from_matrix` call in the workspace now goes
+    through `visloc_core::geometry::rotation_from_matrix` (next entry).
+
+- **No unbounded rotation projection left in the workspace**
+  (`visloc_core::geometry::rotation_from_matrix`).
+  - **What.** It replaces nalgebra's `UnitQuaternion::from_matrix` in P3P,
+    PnP, generalized PnP, two-view, `SO3::from_matrix`, gsplat-train's photo
+    alignment, the SfM debug alignment, the Basalt mapper's loop geometry and
+    six examples.
+  - **How.** It runs the same iteration with a cap of 1,000 and accepts the
+    result only if one more iteration leaves it unchanged, which is how the
+    unbounded loop stops. A converged result has the same bits as before:
+    a test checks 200 rotations and general matrices.
+  - **Otherwise.** It takes the nearest rotation from the SVD, which covers
+    the half turn and other cycles. A non-finite input, which also looped
+    forever, now returns a rotation.
+
 ### Changed
 
 - **Built-in SIFT defaults to the COLMAP-compatible extractor**
@@ -168,6 +282,22 @@ All notable changes to `visloc-rs` will be documented here.
   - The shim keeps the legacy extractor with `--SiftExtraction.use_gpu 1`.
   - Feature extraction is slower: CPU only, with more keypoints matched.
 
+- **Stereo VO: the motion-scale rescue no longer locks in on a slowdown**
+  (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on by
+  default; `--no-motion-scale-rescue-release` restores the old behaviour).
+  - **The bug.** The rescue judged each step against its own rescued steps.
+    During a real, sustained slowdown, every slower step counted as
+    "collapsed" and was scaled back up to the old speed, for good.
+  - **The fix.** Once a whole history window (20 pairs) has been rescued in a
+    row, the streak is handed back to the raw step lengths and the current
+    step is kept.
+  - **KITTI raw, pure-Rust deep frontend:**
+    - 0020: VO 30.2 → 10.2 m, GNSS-fused 24.4 → 4.8 m;
+    - odometry 09: VO 122.3 → 18.5 m;
+    - 0027 and odometry 01's 260-frame highway slice, which the rescue was
+      tuned on, are byte-identical.
+  - `online_slam_stereo_vo_kitti_demo` also gains
+    `--motion-scale-rescue-max-inlier-ratio` (docs/gnss_fusion.md).
 
 - **A manual run of the release workflow takes its release notes from its
   branch's `CHANGELOG.md`** (normally `main`) instead of the tag's, so a

@@ -129,6 +129,10 @@ pub struct MergedMap {
     pub landmark_ids: HashMap<LandmarkId, LandmarkId>,
     /// Landmarks of the other map fused into base landmarks.
     pub fused_landmarks: usize,
+    /// Merged camera id of each camera of the other map: the same id when
+    /// the base map has that camera, a new one when it has another camera
+    /// under that id (another calibration of the rig).
+    pub camera_ids: HashMap<CameraId, CameraId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +146,9 @@ pub enum MapMergeError {
         needed: usize,
     },
     /// A camera of the other map is missing from the base map or differs
-    /// from it.
+    /// from it. No longer returned by [`merge_maps`], which adds such a
+    /// camera under a new id ([`MergedMap::camera_ids`]); kept for callers
+    /// that match on it.
     CameraMismatch { camera_id: CameraId },
 }
 
@@ -487,16 +493,30 @@ pub fn merge_maps(
     base_from_other: &SE3,
     config: &MapMergeConfig,
 ) -> Result<MergedMap, MapMergeError> {
-    let mut camera_ids = other.cameras.keys().copied().collect::<Vec<_>>();
-    camera_ids.sort_unstable();
-    for camera_id in camera_ids {
-        if !base
-            .cameras
-            .get(&camera_id)
-            .is_some_and(|camera| same_camera(camera, &other.cameras[&camera_id]))
-        {
-            return Err(MapMergeError::CameraMismatch { camera_id });
-        }
+    // Cameras: the base map's when they are the same; another calibration
+    // (another day's of the rig) is added under a new id.
+    let mut map = base.clone();
+    let mut other_camera_ids = other.cameras.keys().copied().collect::<Vec<_>>();
+    other_camera_ids.sort_unstable();
+    let mut camera_ids = HashMap::with_capacity(other_camera_ids.len());
+    for camera_id in other_camera_ids {
+        let camera = &other.cameras[&camera_id];
+        let merged_id = match map.cameras.get(&camera_id) {
+            Some(existing) if same_camera(existing, camera) => camera_id,
+            None => camera_id,
+            Some(_) => map
+                .cameras
+                .iter()
+                .find(|(_, existing)| same_camera(existing, camera))
+                .map(|(&id, _)| id)
+                .unwrap_or_else(|| map.cameras.keys().max().map_or(1, |id| id + 1)),
+        };
+        map.cameras.entry(merged_id).or_insert_with(|| {
+            let mut added = camera.clone();
+            added.id = merged_id;
+            added
+        });
+        camera_ids.insert(camera_id, merged_id);
     }
 
     let mut other_keyframe_ids = other.keyframes.keys().copied().collect::<Vec<_>>();
@@ -540,7 +560,6 @@ pub fn merge_maps(
         })
     };
     let rotation = base_from_other.rotation.to_rotation_matrix();
-    let mut map = base.clone();
     let mut descriptors = base_descriptors.clone();
     for landmark in &other_landmarks {
         let id = landmark_ids[&landmark.id];
@@ -575,6 +594,10 @@ pub fn merge_maps(
         let keyframe = &other.keyframes[id];
         let mut frame = keyframe.frame.clone();
         frame.id = keyframe_ids[id];
+        frame.camera_id = camera_ids
+            .get(&frame.camera_id)
+            .copied()
+            .unwrap_or(frame.camera_id);
         frame.pose = frame.pose.map(|pose| Pose {
             world_to_camera: pose.world_to_camera.compose(&other_from_base),
         });
@@ -604,6 +627,10 @@ pub fn merge_maps(
             let mut stereo = stereo.clone();
             stereo.frame_id = frame_id;
             stereo.landmark_id = landmark_id;
+            stereo.right_camera_id = camera_ids
+                .get(&stereo.right_camera_id)
+                .copied()
+                .unwrap_or(stereo.right_camera_id);
             map.stereo_observations.push(stereo);
         }
     }
@@ -614,6 +641,7 @@ pub fn merge_maps(
         keyframe_ids,
         landmark_ids,
         fused_landmarks: fused.len(),
+        camera_ids,
     })
 }
 
@@ -984,23 +1012,52 @@ mod tests {
     }
 
     #[test]
-    fn maps_of_different_cameras_do_not_merge() {
+    fn another_calibration_is_added_under_a_new_camera_id() {
         let s = sessions();
         let mut other = s.other.0.clone();
         other.cameras.get_mut(&CAMERA_ID).expect("camera").params[0] += 1.0;
+        let merged = merge_maps(
+            &s.base.0,
+            &s.base.1,
+            &other,
+            &s.other.1,
+            &s.base_from_other,
+            &MapMergeConfig::default(),
+        )
+        .expect("merged");
+        let new_id = merged.camera_ids[&CAMERA_ID];
+        assert_ne!(new_id, CAMERA_ID);
+        assert_eq!(merged.map.cameras[&CAMERA_ID], s.base.0.cameras[&CAMERA_ID]);
         assert_eq!(
-            merge_maps(
-                &s.base.0,
-                &s.base.1,
-                &other,
-                &s.other.1,
-                &s.base_from_other,
-                &MapMergeConfig::default(),
-            )
-            .err(),
-            Some(MapMergeError::CameraMismatch {
-                camera_id: CAMERA_ID
-            })
+            merged.map.cameras[&new_id].params,
+            other.cameras[&CAMERA_ID].params
         );
+        assert_eq!(merged.map.cameras[&new_id].id, new_id);
+        for (other_id, merged_id) in &merged.keyframe_ids {
+            assert_eq!(other.keyframes[other_id].frame.camera_id, CAMERA_ID);
+            assert_eq!(merged.map.keyframes[merged_id].frame.camera_id, new_id);
+        }
+        for keyframe in s.base.0.keyframes.values() {
+            assert_eq!(
+                merged.map.keyframes[&keyframe.frame.id].frame.camera_id,
+                CAMERA_ID
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_camera_keeps_its_id() {
+        let s = sessions();
+        let merged = merge_maps(
+            &s.base.0,
+            &s.base.1,
+            &s.other.0,
+            &s.other.1,
+            &s.base_from_other,
+            &MapMergeConfig::default(),
+        )
+        .expect("merged");
+        assert_eq!(merged.camera_ids[&CAMERA_ID], CAMERA_ID);
+        assert_eq!(merged.map.cameras.len(), 1);
     }
 }

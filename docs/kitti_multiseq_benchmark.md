@@ -105,6 +105,15 @@ Both fixes are measured **bit-identical** on KITTI seq00 and EuRoC MH_03
 (the gates never arm there) — they only ever engage on the failure they
 target.
 
+Since 2026-11-17 the frontend default also breaks the lock-in itself
+(`motion_scale_rescue_release_full_window`, on). Once the rescue has rescued a
+whole history window in a row, the streak is handed back to the raw step
+lengths. On the pure-Rust deep frontend (`online_slam_stereo_vo_kitti_demo`,
+without the inlier-ratio gate) this takes seq09 (raw 2011_09_30_0033) from
+122.3 to 18.5 m open-loop ATE against OXTS, and leaves seq01's 260-frame
+tuning slice byte-identical ([gnss_fusion.md](gnss_fusion.md), negative
+results). The table above uses the 0.45 gate and was not re-run.
+
 ### 3. seq02 — candidate recall exists; acceptance policy is the open problem
 
 seq02 has genuine loops (the final ~470 frames re-traverse two earlier zones).

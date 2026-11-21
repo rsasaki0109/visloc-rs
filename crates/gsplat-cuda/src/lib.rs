@@ -177,6 +177,10 @@ pub struct StepParams {
     /// The dense optimizer then moves 20 bytes per element instead of 28.
     /// A step that asks for the other precision converts them.
     pub moments_bf16: u32,
+    /// Render and differentiate through Mip-Splatting's 3D filter
+    /// ([`CudaGsplat::compute_filter3d`], needed again after the scene
+    /// changes); the optimizer still steps the raw parameters (0 = off).
+    pub filter3d: u32,
 }
 
 /// Settings of [`CudaGsplat::tsdf_surface`] (`GscTsdfParams` in the CUDA
@@ -286,6 +290,9 @@ type BackwardFn = unsafe extern "C" fn(
 type SetImagesFn = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const u32) -> c_int;
 type TrainStepFn = unsafe extern "C" fn(*mut c_void, *const StepParams) -> c_int;
 type LossGradFn = unsafe extern "C" fn(*mut c_void, u32, c_float, *mut c_float) -> c_int;
+type ComputeFilter3dFn =
+    unsafe extern "C" fn(*mut c_void, c_int, *const GscCamera, c_float) -> c_int;
+type Filter3dApplyFn = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 type TakeLossFn = unsafe extern "C" fn(
     *mut c_void,
     *mut c_double,
@@ -484,6 +491,8 @@ struct Api {
     set_images: SetImagesFn,
     train_step: TrainStepFn,
     loss_grad: LossGradFn,
+    compute_filter3d: ComputeFilter3dFn,
+    filter3d_apply: Filter3dApplyFn,
     take_loss: TakeLossFn,
     set_depth_priors: SetDepthPriorsFn,
     refine_stats: RefineStatsFn,
@@ -549,7 +558,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 17;
+    pub const ABI_VERSION: u32 = 18;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -593,6 +602,8 @@ impl CudaGsplat {
                 set_images: symbol(&library, "visloc_gsplat_cuda_set_images", path)?,
                 train_step: symbol(&library, "visloc_gsplat_cuda_train_step", path)?,
                 loss_grad: symbol(&library, "visloc_gsplat_cuda_loss_grad", path)?,
+                compute_filter3d: symbol(&library, "visloc_gsplat_cuda_compute_filter3d", path)?,
+                filter3d_apply: symbol(&library, "visloc_gsplat_cuda_filter3d_apply", path)?,
                 take_loss: symbol(&library, "visloc_gsplat_cuda_take_loss", path)?,
                 set_depth_priors: symbol(&library, "visloc_gsplat_cuda_set_depth_priors", path)?,
                 refine_stats: symbol(&library, "visloc_gsplat_cuda_get_refine_stats", path)?,
@@ -1485,6 +1496,36 @@ impl CudaGsplat {
             unsafe { (self.api.apply_actions)(self.ctx(), actions.as_ptr(), seed, &mut n_after) };
         self.check(code)?;
         Ok(usize::try_from(n_after).unwrap_or(0))
+    }
+
+    /// Mip-Splatting's 3D smoothing filter for the current gaussians: each
+    /// takes the variance `var_scale (z / fx)^2` of the finest footprint
+    /// any of `cameras` gives it (z its depth in a camera it lies in front of
+    /// and projects within 1.15x of; a gaussian none sees takes the largest
+    /// such ratio). Pinhole projection, the lens left out. Valid until the
+    /// scene changes ([`set_scene`](Self::set_scene),
+    /// [`apply_actions`](Self::apply_actions)).
+    pub fn compute_filter3d(
+        &mut self,
+        cameras: &[GscCamera],
+        var_scale: f32,
+    ) -> Result<(), GsplatCudaError> {
+        let count = c_int::try_from(cameras.len())
+            .map_err(|_| GsplatCudaError::Input("too many cameras".into()))?;
+        // SAFETY: `cameras` holds `count` cameras.
+        let code =
+            unsafe { (self.api.compute_filter3d)(self.ctx(), count, cameras.as_ptr(), var_scale) };
+        self.check(code)
+    }
+
+    /// Put the 3D-filtered scales and opacities in the scene (`on`), so
+    /// renders and [`scene`](Self::scene) see the filtered gaussians, or the
+    /// raw ones back. Needs [`compute_filter3d`](Self::compute_filter3d)
+    /// since the scene last changed.
+    pub fn set_filter3d_applied(&mut self, on: bool) -> Result<(), GsplatCudaError> {
+        // SAFETY: plain call on the live context.
+        let code = unsafe { (self.api.filter3d_apply)(self.ctx(), on as c_int) };
+        self.check(code)
     }
 
     /// GPU milliseconds of each stage of the last render, backward or step

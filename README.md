@@ -22,6 +22,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/map_merge_kitti.gif" alt="Three KITTI raw drives through one residential district, recorded on two days, each mapped by its own stereo-inertial SLAM session in its own frame, then merged one at a time into one map of the district, and a drive at street level along a street two of them share, past parked cars and houses." width="720"><br>
+  <sub>Multi-session mapping: three <a href="https://www.cvlibs.net/datasets/kitti/raw_data.php">KITTI raw</a> drives (4.9 km, 30 Sep and 3 Oct 2011), each mapped on its own, merged by <code>basalt_map_merge</code> into one district map: <b>1.1 m RMSE</b> against the OXTS ground truth over all three, about the base drive's own SLAM error. Each covers its own part of the district and they share a few streets, so only the merge makes the whole. Colours from the colour cameras, brightened for display. Data CC BY-NC-SA 3.0, and so is this GIF. <a href="docs/basalt_map_localization.md#across-days-three-kitti-raw-drives">Details</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,583 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, streets and parked cars included, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,583 camera poses &rarr; 4.7M-gaussian splat &rarr; 5.9M-triangle mesh in 2.5 h, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
@@ -97,7 +102,13 @@ VIO.
 
 ## Try it
 
-Requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
+**In the browser, nothing to install:** [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/)
+(drop your photos, get camera poses and points, export a COLMAP dataset; the
+photos never leave the device), [VIO](https://rsasaki0109.github.io/visloc-rs/slam/)
+(live on a phone, or on a recorded walk) and a
+[Gaussian splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+
+Locally: requires Rust 1.88+ only. Datasets are external inputs and are not bundled.
 
 ```bash
 # Photos -> camera poses, Gaussian splat and mesh (GPU via wgpu)
@@ -212,6 +223,8 @@ Configuration, caveats, the ablation and the command that reproduces the
 table: [EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
 
 ### Run the SfM demo
+
+To try it without installing anything, the [browser SfM](https://rsasaki0109.github.io/visloc-rs/sfm/) runs the same SIFT, matching, verification and incremental mapper on your photos in WebAssembly (WebGPU where available).
 
 Reconstruct an unordered photo set in one command — SIFT features estimated
 in-process, COLMAP text model (`cameras.txt`, `images.txt`, `points3D.txt`)
@@ -424,6 +437,12 @@ cargo run --release --features image-io --example deep_localization_demo -- \
 | KITTI revisit scanner | `python scripts/run_kitti_deep_vo_revisit_smoke.py` | Public KITTI 00 revisit smoke (downloads start/revisit slices) |
 | Full local quality gate | `scripts/check.sh` | `fmt` + `clippy` + `test` + `doc` in one command |
 
+**A photo with no EXIF?** `localize_with_unknown_focal` estimates the focal
+length with P4Pf while localizing. On the 38 ETH3D courtyard photos (leave one
+out) it localizes 36 at 1.0% centre error, the same as knowing the focal
+length, where a guessed focal length gives poses 3.5 scene radii off
+([details](docs/unknown_focal_localization.md)).
+
 ### Save a VI-SLAM map and localize against it
 
 The stereo-inertial SLAM demo can save its final map, and a second sequence of
@@ -462,6 +481,11 @@ robot's wheel odometry instead of the VIO; see
 one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).
+
+<p align="center">
+  <img src="docs/assets/hero_map_merge.gif" alt="Five SLAM maps of the EuRoC Machine Hall, MH_01 to MH_05, first growing side by side, each in its own world frame (MH_04's and MH_05's are turned about 112 and 115 degrees from the others). Then they are merged one at a time: each slides over the map so far in its own frame, visibly off, and turns and moves by the transform basalt_map_merge found until its trajectory and landmarks lie on the others. The merged map then swings round." width="720"><br>
+  <sub>Five flights of the Machine Hall, each mapped by its own SLAM session in its own frame, merged by <code>basalt_map_merge</code> into one map of 4,450 keyframe images and 47,796 landmarks. Placed by MH_01's ground-truth alignment alone, the five flights' keyframes are at <b>6.2 cm RMSE</b> against ground truth (MH_01–03 1.5–2.9 cm; MH_04 12.3 cm, with 53 of its 706 keyframes localized; MH_05 8.2 cm). <a href="docs/basalt_map_localization.md#lifelong-use-appending-each-session">Details</a>.</sub>
+</p>
 
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
@@ -527,7 +551,8 @@ boundaries, feature overview, full demos table, minimal Rust example, repository
 layout, roadmap, further-reading index, and complete benchmark snapshot that
 previously lived here.
 
-- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and the [VIO in your browser](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere).
+- **Choose and run a demo:** [demo index](docs/demo_strategy.md), [public COLMAP map-reuse demo](docs/public_data_demo.md), [GNSS-prior tracking](docs/gnss_demo.md), and in your browser the [photo SfM](https://rsasaki0109.github.io/visloc-rs/sfm/), the [VIO](https://rsasaki0109.github.io/visloc-rs/slam/) (live on a phone, or on a recorded walk anywhere) and the [splat viewer](https://rsasaki0109.github.io/visloc-rs/splat/).
+- **Reproduce a result:** [reproducibility contract](docs/reproducibility.md) (what is bit-identical, what is not, and the rules new code follows).
 - **Understand supported configurations:** [feature matrix](docs/feature_matrix.md), [API stability](docs/api_stability.md), [COLMAP compatibility](docs/colmap_compatibility.md), and [migration notes](docs/migration.md).
 - **Inspect VO and loop-closure evidence:** [KITTI multi-sequence](docs/kitti_multiseq_benchmark.md), [KITTI loop closure](docs/kitti_loop_closure_benchmark.md), [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md), [TUM RGB-D](docs/tum_rgbd_benchmark.md), and [tracking persistence](docs/tracking_persistence_benchmark.md).
 - **Inspect VI-SLAM (Basalt Rust port) evidence:** [VI-SLAM benchmark details](docs/vi_slam_benchmarks.md), [localizing against a saved map](docs/basalt_map_localization.md), [faithful-port final closure report](work/m11_basalt_faithful_port_final_closure_20260914.md), and [upstream oracle / provenance](benchmarks/basalt/README.md).

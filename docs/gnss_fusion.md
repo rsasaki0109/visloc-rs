@@ -127,6 +127,12 @@ Lower-level pieces, usable on their own:
   KITTI raw OXTS to ENU positions / IMU poses / GNSS fixes, and the raw IMU → camera calibration chain.
 - `GnssVoFusionConfig::gate_at_fix_accuracy` (opt-in, default off) — gate each
   fix at its own accuracy rather than the shared one; see "Results on KITTI raw".
+- `GnssPoseGraphConfig::vo_robust` (`config.optimizer.vo_robust`, opt-in,
+  default `RobustKernel::None`) — a Huber or Cauchy kernel on the VO
+  relative-pose factors, applied by IRLS in every LM stage, so a corrupted VO
+  step is down-weighted instead of correct fixes being rejected; see "Robust
+  VO factors". `GnssPoseGraph::relative_squared_residuals` reports the VO
+  residuals.
 
 Choose the alignment/scale model to match the VO:
 
@@ -297,7 +303,8 @@ What this shows:
   [`kitti_multiseq_benchmark.md`](kitti_multiseq_benchmark.md)) corrupts the
   VO rotation. Even with near-perfect native fixes, 17 of those frames' fixes
   are rejected and the error peaks at 4.9 m (0.61 m RMS against 0.09–0.16 m
-  on the other drives).
+  on the other drives). The opt-in robust VO kernel fixes this case (next
+  section).
 - **A VO frontend lock-in on deceleration.** With the default motion-scale
   rescue, the deep frontend on 0020 clamps every step to 1.57 m from frame
   ~790 on while the car slows to 0.7–1 m per frame (raw PnP had it right). Each
@@ -308,9 +315,52 @@ What this shows:
   `--motion-scale-rescue-min-translation-ratio 0` turns off that collapse
   branch. It is used for all three drives above. On 0027 the default run
   fired no rescue at all, so its VO is unchanged; 0018 was run only with the
-  flag. The frontend default is not changed here.
+  flag.
+  - **Fixed in the frontend default (2026-11-17).** The rescue now releases
+    a streak once it has rescued a whole history window in a row
+    (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on
+    by default). At that point the history it judges against holds only its
+    own outputs.
+  - With the new default, 0020 rescues 21 pairs instead of 308: VO 30.2 →
+    10.2 m (9.8 m with the rescue off), fused 24.4 → 4.8 m.
+  - Odometry 09 (raw 0033) had the same lock-in, 1,312 pairs in a row: VO
+    122.3 → 18.5 m (length 2,449 → 1,722 m against 1,705 m), fused 81.5 →
+    4.7 m.
+  - Unchanged, byte for byte: 0027, and KITTI 01's 260-frame highway slice
+    that the rescue was tuned on (its longest streak is 17 pairs).
+  - Judging against the raw step lengths instead fixed 0020 too, but lost the
+    01 slice (5.88 → 10.34 m). There PnP is consistently short, and the
+    rescue has to hold the old scale.
+  - The table above keeps the flag, as measured.
 - **Levelling the VO with gravity (yaw-only alignment) does not help batch**
   (±0.04 m), only the sliding window.
+
+### Robust VO factors (`vo_robust`, 2026-11-17)
+
+`--vo-robust cauchy:<c>|huber:<delta>` (`GnssPoseGraphConfig::vo_robust`)
+puts a robust kernel on the VO factors' whitened squared residual. It is the
+same IRLS as the GNSS kernel, in every LM stage, including GNC's levels and
+the final refinement. Same VO runs as above (0020 with the rescue off, 0027),
+batch / window ATE in metres:
+
+| Drive, GNSS | Plain | Cauchy c = 3 | Cauchy c = 5 | Huber δ = 3 |
+| --- | ---: | ---: | ---: | ---: |
+| 0027, native fixes | 0.61 / 0.87 (17 fixes rejected, max 4.91) | **0.18 / 0.19** (0 rejected, max 3.59) | 0.17 / 0.19 (0, max 3.55) | 0.23 / 0.58 (0, max 2.46) |
+| 0020, native fixes | 0.16 / 0.17 (3 rejected, max 1.21) | 0.15 / 0.16 (0, max 1.79) | 0.15 / 0.15 (0, max 1.71) | 0.16 / 0.17 (3, max 1.21) |
+| 0027, degraded, seeds 1–3 mean | 4.08 / 4.42 | 4.08 / 4.42 | 4.08 / 4.42 | 4.08 / 4.42 |
+| 0020, degraded, seeds 1–3 mean | 4.76 / 6.05 | 4.76 / 6.05 | 4.76 / 6.05 | 4.76 / 6.05 |
+
+- **It fixes the truck crossing.** With near-perfect fixes, 0027 goes from
+  0.61 to 0.18 m, and no correct fix is rejected any more.
+- **With degraded GNSS nothing changes** to two decimals. The receiver error
+  (2 m, correlated over 45 s) dwarfs the VO residuals, so no VO factor
+  reaches the kernel's knee.
+- **On 0020 the max error grows** (1.21 → 1.79 m with Cauchy 3), although the
+  RMS improves slightly. Huber 3 leaves 0020 as it is.
+- It stays off by default.
+- `tests/gnss_fusion.rs::robust_vo_factors_absorb_a_corrupted_vo_step`
+  corrupts one synthetic VO step (6° yaw and 5 m). Plain fusion gives 1.58 m,
+  with Cauchy 3 it gives 0.77 m.
 
 ### Reproduce
 
@@ -359,7 +409,8 @@ seed is the default `GnssBootstrapConfig::seed`.
   elsewhere, outliers do not pull the trajectory (vs plain least squares),
   dropout bridged, monocular scale recovered, sliding window,
   unobservable-alignment / bad-timestamp errors, and a 10 Hz camera / 1 Hz
-  receiver drive where only `gate_at_fix_accuracy` flags a 12 m jump.
+  receiver drive where only `gate_at_fix_accuracy` flags a 12 m jump, and
+  one corrupted VO step that `vo_robust` absorbs.
 - `crates/io/src/kitti_raw_gnss.rs` unit tests: WGS84/ECEF reference values,
   ENU axes, the OXTS roll/pitch/yaw convention and meridian convergence, GNSS
   fix conversion, and the raw calibration parser and IMU → rectified-camera
@@ -374,8 +425,11 @@ seed is the default `GnssBootstrapConfig::seed`.
   conservative heuristics, not a colored-noise model. On KITTI raw with
   simulated 45 s-correlated errors this caps the gain over the raw fixes
   (seed means 6.0–6.6 m → 3.4–4.3 m, not the synthetic 5×).
-- Robustness covers GNSS only: a VO failure (dynamic object, frontend
-  lock-in) is trusted, and correct fixes near it are rejected instead.
+- Robustness covers GNSS only by default: a VO failure (dynamic object,
+  frontend lock-in) is trusted, and correct fixes near it are rejected
+  instead. The opt-in `vo_robust` kernel handles a short failure such as
+  0027's truck crossing. A VO that is wrong for hundreds of frames, such as
+  the rescue lock-in, is too consistent for a kernel to reject.
 - The VO noise model is a hand-set per-step sigma; VO covariances from the
   front end are not consumed yet, and the VO factors are only between
   consecutive frames (no loop closures inside this graph).

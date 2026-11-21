@@ -28,7 +28,7 @@ use visloc_core::types::{
 };
 use visloc_vision::features::{FeatureExtractor, FeatureSet};
 use visloc_vision::matching::{BruteForceMatcher, Matcher};
-use visloc_vision::pnp::Correspondence2D3D;
+use visloc_vision::pnp::{estimate_pose_with_focal, Correspondence2D3D, P4PfRansacConfig};
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 
 pub use binary_index::{BinaryLandmarkIndex, BinaryMatchGates, PackedDescriptors};
@@ -72,6 +72,18 @@ impl Default for LocalizationConfig {
             max_reprojection_error: None,
         }
     }
+}
+
+/// Result of [`LocalizationPipeline::localize_with_unknown_focal`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnknownFocalLocalization {
+    /// The localization, gated like every other `localize_*` result, with the
+    /// pose estimated under [`Self::camera`].
+    pub result: LocalizationResult,
+    /// The query camera with the focal length P4Pf estimated (square pixels,
+    /// the query camera's principal point), or `None` when P4Pf found no
+    /// estimate.
+    pub camera: Option<Camera>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1210,6 +1222,67 @@ where
         correspondence_set: CorrespondenceSet,
     ) -> LocalizationResult {
         self.estimate_and_gate(camera, correspondence_set, None)
+    }
+
+    /// Localize a query whose focal length is unknown, such as a photo with
+    /// no EXIF or a cropped one: the 2D-3D correspondences are built as in
+    /// [`Self::localize_with_descriptor_store`], P4Pf RANSAC
+    /// ([`estimate_pose_with_focal`]) estimates the focal length from them,
+    /// and the configured pose estimator and quality gate then run with that
+    /// focal length, so the result is gated exactly like the known-focal path.
+    ///
+    /// The focal length in `query.camera` is ignored; its size and principal
+    /// point (`cx`, `cy`, or the image centre when it has no pinhole
+    /// intrinsics) are kept. Assumes square pixels and no lens distortion.
+    pub fn localize_with_unknown_focal(
+        &self,
+        query: &QueryImage,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        focal_config: &P4PfRansacConfig,
+    ) -> UnknownFocalLocalization {
+        let correspondence_set = match CorrespondenceBuilder::with_candidate_selector(
+            self.matcher.clone(),
+            self.candidate_selector.clone(),
+        )
+        .build(query, map, descriptor_store)
+        {
+            Ok(set) => set,
+            Err(error) => {
+                return UnknownFocalLocalization {
+                    result: result_from_correspondence_error(error),
+                    camera: None,
+                };
+            }
+        };
+        let (width, height) = (query.camera.width, query.camera.height);
+        let (cx, cy) = query.camera.intrinsics().map_or(
+            (width as f64 / 2.0, height as f64 / 2.0),
+            |(_, _, cx, cy)| (cx, cy),
+        );
+        let Some(report) = estimate_pose_with_focal(
+            &correspondence_set.correspondences,
+            nalgebra::Point2::new(cx, cy),
+            focal_config,
+        ) else {
+            return UnknownFocalLocalization {
+                result: LocalizationResult::failure(
+                    LocalizationFailureReason::PoseEstimationFailed {
+                        correspondence_count: correspondence_set.correspondences.len(),
+                    },
+                    correspondence_set.candidate_landmark_count,
+                    correspondence_set.match_count,
+                    correspondence_set.correspondences.len(),
+                ),
+                camera: None,
+            };
+        };
+        let focal = report.estimate.focal_px;
+        let camera = Camera::pinhole(query.camera.id, width, height, focal, focal, cx, cy);
+        UnknownFocalLocalization {
+            result: self.estimate_and_gate(&camera, correspondence_set, None),
+            camera: Some(camera),
+        }
     }
 
     /// Shared tail of both `run_localization` (appearance-global) and

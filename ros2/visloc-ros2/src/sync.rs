@@ -42,7 +42,8 @@ pub struct StereoPair<T> {
     pub stamp_ns: i64,
     pub right_stamp_ns: i64,
     pub left: T,
-    pub right: T,
+    /// `None` for a monocular frame ([`VioInputs::new_mono`]).
+    pub right: Option<T>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +143,7 @@ impl<T> StereoSynchronizer<T> {
             stamp_ns: left_ns,
             right_stamp_ns: right_ns,
             left,
-            right,
+            right: Some(right),
         })
     }
 }
@@ -241,7 +242,8 @@ pub struct SensorPacket<T> {
     /// Original left-image header stamp (used for output headers).
     pub header_stamp_ns: i64,
     pub left: T,
-    pub right: T,
+    /// The right image; `None` in a monocular stream.
+    pub right: Option<T>,
     pub imu: Vec<ImuSample>,
     pub initialization_imu: Option<ImuSample>,
 }
@@ -269,6 +271,8 @@ pub struct VioInputs<T> {
     last_released_ns: Option<i64>,
     frames_dropped_behind: u64,
     pairs: u64,
+    /// Monocular stream: every left image is a frame, without pairing.
+    mono: bool,
 }
 
 impl<T> VioInputs<T> {
@@ -288,16 +292,44 @@ impl<T> VioInputs<T> {
             last_released_ns: None,
             frames_dropped_behind: 0,
             pairs: 0,
+            mono: false,
         }
     }
 
+    /// A monocular input side: each [`Self::push_left`] image is a frame
+    /// on its own (`SensorPacket::right` is `None`), and
+    /// [`Self::push_right`] is ignored.
+    pub fn new_mono(max_frames: usize, imu_capacity: usize, cam_time_offset_ns: i64) -> Self {
+        Self {
+            mono: true,
+            ..Self::new(0, 1, max_frames, imu_capacity, cam_time_offset_ns)
+        }
+    }
+
+    /// True for a [`Self::new_mono`] input side.
+    pub const fn is_mono(&self) -> bool {
+        self.mono
+    }
+
     pub fn push_left(&mut self, stamp_ns: i64, image: T) {
+        if self.mono {
+            self.enqueue(StereoPair {
+                stamp_ns,
+                right_stamp_ns: stamp_ns,
+                left: image,
+                right: None,
+            });
+            return;
+        }
         if let Some(pair) = self.sync.push_left(stamp_ns, image) {
             self.enqueue(pair);
         }
     }
 
     pub fn push_right(&mut self, stamp_ns: i64, image: T) {
+        if self.mono {
+            return;
+        }
         if let Some(pair) = self.sync.push_right(stamp_ns, image) {
             self.enqueue(pair);
         }
@@ -404,11 +436,11 @@ mod tests {
         let pair = sync.push_right(100, "r100").unwrap();
         assert_eq!(
             (pair.stamp_ns, pair.left, pair.right),
-            (100, "l100", "r100")
+            (100, "l100", Some("r100"))
         );
         assert!(sync.push_right(200, "r200").is_none());
         let pair = sync.push_left(200, "l200").unwrap();
-        assert_eq!((pair.left, pair.right), ("l200", "r200"));
+        assert_eq!((pair.left, pair.right), ("l200", Some("r200")));
         assert_eq!(sync.pending(), (0, 0));
         assert_eq!(sync.dropped(), 0);
     }
@@ -420,7 +452,7 @@ mod tests {
         sync.push_right(103, "r103");
         let pair = sync.push_left(100, "l100").unwrap();
         // |103-100| = 3 < |96-100| = 4.
-        assert_eq!(pair.right, "r103");
+        assert_eq!(pair.right, Some("r103"));
         assert_eq!(pair.stamp_ns, 100);
         assert_eq!(pair.right_stamp_ns, 103);
         // r96 is older than the match: discarded.
@@ -514,6 +546,31 @@ mod tests {
         assert_eq!(stamps.first(), Some(&55));
         assert_eq!(stamps.last(), Some(&150));
         assert_eq!(stamps.len(), 20);
+    }
+
+    #[test]
+    fn mono_inputs_release_every_left_image_without_pairing() {
+        let mut inputs = VioInputs::new_mono(8, 1000, 0);
+        assert!(inputs.is_mono());
+        for ns in (0..=200).step_by(5) {
+            inputs.push_imu(imu(ns));
+        }
+        inputs.push_left(50, "l50");
+        // Right images are ignored, matched or not.
+        inputs.push_right(50, "r50");
+        inputs.push_right(77, "r77");
+        inputs.push_left(150, "l150");
+        let first = inputs.pop_ready().unwrap();
+        assert_eq!((first.stamp_ns, first.left, first.right), (50, "l50", None));
+        assert_eq!(first.initialization_imu.unwrap().timestamp_ns, 50);
+        let second = inputs.pop_ready().unwrap();
+        assert_eq!(
+            (second.stamp_ns, second.left, second.right),
+            (150, "l150", None)
+        );
+        assert_eq!(second.imu.first().unwrap().timestamp_ns, 55);
+        assert!(inputs.pop_ready().is_none());
+        assert_eq!(inputs.stats().pairs, 2);
     }
 
     #[test]

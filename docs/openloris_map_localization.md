@@ -117,6 +117,82 @@ The merged map (858 keyframe images, 9,158 landmarks) covers both
 directions. It is in A's frame and is scored with A's alignment to the
 ground truth.
 
+### Five sessions in one map
+
+The maps of office1-1, 1-2, 1-3, 1-6 and 1-7 (rebuilt 2026-11-18, raw
+images; two evenings three days apart, the later one with furniture
+moved) merge into one map in office1-2's frame, added in the order
+office1-7, 1-3, 1-1, 1-6:
+
+| Added map | Its frame vs the base | Keyframes localized | Residual |
+|---|---|---|---|
+| office1-7 | −9.6°, 37 cm | 99 of 422 | 1.7 cm |
+| office1-3 | −167.4°, 69 cm | 15 of 170 | 1.8 cm |
+| office1-1 | 11.0°, 350 cm | 66 of 332 | 0.6 cm |
+| office1-6 | 9.2°, 350 cm | 179 of 372 | 1.8 cm |
+
+The merged map holds 1,652 keyframe images and 16,913 landmarks. Aligned to
+the ground truth by office1-2's keyframes alone, the five sessions' fisheye1
+keyframe centres are at 4.5 cm RMSE (11.2 cm max): office1-2 1.6, 1-7 5.7,
+1-3 2.5, 1-1 3.4 and 1-6 6.0 cm, against 1.6, 4.9, 0.9, 2.8 and 3.7 cm
+for each session's SLAM aligned on its own.
+
+The order matters. Each added map makes the next registration harder, as
+most of its landmarks stay apart from the base's look-alikes (35–111 are
+fused per session) and the ratio test then rejects matches where both
+were seen: office1-7 localizes 99 keyframes in office1-2's map alone but
+7 once office1-3 is merged in, and none in the map of office1-1, 1-3 and 1-2
+merged in that order. Of the 120 orders of the five maps, four register all
+of them. Without local contrast equalization
+([below](#across-lighting-local-contrast-equalization)), office1-4 and 1-5
+(daylight, dawn) registered in none of the maps tried: office1-1's,
+office1-2's (office1-4) or office1-6's (office1-5), and the four-session
+map of office1-1, 1-3, 1-2 and 1-6.
+
+With local contrast equalization (every map rebuilt with
+`--equalize-local-contrast`, as merged maps must share it), office1-4's
+daylight run registers too, in office1-2's map with `--min-inliers 10`
+(24 of its 242 keyframes; none at the default 15). Six sessions over three
+days then merge in office1-2's frame, adding office1-3, 1-4, 1-1, 1-6 and
+1-7 in that order: 1,894 keyframe images and 25,307 landmarks, at 4.6 cm
+RMSE (9.0 cm max) against the ground truth by office1-2's alignment alone.
+office1-4 is at 4.3 cm (3.9 cm aligned on its own). office1-5 (dawn) still
+registers in none of the six maps.
+
+| Added map (equalized) | Its frame vs the base | Keyframes localized | Residual | In the merged frame (RMSE) |
+|---|---|---|---|---|
+| office1-3 | −167.3°, 69 cm | 30 of 170 | 2.8 cm | 2.6 cm |
+| office1-4 | −151.3°, 43 cm | 24 of 242 | 3.3 cm | 4.3 cm |
+| office1-1 | 11.0°, 350 cm | 125 of 332 | 3.7 cm | 3.7 cm |
+| office1-6 | 9.4°, 354 cm | 202 of 372 | 2.2 cm | 5.6 cm |
+| office1-7 | −10.2°, 41 cm | 187 of 422 | 5.2 cm | 6.2 cm |
+
+`scripts/rgbd_map_cloud.py --openloris` places the D435i's colour images and
+aligned depth by a map's keyframe poses, and
+`scripts/render_map_merge_gif.py --cloud` animates the merge with those
+colour clouds:
+
+```bash
+# Maps with --equalize-local-contrast, as above, saved as runs/oNNe_map.
+target/release/examples/basalt_map_merge --base runs/o12e_map --add runs/o13e_map \
+  --add runs/o14e_map --add runs/o11e_map --add runs/o16e_map --add runs/o17e_map \
+  --min-inliers 10 --out runs/office_merged
+for k in 12 13 14 11 16 17; do
+  python3 scripts/rgbd_map_cloud.py --map runs/o${k}e_map \
+    --openloris rgbd/office${k:0:1}-${k:1:1} --out runs/o${k}e_cloud.npz
+done
+python3 scripts/render_map_merge_gif.py --merged runs/office_merged \
+  $(for k in 12 13 14 11 16 17; do echo --map runs/o${k}e_map --cloud runs/o${k}e_cloud.npz \
+    --label office${k:0:1}-${k:1:1}; done) \
+  --max-points 45000 --point-size 2 --unit run --place office --fill 0.6 \
+  --title "Multi-session mapping: six robot runs over three days, one map" --out office_merge.gif
+```
+
+`rgbd/office1-N` holds the sequence's `color/`, `aligned_depth/`, their
+`.txt` lists, `trans_matrix.yaml` and `sensors.yaml`, extracted from its
+`.7z`. The GIF is not in the repository: its colours come from the dataset's
+images, which are CC BY-ND 4.0.
+
 ## Results
 
 Each query is localized against a map built from another session, with

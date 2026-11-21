@@ -1005,7 +1005,7 @@ pub fn calibrate_insv_lenses(
             let (rf, tf) = lens_poses.get(&(*f, 0))?;
             let (rb, tb) = lens_poses.get(&(*f, 1))?;
             let r = rb * rf.transpose();
-            Some((nalgebra::UnitQuaternion::from_matrix(&r), tb - r * tf))
+            Some((visloc_core::geometry::rotation_from_matrix(&r), tb - r * tf))
         })
         .collect();
     let Some((first, _)) = pairs.first().copied() else {

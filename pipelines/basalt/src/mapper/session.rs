@@ -2735,7 +2735,7 @@ fn temporal_result_se3(result: &TemporalRansacResult) -> SE3 {
         result.refined_model_rotation[2][2],
     ]);
     SE3::new(
-        UnitQuaternion::from_matrix(&rotation),
+        visloc_core::geometry::rotation_from_matrix(&rotation),
         Vector3::new(
             result.refined_model_translation[0],
             result.refined_model_translation[1],

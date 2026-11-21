@@ -74,6 +74,8 @@ struct Args {
     vo_translation_ratio: Option<f64>,
     vo_rotation_sigma: Option<f64>,
     gate_at_fix_accuracy: bool,
+    /// `--vo-robust cauchy:<c>|huber:<delta>`: kernel on the VO factors.
+    vo_robust: Option<String>,
     out_dir: Option<PathBuf>,
 }
 
@@ -87,7 +89,7 @@ fn usage() -> ! {
          \x20 [--dropout-start-fraction 0.5] [--dropout-duration-s 20] [--seed 1]\n\
          \x20 [--alignment full|gravity-yaw] [--window <frames>] [--robust gnc|huber|none]\n\
          \x20 [--vo-translation-ratio <r>] [--vo-rotation-sigma <rad>]\n\
-         \x20 [--gate-at-fix-accuracy] [--out-dir <dir>]"
+         \x20 [--gate-at-fix-accuracy] [--vo-robust cauchy:<c>|huber:<delta>] [--out-dir <dir>]"
     );
     std::process::exit(2);
 }
@@ -118,6 +120,7 @@ fn parse_args() -> Args {
         vo_translation_ratio: None,
         vo_rotation_sigma: None,
         gate_at_fix_accuracy: false,
+        vo_robust: None,
         out_dir: None,
     };
     let mut iter = env::args().skip(1);
@@ -161,6 +164,7 @@ fn parse_args() -> Args {
             "--vo-translation-ratio" => args.vo_translation_ratio = Some(num!()),
             "--vo-rotation-sigma" => args.vo_rotation_sigma = Some(num!()),
             "--gate-at-fix-accuracy" => args.gate_at_fix_accuracy = true,
+            "--vo-robust" => args.vo_robust = Some(value()),
             "--out-dir" => args.out_dir = Some(PathBuf::from(value())),
             _ => usage(),
         }
@@ -506,6 +510,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     config.lever_arm = lever_arm;
     config.gate_at_fix_accuracy = args.gate_at_fix_accuracy;
+    if let Some(spec) = &args.vo_robust {
+        let (kind, value) = spec.split_once(':').unwrap_or_else(|| usage());
+        let value: f64 = value.parse().unwrap_or_else(|_| usage());
+        config.optimizer.vo_robust = match kind {
+            "cauchy" => RobustKernel::Cauchy { c: value },
+            "huber" => RobustKernel::Huber { delta: value },
+            _ => usage(),
+        };
+    }
     if let Some(ratio) = args.vo_translation_ratio {
         config.vo_noise.translation_sigma_ratio = ratio;
     }
@@ -652,6 +665,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json,
         "  \"gate_at_fix_accuracy\": {},",
         args.gate_at_fix_accuracy
+    )?;
+    writeln!(
+        json,
+        "  \"vo_robust\": \"{}\",",
+        args.vo_robust.as_deref().unwrap_or("none")
     )?;
     writeln!(
         json,

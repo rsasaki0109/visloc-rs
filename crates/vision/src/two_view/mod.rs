@@ -786,12 +786,12 @@ pub fn recover_relative_pose_with_options(
     {
         return None;
     }
-    let rotation = UnitQuaternion::from_matrix(&rotation);
+    let rotation = visloc_core::geometry::rotation_from_matrix(&rotation);
     let alternate = ranked.get(1).and_then(|(score, r, t)| {
         if *score <= 0 {
             return None;
         }
-        let r = UnitQuaternion::from_matrix(r);
+        let r = visloc_core::geometry::rotation_from_matrix(r);
         // Keep only if it is a meaningfully different pose (different R or
         // anti-aligned t).
         let rot_diff = r.rotation_to(&rotation).angle();
