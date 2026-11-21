@@ -542,6 +542,11 @@ SLAM, it reaches 5/5 goals at 1.6 cm pose RMSE, also around an unmapped
 box, and stops when the VIO loses tracking (cameras blacked out) until it
 relocalizes. Not yet tried on a real robot. See [docs/navigation.md](docs/navigation.md).
 
+<p align="center">
+  <img src="docs/assets/hero_nav2_depot.gif" alt="A camera-only robot driven by Nav2 through the public Depot warehouse in Gazebo. Top left: the robot's stereo camera. Top right: the colour 3D Gaussian splat of the map, rendered at the camera's pose. Bottom: visloc's occupancy grid built from the visual map, with the robot's path in red, visloc's estimate as a cyan ring and five goals turning green as they are reached. Midway the cameras black out for 5 s: visloc reports tracking lost and Nav2 stops the robot, which then spins in place, relocalizes on the map and goes on to reach all five goals." width="640"><br>
+  <sub>Gazebo, the public OpenRobotics Depot (CC BY 4.0), stereo + IMU only: 5/5 goals at 6.1 cm pose RMSE, through a 5 s camera blackout.</sub>
+</p>
+
 ## More results
 
 Local public-data development measurements, not official leaderboard submissions.

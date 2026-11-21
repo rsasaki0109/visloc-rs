@@ -1,5 +1,9 @@
 # Robot navigation with Nav2
 
+<p align="center">
+  <img src="assets/hero_nav2_depot.gif" alt="A camera-only robot driven by Nav2 through the public Depot warehouse in Gazebo. Top left: the robot's stereo camera. Top right: the colour 3D Gaussian splat of the map, rendered at the camera's pose. Bottom: visloc's occupancy grid built from the visual map, with the robot's path in red, visloc's estimate as a cyan ring and five goals turning green as they are reached. Midway the cameras black out for 5 s: visloc reports tracking lost and Nav2 stops the robot, which then spins in place, relocalizes on the map and goes on to reach all five goals." width="640">
+</p>
+
 visloc-rs localizes a robot in a visual map. A navigation stack plans and
 drives on a 2D occupancy grid. visloc-rs does not implement the navigation
 stack itself: it gives [Nav2](https://docs.nav2.org) the two things Nav2
