@@ -6,8 +6,9 @@
 The world is what a splat trained on real photos shows. The robot is a
 differential drive driven by `cmd_vel`. It publishes:
 
-- `odom` and `/tf` `odom -> base_link`: wheel odometry, with a scale error
-  and a yaw-rate bias, so it drifts as a real robot's does;
+- `odom` and `/tf` `odom -> base_link`: wheel odometry, with scale errors
+  on the distance and the turn rate and a small yaw-rate bias, so it drifts
+  as a real robot's does;
 - `camera/image` (`sensor_msgs/Image`, rgb8): the splat rendered at the
   camera's pose by `gsplat_render_server`, at `camera_hz`;
 - `/tf_static` `base_link -> camera_optical`;
@@ -140,6 +141,7 @@ class Sim(Node):
         rng = np.random.default_rng(args.seed)
         self.v_scale = 1.0 + args.odom_scale_error * rng.choice([-1, 1])
         self.w_bias = args.odom_yaw_bias * rng.choice([-1, 1])
+        self.w_scale = 1.0 + args.odom_yaw_scale_error * rng.choice([-1, 1])
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self.p_clock = self.create_publisher(Clock, '/clock', 10)
@@ -189,7 +191,7 @@ class Sim(Node):
         moved = math.hypot(nx - x, ny - y) * (1 if self.v >= 0 else -1)
         self.pose = [nx, ny, math.atan2(math.sin(nyaw), math.cos(nyaw))]
         # Wheel odometry: what the encoders report, with their errors.
-        ov, ow = moved / DT * self.v_scale, self.w + (self.w_bias if abs(self.v) + abs(self.w) > 1e-3 else 0.0)
+        ov, ow = moved / DT * self.v_scale, self.w * self.w_scale + (self.w_bias if abs(self.v) + abs(self.w) > 1e-3 else 0.0)
         ox, oy, oyaw = self.odom
         self.odom = [ox + ov * DT * math.cos(oyaw + ow * DT / 2), oy + ov * DT * math.sin(oyaw + ow * DT / 2),
                      math.atan2(math.sin(oyaw + ow * DT), math.cos(oyaw + ow * DT))]
@@ -278,7 +280,8 @@ def main():
     p.add_argument('--scan-range', dest='scan_range', type=float, default=8.0)
     p.add_argument('--rtf', type=float, default=1.0, help='at most this many simulated seconds per second')
     p.add_argument('--odom-scale-error', dest='odom_scale_error', type=float, default=0.02)
-    p.add_argument('--odom-yaw-bias', dest='odom_yaw_bias', type=float, default=0.01, help='rad/s while moving')
+    p.add_argument('--odom-yaw-bias', dest='odom_yaw_bias', type=float, default=0.002, help='rad/s while moving')
+    p.add_argument('--odom-yaw-scale-error', dest='odom_yaw_scale_error', type=float, default=0.03)
     p.add_argument('--max-accel', dest='max_accel', type=float, default=1.0)
     p.add_argument('--max-alpha', dest='max_alpha', type=float, default=3.0)
     p.add_argument('--cmd-timeout', dest='cmd_timeout', type=float, default=0.5)

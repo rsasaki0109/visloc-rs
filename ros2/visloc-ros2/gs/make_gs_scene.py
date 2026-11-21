@@ -84,7 +84,7 @@ def main():
     p.add_argument('--max-scale', type=float, default=0.1, help='largest Gaussian axis, m')
     p.add_argument('--min-count', type=int, default=3)
     p.add_argument('--fence-m', type=float, default=1.5)
-    p.add_argument('--clear-path-m', type=float, default=0.25,
+    p.add_argument('--clear-path-m', type=float, default=0.45,
                    help='cells this close to the capture path are free: the camera was carried through them')
     p.add_argument('--resolution', type=float, default=0.05)
     p.add_argument('--robot-radius', type=float, default=0.2)
