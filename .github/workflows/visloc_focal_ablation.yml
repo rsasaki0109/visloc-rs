@@ -1,17 +1,16 @@
-# sequence_3_17: time-varying focal lengths alone against focal lengths and the stereo rotation.
+# sequence_3_17 and sequence_1_19: the 5 s focal lengths with and without the accelerometer matrix.
 #
-# One job runs the VIO, the online windows and the first matching once, then five batch passes from those
+# Each job runs the VIO, the online windows and the first matching once, then four batch passes from those
 # shared inputs (temperature terms and the rematch off):
-#   baseline      the default pass
-#   gyro_only     the default pass and the 3x3 gyroscope response matrix
-#   focal_only    the matrix; both cameras' factory rotations and translations held, each camera's focal
-#                 length per 5 s segment (--fix-camera-rotations)
-#   focal_rotation the matrix; cam0 fixed, cam1's rotation and both focal lengths per 5 s segment, the
-#                 stereo translation at the factory's (the driver's main pass)
-#   focal_5s_rot_8 the matrix; both rotations in the default 8 segments, each focal length per 5 s
-#                 (--focal-seg-seconds 5)
+#   baseline         the default pass (rotations and focal lengths in 8 segments)
+#   gyro_only        the default pass and the 3x3 gyroscope response matrix
+#   focal_5s_rot_8   the gyroscope matrix; both rotations in the default 8 segments, each focal length per
+#                    5 s chunk (--focal-seg-seconds 5, SLAM Dunk's 0.035 px walk)
+#   focal_5s_accel   the same and the 3x3 accelerometer response matrix (the driver's main pass)
 # and scores each with the official control-point evaluator, the SE(3) position RMSE against the pseudo-GT on
-# common timestamps, and the horizontal error of every control point (tags 20-24 and 26 in the summary).
+# common timestamps, and the horizontal error of every control point.
+# (Earlier runs of this workflow compared the focal lengths alone and with the stereo rotation on
+# sequence_3_17: docs/lamaria_batch_ba.md#focal-lengths-alone-on-sequence_3_17.)
 name: visloc-rs focal-length ablation
 
 on:
@@ -25,7 +24,6 @@ permissions:
 
 env:
   SPLIT: training
-  SEQUENCE: sequence_3_17
 
 jobs:
   build:
@@ -57,6 +55,12 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        sequence: [sequence_3_17, sequence_1_19]
+    env:
+      SEQUENCE: ${{ matrix.sequence }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -89,15 +93,15 @@ jobs:
           name: basalt-euroc-vio-demo
           path: bin
 
-      - name: Run the five passes
+      - name: Run the four passes
         run: |
           chmod +x bin/basalt_euroc_vio_demo
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
             --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs \
-            --ba-est-gyro-m --ba-stereo-reference 0 --ba-stereo-fixed-translation --ba-stereo-paper-priors \
-            --ba-compare --ba-compare-focal-only --no-ba-temperature --no-ba-rematch
+            --ba-est-gyro-m --ba-est-accel-m --ba-focal-seg-seconds 5 \
+            --ba-compare --ba-compare-accel --no-ba-temperature --no-ba-rematch
           test -s "out/slam/$SEQUENCE.txt"
 
       - name: Score control points
@@ -121,8 +125,8 @@ jobs:
           curl -fsSL --retry 3 "$data/ground_truth/pseudo_dense/$SEQUENCE.txt" -o "$refs/reference.txt"
           echo "REFS=$refs" >> "$GITHUB_ENV"
 
-          cp "out/slam/$SEQUENCE.txt" "$results/focal_rotation_estimate.txt"
-          for label in baseline gyro_only focal_only focal_rotation focal_5s_rot_8; do
+          cp "out/slam/$SEQUENCE.txt" "$results/focal_5s_accel_estimate.txt"
+          for label in baseline gyro_only focal_5s_rot_8 focal_5s_accel; do
             log="$results/cp_$label.log"
             python "$evaluator/evaluate_wrt_control_points.py" --estimate "$results/${label}_estimate.txt" \
               --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
@@ -147,11 +151,10 @@ jobs:
           from lamaria.utils.metrics import calculate_error
 
           refs, results = Path(sys.argv[1]), Path(sys.argv[2])
-          labels = ["baseline", "gyro_only", "focal_only", "focal_rotation", "focal_5s_rot_8"]
+          labels = ["baseline", "gyro_only", "focal_5s_rot_8", "focal_5s_accel"]
           summaries = {"baseline": "baseline_ba2_summary.json", "gyro_only": "gyro_only_ba2_summary.json",
-                       "focal_only": "focal_only_ba2_summary.json", "focal_rotation": "ba2_summary.json",
-                       "focal_5s_rot_8": "focal_5s_rot_8_ba2_summary.json"}
-          watch = [20, 21, 22, 23, 24, 26]
+                       "focal_5s_rot_8": "focal_5s_rot_8_ba2_summary.json", "focal_5s_accel": "ba2_summary.json"}
+          sequence = os.environ["SEQUENCE"]
 
           def samples(path):
               values = np.loadtxt(path, usecols=(0, 1, 2, 3), ndmin=2)
@@ -165,14 +168,10 @@ jobs:
               rot = s["camera_rotation_change_deg"]
               moved = {c: float(np.abs(np.array(v)).max()) for c, v in rot.items()}
               ok = (name == "baseline") == (not matrix.any())
-              if name == "focal_only":
-                  ok &= all(v == 0 for v in moved.values()) and not np.any(s["stereo_offset_change_imu_mm"])
-              if name == "focal_5s_rot_8":  # both rotations move, tied within each of the 8 segments
+              ok &= (name == "focal_5s_accel") == bool(np.any(s["accel_m"]))
+              if name.startswith("focal_5s"):  # both rotations move, tied within each of the 8 segments
                   ok &= moved.get("cam0", 0) > 0 and moved.get("cam1", 0) > 0
                   ok &= len(set(s["rotation_segment_of_chunk"])) == 8 and s["rotation_tie_spread_deg"] < 1e-3
-              if name == "focal_rotation":
-                  ok &= moved.get("cam1", 0) > 0 and moved.get("cam0", 0) == 0
-                  ok &= not np.any(s["stereo_offset_change_imu_mm"])
               if not ok:
                   raise ValueError(f"unexpected solver configuration for {name}: {moved}")
 
@@ -212,8 +211,14 @@ jobs:
                   "cp_score": float(re.search(r"CP Score: ([\d.]+)", log).group(1)),
                   "cp_recall_1m": float(re.search(r"CP Recall @ 1m: ([\d.]+)", log).group(1)),
                   "se3_position_rmse_m": float(np.sqrt(np.mean(np.sum((x @ rotation - y) ** 2, axis=1)))),
-                  "watched_tags_m": {str(tag): per_tag[name].get(tag) for tag in watch},
               }
+          # sequence_3_17's six tags that went over 1 m in the first ablation, else every tag over 1 m somewhere
+          watch = [20, 21, 22, 23, 24, 26] if sequence == "sequence_3_17" else sorted(
+              {t for errors in per_tag.values() for t, e in errors.items() if e is not None and e > 1.0},
+              key=lambda t: (first_seen.get(t, 0), t))
+          for name in labels:
+              metrics[name]["watched_tags_m"] = {str(tag): per_tag[name].get(tag) for tag in watch}
+              metrics[name]["accel_m"] = json.loads((results / summaries[name]).read_text())["accel_m"]
           tags = sorted(per_tag["baseline"], key=lambda tag: (first_seen.get(tag, 0), tag))
           with (results / "control_points_by_condition.csv").open("w", newline="") as f:
               w = csv.writer(f)
@@ -228,7 +233,7 @@ jobs:
               return "missing" if v is None else f"{v:.3f}"
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
-              print("### sequence_3_17: time-varying focal lengths\n", file=out)
+              print(f"### {sequence}: 5 s focal lengths with and without the accelerometer matrix\n", file=out)
               print("| Pass | CP score | Recall at 1 m (%) | Position RMSE (m) |", file=out)
               print("|---|---:|---:|---:|", file=out)
               for name in labels:

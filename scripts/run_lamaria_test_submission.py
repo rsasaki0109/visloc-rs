@@ -601,6 +601,14 @@ def main() -> int:
     parser.add_argument("--ba-stereo-paper-priors", action="store_true",
                         help="with --ba-stereo-reference, use SLAM Dunk's 1 mrad rotation and "
                              "0.035 px focal-length random walks")
+    parser.add_argument("--ba-est-accel-m", action="store_true",
+                        help="estimate the full accelerometer response matrix in the experimental batch pass")
+    parser.add_argument("--ba-focal-seg-seconds", type=float, default=0.0,
+                        help="in the experimental batch pass, estimate the focal lengths in time chunks of this "
+                             "many seconds (SLAM Dunk's 0.035 px walk) and keep the 8-segment camera rotations")
+    parser.add_argument("--ba-compare-accel", action="store_true",
+                        help="with --ba-compare, --ba-focal-seg-seconds, --ba-est-gyro-m and --ba-est-accel-m, also "
+                             "run the gyro-only pass and the same focal pass without the accelerometer matrix")
     parser.add_argument("--ba-est-gyro-m", action="store_true",
                         help="estimate the full gyroscope response matrix in the experimental batch pass")
     parser.add_argument("--ba-fuse-accelerometers", action="store_true",
@@ -673,6 +681,10 @@ def main() -> int:
             and args.ba_est_gyro_m and not args.ba_fuse_accelerometers):
         parser.error("--ba-compare-focal-only requires --ba-compare, --ba-stereo-reference, "
                      "--ba-stereo-fixed-translation and --ba-est-gyro-m, without --ba-fuse-accelerometers")
+    if args.ba_compare_accel and not (args.ba_compare and args.ba_focal_seg_seconds > 0 and args.ba_est_gyro_m
+                                      and args.ba_est_accel_m and args.ba_stereo_reference is None):
+        parser.error("--ba-compare-accel requires --ba-compare, --ba-focal-seg-seconds, --ba-est-gyro-m and "
+                     "--ba-est-accel-m, without --ba-stereo-reference")
     if args.ba_compare_camera_gyro and args.ba_compare_focal_only:
         parser.error("--ba-compare-camera-gyro and --ba-compare-focal-only both run a gyro-only pass; pick one")
     if args.ba_compare_stereo_translation and not (args.ba_compare and args.ba_stereo_fixed_translation):
@@ -697,6 +709,10 @@ def main() -> int:
         pass_args += ["--ext-seg-sigma", "0.0572957795", "--focal-seg-sigma-px", "0.035"]
     if args.ba_est_gyro_m:
         pass_args.append("--est-gyro-m")
+    if args.ba_est_accel_m:
+        pass_args.append("--est-accel-m")
+    if args.ba_focal_seg_seconds > 0:
+        pass_args += ["--focal-seg-seconds", str(args.ba_focal_seg_seconds), "--focal-seg-sigma-px", "0.035"]
 
     log(f"{len(sequences)} sequences: {sequences[0]} .. {sequences[-1]}")
     experiment_failed = False
@@ -862,6 +878,9 @@ def main() -> int:
                                     # the default 8-segment rotations, the focal lengths per 5 s
                                     ("focal_5s_rot_8", ["--est-gyro-m", "--focal-seg-seconds", "5",
                                                         "--focal-seg-sigma-px", "0.035"])]
+                    if args.ba_compare_accel:  # the same focal pass without the accelerometer matrix
+                        variants = [("gyro_only", ["--est-gyro-m"]),
+                                    ("focal_5s_rot_8", [o for o in sequence_pass_args if o != "--est-accel-m"])]
                     if variants:
                         for name, options in variants:
                             variant_work = work / f"ba_{name}"
