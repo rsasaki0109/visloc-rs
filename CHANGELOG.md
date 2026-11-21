@@ -16,7 +16,11 @@ All notable changes to `visloc-rs` will be documented here.
   Nav2 on `visloc_map_localize_node` reaches 5/5 goals with no contacts at
   8.7 cm `/map_pose` RMSE, on a map built from the splat's renders
   (`render_tum_seq.py`); a map of the real images localizes 4 of 450
-  rendered images. Also `gsplat_train --alpha-mask`, `level_sfm.py`.
+  rendered images. Also `gsplat_train --alpha-mask`, `level_sfm.py`;
+  and from a public 360-degree street walk (OverMaps360, its own IMU for
+  scale, no ground truth), Nav2 reaches 4/4 goals along 121 m at 3.6 cm
+  `/map_pose` RMSE with a longer projection window (`equirect.py` renders
+  the robot's 360-degree view for videos).
 - **Robot navigation with Nav2** (docs/navigation.md). New crate
   `visloc-navigation`: `OccupancyMapper` builds the 2D occupancy grid of a
   visual map from its landmarks and camera-to-landmark rays (a 2.5D log-odds
