@@ -471,6 +471,7 @@ measurements behind the defaults.
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
 | `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the correction's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
+| `dump_inliers` | none | CSV file: each accepted localization's PnP inliers, `timestamp_ns,x,y,landmark_id` (the image keypoint in pixels and the map landmark it matched), for visualizations |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |

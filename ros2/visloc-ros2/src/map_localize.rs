@@ -308,6 +308,9 @@ pub struct Fix {
     pub keypoints: usize,
     pub matches: usize,
     pub inliers: usize,
+    /// Each PnP inlier of an accepted localization: the image keypoint
+    /// (pixels) and the map landmark it matched. Empty otherwise.
+    pub inlier_matches: Vec<(nalgebra::Point2<f64>, u64)>,
     pub elapsed_ms: f64,
     pub failure: Option<String>,
 }
@@ -322,6 +325,7 @@ impl Fix {
             keypoints: 0,
             matches: 0,
             inliers: 0,
+            inlier_matches: Vec::new(),
             elapsed_ms: 0.0,
             failure: Some(failure),
         }
@@ -594,8 +598,19 @@ impl MapLocalizer {
         .then_some(result.pose.as_ref())
         .flatten()
         .map(|pose| pose.camera_to_world().compose(camera_from_body));
+        let inlier_matches = if map_from_body.is_some() {
+            result
+                .inlier_query_indices
+                .iter()
+                .zip(&result.inlier_landmark_ids)
+                .filter_map(|(&index, &landmark)| Some((*features.keypoints.get(index)?, landmark)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Fix {
             weak_map_from_body,
+            inlier_matches,
             failure: map_from_body.is_none().then(|| {
                 result.failure_reason.as_ref().map_or_else(
                     || format!("{} inliers", result.inlier_count),

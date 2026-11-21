@@ -74,6 +74,8 @@ PARAMETERS (--name value  or  -p name:=value):
   projection_fresh_m     ... and this many metres of odometry travel from it          [2]
   reset_prior_s          after a VIO reset (odom_reset), the last map pose is the
                          prior for this many seconds (0: off)                         [30]
+  dump_inliers           CSV file: each accepted localization's PnP inliers,
+                         `timestamp_ns,x,y,landmark_id` (keypoint px), for visualizations [none]
   prior_wait_ms          longest wait for the odometry of an image's stamp before
                          matching map-wide instead                                    [300]
   match_threads          threads of the map-wide search                               [1]
@@ -124,6 +126,17 @@ fn run() -> Result<(), String> {
         other => return Err(format!("extrinsics: expected map or tf, got {other:?}")),
     };
     let camera_frame = args.string("camera_frame");
+    let mut dump_inliers = match args.string("dump_inliers") {
+        Some(path) => {
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create(&path).map_err(|e| format!("dump_inliers {path}: {e}"))?,
+            );
+            std::io::Write::write_all(&mut file, b"timestamp_ns,x,y,landmark_id\n")
+                .map_err(|e| format!("dump_inliers {path}: {e}"))?;
+            Some(file)
+        }
+        None => None,
+    };
     let publish_tf = args.flag("publish_tf", true)?;
     let publish_map_cloud = args.flag("publish_map_cloud", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
@@ -389,6 +402,18 @@ fn run() -> Result<(), String> {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
                 localized += 1;
+                if let Some(file) = dump_inliers.as_mut() {
+                    let rows: String = fix
+                        .inlier_matches
+                        .iter()
+                        .map(|(p, id)| format!("{},{:.2},{:.2},{id}\n", stamp.to_nanos(), p.x, p.y))
+                        .collect();
+                    if let Err(error) = std::io::Write::write_all(file, rows.as_bytes())
+                        .and_then(|()| std::io::Write::flush(file))
+                    {
+                        eprintln!("visloc_map_localize_node: dump_inliers: {error}");
+                    }
+                }
                 publish_logged(
                     &fix_pub,
                     map_fix_msg(stamp.to_nanos(), map_from_body, &map_frame, &options),
