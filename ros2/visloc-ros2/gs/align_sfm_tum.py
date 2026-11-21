@@ -36,12 +36,21 @@ def qvec2rot(q):
 
 
 def rot2qvec(R):
-    K = np.array([[R[0, 0] - R[1, 1] - R[2, 2], 0, 0, 0],
-                  [R[1, 0] + R[0, 1], R[1, 1] - R[0, 0] - R[2, 2], 0, 0],
-                  [R[2, 0] + R[0, 2], R[2, 1] + R[1, 2], R[2, 2] - R[0, 0] - R[1, 1], 0],
-                  [R[1, 2] - R[2, 1], R[2, 0] - R[0, 2], R[0, 1] - R[1, 0], R[0, 0] + R[1, 1] + R[2, 2]]]) / 3
-    w, V = np.linalg.eigh(K)
-    q = V[[3, 0, 1, 2], np.argmax(w)]
+    """(w, x, y, z) of a rotation matrix (Shepperd's method), w >= 0."""
+    tr = np.trace(R)
+    if tr > 0:
+        k = 2 * np.sqrt(1 + tr)
+        q = np.array([k / 4, (R[2, 1] - R[1, 2]) / k, (R[0, 2] - R[2, 0]) / k, (R[1, 0] - R[0, 1]) / k])
+    else:
+        i = int(np.argmax(np.diag(R)))
+        j, m = (i + 1) % 3, (i + 2) % 3
+        k = 2 * np.sqrt(1 + R[i, i] - R[j, j] - R[m, m])
+        q = np.zeros(4)
+        q[0] = (R[m, j] - R[j, m]) / k
+        q[1 + i] = k / 4
+        q[1 + j] = (R[j, i] + R[i, j]) / k
+        q[1 + m] = (R[m, i] + R[i, m]) / k
+    q /= np.linalg.norm(q)
     return q if q[0] >= 0 else -q
 
 
