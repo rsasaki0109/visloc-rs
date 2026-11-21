@@ -56,8 +56,8 @@ DT = 0.02  # physics step (s)
 
 
 def stamp(t):
-    s = int(math.floor(t))
-    return Time(sec=s, nanosec=int(round((t - s) * 1e9)) % 1_000_000_000)
+    ns = int(round(t * 1e9))
+    return Time(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
 
 
 def quat_yaw(yaw):
