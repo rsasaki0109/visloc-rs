@@ -66,6 +66,7 @@ mod debug;
 mod driver;
 mod growth;
 mod pose_guided;
+mod position_priors;
 mod refinement;
 mod sequence_fallback;
 mod structureless;
@@ -76,6 +77,7 @@ pub use debug::*;
 pub use driver::*;
 pub(crate) use growth::*;
 use pose_guided::*;
+pub use position_priors::*;
 pub use refinement::*;
 use sequence_fallback::*;
 use structureless::*;
@@ -557,6 +559,14 @@ pub struct IncrementalSfmConfig {
     /// `features` and `poses`; `None` disables the diagnostic completely.
     /// Supplying this field never changes registration, triangulation, or BA.
     pub debug_oracle_poses: Option<Vec<Option<Pose>>>,
+    /// Optional GPS / position priors (COLMAP's `use_prior_position`), indexed
+    /// like `features`. Once enough registered images carry one, every global
+    /// and periodic BA first aligns the reconstruction to them with a robust
+    /// Sim(3) and then adds a covariance-weighted camera-centre prior in place
+    /// of the anchor/scale-anchor gauge poses, so the model comes out in the
+    /// priors' metric frame. See [`SfmPositionPriors`]. `None` (default)
+    /// leaves every solve unchanged.
+    pub position_priors: Option<SfmPositionPriors>,
     /// How unregistered images are ranked for the next PnP attempt. Raw
     /// correspondence count is the historical default; the visibility pyramid
     /// is an explicit opt-in for experiments that prefer spatial coverage.
@@ -719,6 +729,7 @@ impl Default for IncrementalSfmConfig {
             landmark_ba_warm_start_iterations: 0,
             landmark_ba_warm_start_min_registered_images: 0,
             debug_oracle_poses: None,
+            position_priors: None,
             next_image_policy: NextImagePolicy::default(),
             excluded_seed_pairs: HashSet::new(),
         }

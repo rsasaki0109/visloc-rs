@@ -234,6 +234,25 @@
 //! usual gauge anchors).  It is valid only with `--mapper incremental` and
 //! cannot be combined with `--seed-pair`.
 //!
+//! `--gps-priors FILE` / `--gps-priors-from-exif` add GPS position priors,
+//! like COLMAP's `pose_prior_mapper` (`use_prior_position`): every global BA
+//! first aligns the model to the priors with a robust Sim(3), then keeps them
+//! as covariance-weighted camera-centre priors, so the model comes out metric
+//! in a local ENU frame (origin written to `OUT_COLMAP/enu_origin.txt`). The
+//! file holds `NAME LAT LON ALT [STD_H [STD_V]]` lines (`--gps-priors-format
+//! cartesian` for `NAME X Y Z ...` in a metric frame); `--gps-prior-std` /
+//! `--gps-prior-std-vertical` (default 1 m each, as COLMAP) fill in a missing sigma,
+//! `--gps-prior-max-error M` sets the alignment's inlier threshold (default
+//! 3 sigma), the priors carry COLMAP's Cauchy loss (`--gps-prior-loss-scale
+//! C` sets its scale, `--gps-prior-least-squares` turns it off), and
+//! `--gps-prior-reject-outliers` drops the alignment's outliers from the BA.
+//!
+//! `--pair-source spatial` (with GPS priors) proposes candidate pairs like
+//! COLMAP's `spatial_matcher`: each image with a fix is paired with up to
+//! `--spatial-max-neighbors` (default 50) other fixes within
+//! `--spatial-max-distance` (default 100 m), by horizontal distance unless
+//! `--spatial-use-z`; images without a fix get their VLAD top-k pairs.
+//!
 //! `--next-image-policy auto|count|visibility` controls the next-PnP ranking.
 //! The demo default is the conservative `auto` policy: it tries visibility
 //! first, compares the historical count ranking whenever visibility is
@@ -284,7 +303,20 @@
 //! `--import-matches-file` (or supplement file) adds COLMAP pair/index overlap
 //! columns to the CSV; `--import-verified-pairs-file` adds COLMAP verified
 //! inlier/configuration columns and may be combined with the raw import here.
-//! In `--feature-extractor sift` mode, `--sift-scale-adaptive-gradients`
+//! In `--feature-extractor sift` mode the built-in SIFT defaults to the
+//! VLFeat/COLMAP-compatible detector and descriptor, with `gsplat_photos`'
+//! settings: `--sift-vlfeat-compatible-detector
+//! --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations
+//! --sift-l1-root --sift-max-orientations 2 --sift-prefer-larger-scale`,
+//! magnification 3. `--sift-legacy` restores the historical extractor
+//! (integer-pixel keypoints). A flag only it supports
+//! (`--sift-affine`, `--sift-multi-anisotropy`,
+//! `--sift-scale-adaptive-gradients`, `--sift-standard-orientations`,
+//! `--sift-append-descriptor-magnification`, `--gpu-sift`) selects it too,
+//! with a note. An explicit `--sift-vlfeat-compatible-*` flag selects only
+//! what it names, as before. The remaining paragraph describes the
+//! individual switches.
+//! `--sift-scale-adaptive-gradients`
 //! enables the opt-in VLFeat-style scale-space gradient descriptor path;
 //! leaving it out preserves the historical direct-source gradients.
 //! `--sift-vlfeat-compatible-descriptor` instead selects the complete
@@ -505,7 +537,11 @@ use visloc_rs::{
     NextImagePolicy, PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
 };
 
+use visloc_rs::io::gps_prior::{
+    read_exif_gps, spatial_pairs, GpsPriorSet, PriorCoordinates, PriorFrame,
+};
 use visloc_rs::slam::incremental_sfm::log_process_memory;
+use visloc_rs::slam::incremental_sfm::{estimate_position_prior_alignment, SfmPositionPriors};
 use visloc_rs::verified_pair_snapshot::{
     self, PairRecord as SnapshotPairRecord, Snapshot as VerifiedPairSnapshot,
 };
@@ -732,6 +768,28 @@ struct Args {
     /// Supplied poses are fixed during initial triangulation/PnP growth and
     /// released for the normal final BA gauge handling. Incremental-only.
     initial_poses_file: Option<PathBuf>,
+    /// GPS / position priors (`NAME LAT LON ALT [STD_H [STD_V]]` lines, or
+    /// `NAME X Y Z ...` with `--gps-priors-format cartesian`).
+    gps_priors_file: Option<PathBuf>,
+    gps_priors_format: PriorCoordinates,
+    /// Read the priors from the images' EXIF GPS (needs `--images-dir`, or
+    /// image files next to the features).
+    gps_priors_from_exif: bool,
+    /// Default horizontal / vertical 1-sigma (metres) where a prior states none.
+    gps_prior_std: f64,
+    gps_prior_std_vertical: f64,
+    /// Inlier threshold of the robust alignment to the priors (default 3 sigma).
+    gps_prior_max_error: Option<f64>,
+    /// Drop the alignment's outlier priors from the BA prior factor.
+    gps_prior_reject_outliers: bool,
+    /// Cauchy loss scale on the normalised prior residual (default COLMAP's
+    /// 2.8; `None`, `--gps-prior-least-squares`: plain least squares).
+    gps_prior_loss_scale: Option<f64>,
+    /// `--pair-source spatial`: neighbours per image, their largest distance
+    /// (prior units), and whether the distance includes the vertical axis.
+    spatial_max_neighbors: usize,
+    spatial_max_distance: f64,
+    spatial_use_z: bool,
     /// Diagnostic-only: import observation membership from a COLMAP
     /// `points3D.txt`, while ignoring its XYZ/color/error and camera poses.
     /// The sibling `images.txt` supplies IMAGE_ID/name and point2D-row
@@ -2057,6 +2115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PairSource::TemporalPyramid => "temporal pyramid + VLAD fill",
                 PairSource::VocabTree => "vocab-tree",
                 PairSource::Transitive => "transitive (vocab-tree base)",
+                PairSource::Spatial => "GPS spatial + VLAD for images without a fix",
             }
         },
     );
@@ -2495,9 +2554,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let (position_priors, prior_frame) = load_gps_priors(&args, &image_names)?;
     let default_sfm_config = IncrementalSfmConfig::default();
     let default_ba_config = default_sfm_config.ba_config;
     let config = IncrementalSfmConfig {
+        position_priors: position_priors.clone(),
         min_seed_matches: args.min_matches,
         min_pnp_inliers: args.min_pnp_inliers,
         max_reprojection_error_px: args.max_reproj,
@@ -3199,6 +3260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?
     };
     log_process_memory("example-after-incremental-mapper");
+    report_gps_priors(
+        &args,
+        position_priors.as_ref(),
+        prior_frame.as_ref(),
+        &result.poses,
+    )?;
     if let Some(oracle_path) = args.diagnose_ba_oracle_poses_file.as_deref() {
         let (scale, initial_reprojection, final_reprojection, ba_result) =
             run_oracle_pose_ba_probe(
@@ -3402,3 +3469,87 @@ mod append_only_matcher_tests;
 
 #[cfg(all(test, feature = "image-io"))]
 mod sift_stream_tests;
+
+/// The GPS priors of `--gps-priors` / `--gps-priors-from-exif`, in a local
+/// metric frame, indexed like `image_names`.
+fn load_gps_priors(
+    args: &Args,
+    image_names: &[String],
+) -> Result<(Option<SfmPositionPriors>, Option<PriorFrame>), Box<dyn std::error::Error>> {
+    let set = if let Some(path) = args.gps_priors_file.as_deref() {
+        GpsPriorSet::read(path, args.gps_priors_format)?
+    } else if args.gps_priors_from_exif {
+        let dir = args.images_dir.as_deref().unwrap_or(&args.features_dir);
+        let mut set = GpsPriorSet::new(PriorCoordinates::Wgs84);
+        for name in image_names {
+            if let Some(fix) = exif_image_path(dir, name).and_then(|p| read_exif_gps(&p)) {
+                set.insert_geodetic(name.clone(), fix);
+            }
+        }
+        set
+    } else {
+        return Ok((None, None));
+    };
+    let default_std = nalgebra::Vector3::new(
+        args.gps_prior_std,
+        args.gps_prior_std,
+        args.gps_prior_std_vertical,
+    );
+    let (local, frame) = set.to_local_enu(image_names, None, default_std);
+    let mut priors = SfmPositionPriors::from_local_priors(&local);
+    priors.alignment_max_error = args.gps_prior_max_error;
+    priors.reject_outliers = args.gps_prior_reject_outliers;
+    priors.robust_loss_scale = args.gps_prior_loss_scale;
+    println!(
+        "gps priors: {}/{} images ({} entries read)",
+        priors.num_priors(),
+        image_names.len(),
+        set.len()
+    );
+    Ok((Some(priors), Some(frame)))
+}
+
+/// The image file of `name` under `dir`: the name itself, or its stem with a
+/// common image extension.
+fn exif_image_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let stem = Path::new(name).file_stem()?.to_str()?;
+    ["jpg", "JPG", "jpeg", "JPEG"]
+        .iter()
+        .map(|ext| dir.join(format!("{stem}.{ext}")))
+        .find(|p| p.is_file())
+}
+
+/// Print how well the model agrees with its GPS priors and record the ENU
+/// origin next to the exported model.
+fn report_gps_priors(
+    args: &Args,
+    priors: Option<&SfmPositionPriors>,
+    frame: Option<&PriorFrame>,
+    poses: &[Option<Pose>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (Some(priors), Some(frame)) = (priors, frame) else {
+        return Ok(());
+    };
+    match estimate_position_prior_alignment(poses, priors) {
+        Some(check) => {
+            println!(
+                "gps priors: {}/{} registered prior images agree, RMSE {:.3} m (residual scale {:.4})",
+                check.inliers.len(),
+                check.num_candidates,
+                check.inlier_rmse,
+                check.similarity.scale
+            );
+            std::fs::create_dir_all(&args.out_colmap)?;
+            std::fs::write(args.out_colmap.join("enu_origin.txt"), frame.describe())?;
+        }
+        None => println!(
+            "gps priors: not used (fewer than {} registered images with a prior); the model keeps an arbitrary frame and scale",
+            priors.min_num_priors
+        ),
+    }
+    Ok(())
+}

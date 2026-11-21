@@ -2216,8 +2216,11 @@ fn assign_orientations(
         // Lowe's Gaussian-blurred-image gradients).
         for wy in -radius..=radius {
             for wx in -radius..=radius {
-                let gx = 0.5 * (mid.get(x + wx + 1, y) - mid.get(x + wx - 1, y));
-                let gy = 0.5 * (mid.get(x + wx, y + 1) - mid.get(x + wx, y - 1));
+                // The sample is at (x + wx, y + wy): reading row `y` for every
+                // `wy` made the histogram a horizontal 1-D slice, so the
+                // orientation did not turn with the image.
+                let gx = 0.5 * (mid.get(x + wx + 1, y + wy) - mid.get(x + wx - 1, y + wy));
+                let gy = 0.5 * (mid.get(x + wx, y + wy + 1) - mid.get(x + wx, y + wy - 1));
                 let magnitude = (gx * gx + gy * gy).sqrt();
                 if magnitude <= f64::EPSILON {
                     continue;
@@ -2861,8 +2864,12 @@ fn describe_raw_scale_adaptive(
             let theta = gy.atan2(gx) - kp.orientation;
             let weight =
                 (-(rx0 * rx0 + ry0 * ry0) / (2.0 * (cell_size * 2.0).powi(2))).exp() * area_weight;
-            let cx = (rx0 / cell_size) + 2.0 - 0.5;
-            let cy = (ry0 / cell_size) + 2.0 - 0.5;
+            // Spatial bins live in the keypoint's frame, (dx, dy): binning the
+            // image-frame offset (rx0, ry0) instead left the 4x4 grid unrotated,
+            // so the descriptor was not rotation invariant (a 180-degree turn of
+            // the camera between drone strips matched almost nothing).
+            let cx = (dx as f64 / cell_size) + 2.0 - 0.5;
+            let cy = (dy as f64 / cell_size) + 2.0 - 0.5;
             let obin =
                 ((theta.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU) * 8.0) % 8.0;
             let o0 = obin.floor() as i64;
@@ -2930,8 +2937,9 @@ fn describe_raw(
             let theta = gy.atan2(gx) - kp.orientation;
             let weight =
                 (-(rx0 * rx0 + ry0 * ry0) / (2.0 * (cell_size * 2.0).powi(2))).exp() * area_weight;
-            let cx = (rx0 / cell_size) + 2.0 - 0.5;
-            let cy = (ry0 / cell_size) + 2.0 - 0.5;
+            // Keypoint-frame bins, as in `describe_raw_scale_adaptive`.
+            let cx = (dx as f64 / cell_size) + 2.0 - 0.5;
+            let cy = (dy as f64 / cell_size) + 2.0 - 0.5;
             let obin =
                 ((theta.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU) * 8.0) % 8.0;
             let o0 = obin.floor() as i64;
@@ -3015,6 +3023,120 @@ pub fn extract_sift_features(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deterministic random texture: Gaussian blobs of mixed size and sign.
+    fn random_texture(width: usize, height: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut pixels = vec![0.5f64; width * height];
+        for _ in 0..(width * height / 60) {
+            let (cx, cy) = (next() * width as f64, next() * height as f64);
+            let sigma = 1.5 + 4.0 * next();
+            let amp = (next() - 0.5) * 0.6;
+            let r = (3.0 * sigma).ceil() as i64;
+            for y in (cy as i64 - r).max(0)..(cy as i64 + r).min(height as i64) {
+                for x in (cx as i64 - r).max(0)..(cx as i64 + r).min(width as i64) {
+                    let d2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                    pixels[y as usize * width + x as usize] +=
+                        amp * (-d2 / (2.0 * sigma * sigma)).exp();
+                }
+            }
+        }
+        pixels.iter().map(|&v| v.clamp(0.0, 1.0) as f32).collect()
+    }
+
+    /// Ratio-test (0.8) matches from `a` to `b` whose position agrees with
+    /// `map`, up to one constant offset: the extractor's keypoint coordinates
+    /// carry a sub-pixel convention offset that a rotation doubles, so a match
+    /// counts when its displacement from `map` is within 1 px of the median
+    /// displacement.
+    fn consistent_matches(
+        a: &(Vec<SiftKeypoint>, Vec<Vec<f32>>),
+        b: &(Vec<SiftKeypoint>, Vec<Vec<f32>>),
+        map: impl Fn(f64, f64) -> (f64, f64),
+    ) -> usize {
+        let mut displacements = Vec::new();
+        for (ka, da) in a.0.iter().zip(&a.1) {
+            let mut best = (f32::INFINITY, usize::MAX);
+            let mut second = f32::INFINITY;
+            for (j, db) in b.1.iter().enumerate() {
+                let d: f32 = da.iter().zip(db).map(|(p, q)| (p - q) * (p - q)).sum();
+                if d < best.0 {
+                    second = best.0;
+                    best = (d, j);
+                } else if d < second {
+                    second = d;
+                }
+            }
+            if best.1 == usize::MAX || best.0 > 0.64 * second {
+                continue;
+            }
+            let (ex, ey) = map(ka.x, ka.y);
+            displacements.push((b.0[best.1].x - ex, b.0[best.1].y - ey));
+        }
+        if displacements.is_empty() {
+            return 0;
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mx = median(displacements.iter().map(|d| d.0).collect());
+        let my = median(displacements.iter().map(|d| d.1).collect());
+        displacements
+            .iter()
+            .filter(|d| (d.0 - mx).hypot(d.1 - my) < 1.0)
+            .count()
+    }
+
+    #[test]
+    fn sift_descriptors_are_rotation_invariant() {
+        let (w, h) = (192usize, 160usize);
+        let pixels = random_texture(w, h, 7);
+        // 180 degrees: (x, y) -> (w-1-x, h-1-y). 90 degrees clockwise:
+        // (x, y) -> (h-1-y, x) in a h x w image.
+        let rot180: Vec<f32> = (0..w * h).map(|i| pixels[w * h - 1 - i]).collect();
+        let mut rot90 = vec![0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                rot90[x * h + (h - 1 - y)] = pixels[y * w + x];
+            }
+        }
+        for vlfeat in [false, true] {
+            let config = SiftConfig {
+                vlfeat_compatible_descriptor: vlfeat,
+                ..SiftConfig::default()
+            };
+            let extract = |px: &[f32], ww: usize, hh: usize| {
+                extract_sift(&GrayImage::new(ww, hh, px).unwrap(), &config).unwrap()
+            };
+            let base = extract(&pixels, w, h);
+            assert!(
+                base.0.len() > 50,
+                "texture yields {} keypoints",
+                base.0.len()
+            );
+            let r180 = consistent_matches(&base, &extract(&rot180, w, h), |x, y| {
+                ((w - 1) as f64 - x, (h - 1) as f64 - y)
+            });
+            let r90 = consistent_matches(&base, &extract(&rot90, h, w), |x, y| {
+                ((h - 1) as f64 - y, x)
+            });
+            eprintln!(
+                "vlfeat={vlfeat}: {} keypoints, consistent matches 90 deg {r90}, 180 deg {r180}",
+                base.0.len()
+            );
+            // Before the keypoint-frame binning fix the default descriptor
+            // kept 3 (wrong) matches at 180 degrees.
+            assert!(r180 >= 40, "vlfeat={vlfeat}: 180 deg {r180}");
+            assert!(r90 >= 20, "vlfeat={vlfeat}: 90 deg {r90}");
+        }
+    }
 
     /// A dark image with one bright Gaussian blob at `center`.
     fn blob_image(width: usize, height: usize, center: (f64, f64), sigma_px: f64) -> Vec<f32> {

@@ -66,6 +66,12 @@ pub(super) enum PairSource {
     /// base pass, then expands transitively for
     /// [`TRANSITIVE_ROUNDS`] rounds.
     Transitive,
+    /// COLMAP's `spatial_matcher`: each image with a GPS fix
+    /// (`--gps-priors` / `--gps-priors-from-exif`) is paired with its nearest
+    /// fixes (`--spatial-max-neighbors`, `--spatial-max-distance`,
+    /// horizontal distance unless `--spatial-use-z`); images without a fix
+    /// get their VLAD top-k pairs.
+    Spatial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,8 +104,9 @@ impl std::str::FromStr for PairSource {
             "temporal-pyramid" => Ok(Self::TemporalPyramid),
             "vocab-tree" => Ok(Self::VocabTree),
             "transitive" => Ok(Self::Transitive),
+            "spatial" => Ok(Self::Spatial),
             other => Err(format!(
-                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|temporal-pyramid|vocab-tree|transitive)"
+                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|temporal-pyramid|vocab-tree|transitive|spatial)"
             )),
         }
     }
@@ -522,6 +529,18 @@ where
     let mut diagnose_fixed_rotation_ba: Option<String> = None;
     let mut diagnose_model_score_file: Option<PathBuf> = None;
     let mut initial_poses_file: Option<PathBuf> = None;
+    let mut gps_priors_file: Option<PathBuf> = None;
+    let mut gps_priors_format = PriorCoordinates::Wgs84;
+    let mut gps_priors_from_exif = false;
+    let mut gps_prior_std = 1.0f64;
+    let mut gps_prior_std_vertical = 1.0f64;
+    let mut gps_prior_max_error: Option<f64> = None;
+    let mut gps_prior_reject_outliers = false;
+    let mut spatial_max_neighbors = 50usize;
+    let mut spatial_max_distance = 100.0f64;
+    let mut spatial_use_z = false;
+    let mut gps_prior_loss_scale: Option<f64> =
+        Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE);
     let mut diagnose_colmap_track_membership: Option<PathBuf> = None;
     let mut pose_guided_track_splitting = false;
     let mut pose_guided_track_splitting_graph_support = false;
@@ -568,6 +587,7 @@ where
     let mut sift_vlfeat_compatible_descriptor = false;
     let mut sift_vlfeat_compatible_detector = false;
     let mut sift_vlfeat_bilinear_orientations = false;
+    let mut sift_legacy = false;
     let mut sift_vlfeat_compatible_output_order = false;
     let mut sift_colmap_compatible_grayscale = false;
     let mut sift_split_colmap_detector_grayscale = false;
@@ -606,6 +626,34 @@ where
             "--joint-global-positioning" => joint_global_positioning = true,
             "--calibrated-view-edges-only" => calibrated_view_edges_only = true,
             "--images-dir" => images_dir = Some(PathBuf::from(a.remove(i + 1))),
+            "--gps-priors" => gps_priors_file = Some(PathBuf::from(a.remove(i + 1))),
+            "--gps-priors-format" => gps_priors_format = a.remove(i + 1).parse()?,
+            "--gps-priors-from-exif" => gps_priors_from_exif = true,
+            "--gps-prior-std" => {
+                gps_prior_std = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--gps-prior-std-vertical" => {
+                gps_prior_std_vertical = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--gps-prior-max-error" => {
+                gps_prior_max_error = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--gps-prior-reject-outliers" => gps_prior_reject_outliers = true,
+            "--spatial-max-neighbors" => {
+                spatial_max_neighbors = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--spatial-max-distance" => {
+                spatial_max_distance = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--spatial-use-z" => spatial_use_z = true,
+            "--gps-prior-robust-loss" => {
+                gps_prior_loss_scale =
+                    Some(visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE)
+            }
+            "--gps-prior-least-squares" => gps_prior_loss_scale = None,
+            "--gps-prior-loss-scale" => {
+                gps_prior_loss_scale = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
             "--feature-extractor" => {
                 feature_extractor = match a.remove(i + 1).as_str() {
                     "files" => FeatureExtractorKind::Files,
@@ -645,6 +693,7 @@ where
             "--sift-vlfeat-compatible-descriptor" => sift_vlfeat_compatible_descriptor = true,
             "--sift-vlfeat-compatible-detector" => sift_vlfeat_compatible_detector = true,
             "--sift-vlfeat-bilinear-orientations" => sift_vlfeat_bilinear_orientations = true,
+            "--sift-legacy" => sift_legacy = true,
             "--sift-vlfeat-compatible-output-order" => sift_vlfeat_compatible_output_order = true,
             "--sift-colmap-compatible-grayscale" => sift_colmap_compatible_grayscale = true,
             "--sift-split-colmap-detector-grayscale" => sift_split_colmap_detector_grayscale = true,
@@ -1467,6 +1516,44 @@ where
         )
     };
 
+    // The built-in SIFT defaults to the COLMAP/VLFeat-compatible detector and
+    // descriptor, with the settings `gsplat_photos` uses (L1-root, m = 3, two
+    // orientations, larger scales kept first). The historical extractor stays
+    // behind `--sift-legacy`. It is also used, with a note, when a flag only
+    // it supports is given (affine shapes, anisotropic views, scale-adaptive
+    // gradients, standard orientation peaks, an appended magnification, GPU
+    // extraction), so such commands keep their meaning. An explicit
+    // `--sift-vlfeat-compatible-*` flag selects exactly what it names.
+    let legacy_only_flag = sift_affine
+        || sift_multi_anisotropy
+        || sift_scale_adaptive_gradients
+        || sift_standard_orientations
+        || sift_append_descriptor_magnification.is_some()
+        || gpu_sift;
+    let explicit_compatible = sift_vlfeat_compatible_detector
+        || sift_vlfeat_compatible_descriptor
+        || sift_vlfeat_bilinear_orientations;
+    if !sift_legacy && !explicit_compatible {
+        if legacy_only_flag {
+            if feature_extractor == FeatureExtractorKind::Sift {
+                eprintln!(
+                    "note: a legacy-only SIFT flag is set; using the legacy SIFT extractor (--sift-legacy)"
+                );
+            }
+        } else {
+            sift_vlfeat_compatible_detector = true;
+            sift_vlfeat_compatible_descriptor = true;
+            sift_vlfeat_bilinear_orientations = true;
+            sift_l1_root = true;
+            sift_prefer_larger_scale = true;
+            if sift_max_orientations == 0 {
+                sift_max_orientations = 2;
+            }
+            if !sift_descriptor_magnification_explicit {
+                sift_descriptor_magnification = 3.0;
+            }
+        }
+    }
     if !sift_descriptor_magnification.is_finite() || sift_descriptor_magnification <= 0.0 {
         return Err(format!(
             "--sift-descriptor-magnification must be finite and > 0, got {sift_descriptor_magnification}"
@@ -1541,6 +1628,27 @@ where
         return Err(
             "--sift-split-colmap-detector-grayscale cannot be combined with --sift-colmap-compatible-grayscale".into(),
         );
+    }
+    if (gps_priors_file.is_some() || gps_priors_from_exif) && mapper != MapperKind::Incremental {
+        return Err(
+            "--gps-priors / --gps-priors-from-exif currently require --mapper incremental".into(),
+        );
+    }
+    if pair_source == PairSource::Spatial && gps_priors_file.is_none() && !gps_priors_from_exif {
+        return Err("--pair-source spatial needs --gps-priors or --gps-priors-from-exif".into());
+    }
+    if pair_source == PairSource::Spatial && exhaustive {
+        return Err("--pair-source spatial cannot be combined with --exhaustive".into());
+    }
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if spatial_max_neighbors == 0 || !positive(spatial_max_distance) {
+        return Err("--spatial-max-neighbors / --spatial-max-distance must be positive".into());
+    }
+    if gps_priors_file.is_some() && gps_priors_from_exif {
+        return Err("--gps-priors and --gps-priors-from-exif are exclusive".into());
+    }
+    if !positive(gps_prior_std) || !positive(gps_prior_std_vertical) {
+        return Err("--gps-prior-std / --gps-prior-std-vertical must be positive".into());
     }
     if initial_poses_file.is_some() && mapper != MapperKind::Incremental {
         return Err("--initial-poses currently requires --mapper incremental".into());
@@ -2267,6 +2375,17 @@ where
         diagnose_fixed_rotation_ba,
         diagnose_model_score_file,
         initial_poses_file,
+        gps_priors_file,
+        gps_priors_format,
+        gps_priors_from_exif,
+        gps_prior_std,
+        gps_prior_std_vertical,
+        gps_prior_max_error,
+        gps_prior_reject_outliers,
+        gps_prior_loss_scale,
+        spatial_max_neighbors,
+        spatial_max_distance,
+        spatial_use_z,
         diagnose_colmap_track_membership,
     };
     validate_persistent_match_worker_args(&parsed)?;

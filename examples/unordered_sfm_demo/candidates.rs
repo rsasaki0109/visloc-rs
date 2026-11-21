@@ -1550,6 +1550,7 @@ pub(super) fn candidate_pairs(
             args.retrieval_component_manifest.as_deref(),
             args.retrieval_min_frame_gap,
         ),
+        PairSource::Spatial => candidate_pairs_spatial(features, image_names, args),
         PairSource::VocabTree | PairSource::Transitive => Ok(candidate_pairs_vocab_tree(
             features,
             args.vocab_tree_branching,
@@ -1589,6 +1590,7 @@ pub(super) fn candidate_manifest_metadata(
         PairSource::TemporalPyramid => ("temporal-pyramid-v1", "temporal-pyramid"),
         PairSource::VocabTree => ("vocab-tree-v1", "vocab-tree"),
         PairSource::Transitive => ("transitive-v1", "transitive"),
+        PairSource::Spatial => ("spatial-v1", "spatial"),
     };
     metadata.insert("candidate_policy".to_owned(), policy.to_owned());
     metadata.insert("pair_source".to_owned(), pair_source.to_owned());
@@ -1733,4 +1735,45 @@ pub(super) fn expand_transitive(
     }
     out.sort_unstable();
     out
+}
+
+/// `--pair-source spatial`: COLMAP's `spatial_matcher` over the GPS priors,
+/// plus VLAD top-k pairs for the images without a fix.
+pub(super) fn candidate_pairs_spatial(
+    features: &[FeatureSet],
+    image_names: &[String],
+    args: &Args,
+) -> Result<Vec<(usize, usize)>, String> {
+    let (priors, _) = load_gps_priors(args, image_names).map_err(|e| e.to_string())?;
+    let priors =
+        priors.ok_or("--pair-source spatial needs --gps-priors or --gps-priors-from-exif")?;
+    let positions: Vec<Option<Point3<f64>>> = (0..image_names.len())
+        .map(|i| priors.priors.get(i).copied().flatten().map(|p| p.position))
+        .collect();
+    let mut pairs = spatial_pairs(
+        &positions,
+        args.spatial_max_neighbors,
+        args.spatial_max_distance,
+        !args.spatial_use_z,
+    );
+    let spatial = pairs.len();
+    let without_fix = positions.iter().filter(|p| p.is_none()).count();
+    if without_fix > 0 {
+        let vlad = candidate_pairs_vlad(features, args.vocab_size, args.retrieval_topk, false);
+        pairs.extend(
+            vlad.into_iter()
+                .filter(|&(i, j)| positions[i].is_none() || positions[j].is_none()),
+        );
+        pairs.sort_unstable();
+        pairs.dedup();
+    }
+    println!(
+        "spatial pairs: {spatial} from {} images with a fix (up to {} neighbours within {} m{}), {} more for {without_fix} images without one",
+        positions.len() - without_fix,
+        args.spatial_max_neighbors,
+        args.spatial_max_distance,
+        if args.spatial_use_z { ", 3D distance" } else { ", horizontal" },
+        pairs.len() - spatial,
+    );
+    Ok(pairs)
 }
