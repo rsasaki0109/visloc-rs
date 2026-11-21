@@ -473,6 +473,120 @@ python3 scripts/plot_nav_sim.py --map runs/gz_nav/map/occupancy.yaml \
   --run "visloc=runs/gz_nav/nav.csv" --out runs/gz_nav/nav.png
 ```
 
+## Real to sim: a simulator made of a 3D Gaussian splat of real photos
+
+Gazebo needs a world modelled by hand. Here the world is the splat that
+visloc-rs's own SfM and 3DGS make from photos of a real place, and Nav2
+drives a robot through it on visloc localization. Everything is from public
+data and runs on a CPU.
+
+<p align="center">
+  <img src="assets/gs_tum_real_vs_sim.jpg" alt="Four pairs of images of a large hall. Left: real photos from TUM RGB-D's Pioneer robot, held out of the splat's training. Right: the 3DGS simulator rendered at the same poses. The tripods, a yellow die, a plant, a globe, a desk and the hall's walls match; the renders are a little softer." width="640">
+</p>
+
+**The place.** TUM RGB-D fr2/pioneer_360, pioneer_slam and pioneer_slam3
+(CC BY 4.0): a Pioneer robot with a Kinect drives loops in a hall, at the
+height a robot's camera is. One in five frames, 1,339 in all, undistorted
+with the Kinect's calibration.
+
+**SfM.** `gsplat_photos --steps 0 --cpu` with the intrinsics held fixed:
+1,334 of 1,339 images registered, 61,110 points, 9 minutes on 4 cores.
+Photo SfM has no scale and no up. `gs/align_sfm_tum.py` fits the one
+similarity (7 numbers) that takes the SfM camera centres onto the motion
+capture (metres, z up, the floor at z = 0). The ground truth sets only those
+7 numbers: every pose is the SfM's. After the fit, the SfM's own camera
+centres are 3.7 cm RMSE from the motion capture over the three sequences.
+
+**3DGS.** `gsplat_train` on the metric model, 20 px cropped off the
+undistortion's border: 7,000 steps, 403k Gaussians, held-out PSNR 25.0 dB,
+2.3 hours on the CPU (lavapipe Vulkan).
+
+**The simulator** (`gs/gs_sim.py`):
+
+- **Robot.** A differential drive on `cmd_vel`. Its wheel odometry (`odom ->
+  base_link`) has a 2% distance-scale error, a 3% turn-rate error and a
+  0.002 rad/s yaw bias.
+- **Camera.** `gsplat_render_server` renders the splat at the camera's
+  pose with the Kinect's own lens distortion, 640 x 480 at 10 Hz, about
+  70 ms an image.
+- **Collisions and scan.** The splat has no collision geometry, so
+  `gs/make_gs_scene.py` builds a 2D grid of what the robot can hit from
+  the opaque, small Gaussians 6–80 cm above the floor. Cells within 0.45 m
+  of the capture path are free, since the robot drove there. Cells farther
+  than 1.5 m from every training camera are a fence, because the splat is
+  only trustworthy near its photos. A 360° scan is ray-cast in that grid.
+- **Clock.** The simulator owns `/clock`, and each step waits for its
+  image, so a slow renderer slows simulated time rather than the robot.
+
+**Localization.** The map comes from `tum_rgbd_save_map --keep-world`
+along pioneer_slam's SfM poses, and `visloc_map_localize_node` localizes the
+rendered camera against it (`--extrinsics tf`). Two maps were tried, each
+on the same 39 m drive along pioneer_slam's path (`gz/drive_route.py`):
+
+| Map built from | Images localized | `/map_pose` error, RMSE / median / max |
+| --- | ---: | --- |
+| the real Kinect images and depth | 4 of 450 | 52 / 43 / 100 cm (wheel odometry) |
+| **the splat's renders and depth** (`gs/render_tum_seq.py`) | **216 of 350** | **6.7 / 1.3 / 44 cm** |
+
+The renders look like the photos, as the figure shows. But they are softer:
+150–400 ORB corners an image, with descriptors that rarely match the real
+images' within the quality gate. So a map of the real images does not
+localize the simulator's camera. A map of the splat's own renders does. That
+is also what a robot would build if it mapped inside the simulator. A real
+robot uses real images for both the map and the queries.
+
+**Nav2.** `gs/gs_nav.launch.py` starts the simulator, map localization on
+the render map, map_server on that map's occupancy grid and Nav2 (the
+Gazebo setup's `nav2_params.yaml`). `nav_goals.py --scene` sends 5 goals
+spread over the hall:
+
+| Run | Goals reached | Contacts | `/map_pose` error, RMSE / median / max | Drive |
+| --- | ---: | ---: | --- | --- |
+| 3DGS simulator, render map | **5/5** (goal 5 on the 2nd try) | 0 | 8.7 / 1.8 / 28 cm | 106 s simulated |
+
+Video: [media/gs_tum_nav.mp4](media/gs_tum_nav.mp4). Where Nav2's path
+leaves the capture paths, the camera sees the splat's floaters. Localization
+then waits for the next good view, and the wheel odometry carries the pose
+until it comes.
+
+### Reproduce the 3DGS simulator
+
+```bash
+for s in 360 slam slam3; do
+  curl -L https://cvg.cit.tum.de/rgbd/dataset/freiburg2/rgbd_dataset_freiburg2_pioneer_$s.tgz | tar -xz -C runs/gs_tum/data
+done
+# undistort every 5th frame into runs/gs_tum/images as <sequence>_<timestamp>.png (OpenCV, the Kinect's
+# fr2 calibration, the same K out), then:
+cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
+  --images runs/gs_tum/images --out runs/gs_tum/sfm --steps 0 --cpu \
+  --camera "PINHOLE 640 480 520.9 521.0 325.1 249.7" --no-refine-intrinsics \
+  --window 20 --retrieval 30 --max-keypoints 4096 --mask-black 12
+python3 ros2/visloc-ros2/gs/align_sfm_tum.py --model runs/gs_tum/sfm/sparse/0 \
+  --images runs/gs_tum/sfm/images --data runs/gs_tum/data --out runs/gs_tum/metric
+# crop 20 px off each side of the images (PINHOLE 600 440 520.9 521 305.1 229.7) into runs/gs_tum/train, then:
+cargo run --release -p visloc-gsplat-train --features gpu --example gsplat_train -- \
+  --data runs/gs_tum/train --steps 7000 --max-gaussians 400000 --out runs/gs_tum/scene.ply
+CAM="FULL_OPENCV 640 480 520.9 521.0 325.1 249.7 0.2312 -0.7849 -0.0033 -0.0001 0.9172 0 0 0"
+python3 ros2/visloc-ros2/gs/render_tum_seq.py --splat runs/gs_tum/scene.ply \
+  --trajectory runs/gs_tum/metric/slam.tum --out runs/gs_tum/render_slam --camera "$CAM"
+cargo run --release --features image-io --example tum_rgbd_save_map -- \
+  --seq-dir runs/gs_tum/render_slam --trajectory runs/gs_tum/metric/slam.tum --out runs/gs_tum/map \
+  --fx 520.9 --fy 521.0 --cx 325.1 --cy 249.7 --k1 0.2312 --k2 -0.7849 --p1 -0.0033 --p2 -0.0001 \
+  --k3 0.9172 --match-radius-px 12 --max-depth 6 --keyframe-m 0.05 --keyframe-deg 4 --max-hamming 70 --keep-world
+cargo run --release --example visual_map_to_occupancy -- --map-dir runs/gs_tum/map --floor-z 0 \
+  --max-range 8 --out runs/gs_tum/map/occupancy
+python3 ros2/visloc-ros2/gs/make_gs_scene.py --splat runs/gs_tum/scene.ply \
+  --model runs/gs_tum/metric/sparse/0 --out runs/gs_tum/sim/scene.json --camera "$CAM" \
+  --camera-height 0.55 --camera-forward 0 --start=-2.33,-2.18,1.0
+# add "goals": [[x, y, yaw], ...] to scene.json, then:
+ros2 launch ros2/visloc-ros2/gs/gs_nav.launch.py scene:=runs/gs_tum/sim/scene.json map:=runs/gs_tum/map
+python3 ros2/visloc-ros2/gz/nav_goals.py --world-from-map identity.json \
+  --scene runs/gs_tum/sim/scene.json --retries 3 --spin-after 5 --out runs/gs_tum/nav.json
+```
+
+`identity.json` is `{"x": 0, "y": 0, "yaw": 0}`: the simulator's world is
+the map's frame.
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every

@@ -6,6 +6,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Real to sim: a robot simulator made of a 3D Gaussian splat** (docs/navigation.md,
+  `ros2/visloc-ros2/gs/`). From public photos (TUM RGB-D's Pioneer hall),
+  visloc-rs's SfM (put in metres by a 7-number fit to the motion capture,
+  3.7 cm RMSE) and 3DGS (held-out PSNR 25.0 dB) make the world;
+  `gs_sim.py` drives a robot through it with the camera rendered by the new
+  `gsplat_render_server` (pose in, image and optionally depth out), wheel
+  odometry, a scan of a collision grid built from the splat, and `/clock`.
+  Nav2 on `visloc_map_localize_node` reaches 5/5 goals with no contacts at
+  8.7 cm `/map_pose` RMSE, on a map built from the splat's renders
+  (`render_tum_seq.py`); a map of the real images localizes 4 of 450
+  rendered images. Also `gsplat_train --alpha-mask`, `level_sfm.py`.
 - **Robot navigation with Nav2** (docs/navigation.md). New crate
   `visloc-navigation`: `OccupancyMapper` builds the 2D occupancy grid of a
   visual map from its landmarks and camera-to-landmark rays (a 2.5D log-odds
