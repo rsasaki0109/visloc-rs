@@ -657,8 +657,28 @@ The overlays show the localization itself:
   keypoints circled.
 - **The cyan ring** is where visloc puts the robot.
 
-The video is of a third run with the same settings. It reached 4/4 goals with
-no contacts, at 4.1 / 1.7 / 34 cm `/map_pose` error (RMSE / median / max).
+The video is of the 1.2 m run below.
+
+**A lower camera.** A delivery robot's camera is nearer 1 m than 2.26 m.
+Rendered 1.2 m over the ground, the street's buildings, trees and signs look
+as they do from the capture height, and the road is a little smeared. At
+0.7 m the road dissolves into haze: from below, the ground's Gaussians are
+seen edge-on.
+
+For a 1.2 m camera:
+
+- The localization map is rebuilt from renders at that height along the
+  walk: the same faces, lowered to the ground plus 1.2 m. It has 1,799
+  keyframes and 33,181 landmarks.
+- The occupancy grid starts obstacles at 0.3 m (`--min-height 0.3`). From
+  the lower view, the smeared road left landmarks just above the floor, and
+  with the default 0.1 m they closed the corridor: Nav2 could not plan from
+  the first goal to the second.
+
+| Camera height | Goals reached | Contacts | `/map_pose` error, RMSE / median / max | Images localized |
+| --- | ---: | ---: | --- | ---: |
+| 2.26 m (the capture height), the third run | 4/4 | 0 | 4.1 / 1.7 / 34 cm | — |
+| **1.2 m** | **4/4** | 0 | **4.3 / 2.2 / 24 cm** | 663 of 850 |
 
 ## The occupancy grid of a visual map
 
