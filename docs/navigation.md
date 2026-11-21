@@ -587,6 +587,60 @@ python3 ros2/visloc-ros2/gz/nav_goals.py --world-from-map identity.json \
 `identity.json` is `{"x": 0, "y": 0, "yaw": 0}`: the simulator's world is
 the map's frame.
 
+### A street from a 360-degree video
+
+A 360° camera sees every direction at once, so one walk trains the splat
+for every heading the robot may face. The source is walk 0313afa5 of
+[OverMaps360_50](https://huggingface.co/datasets/OverTheReality/OverMaps360_50)
+(an Insta360 X5 carried on a pole through a town's streets; CC BY-NC 4.0,
+gated on Hugging Face; faces and plates are blurred in the data). Its first
+300 frames cover 121 m of walking, 100 s.
+
+- **SfM.** `gsplat_photos --insv ... --max-size 640 --window 2 --cpu
+  --imu-frame-period 0.333683` registered all 3,000 lens faces, with
+  497,069 points, in 61 minutes. The camera's own IMU gives the model's
+  scale: 1.1507 m per unit ([insta360_imu_scale.md](insta360_imu_scale.md)).
+  So no ground truth is used at all.
+- **Levelling.** `gs/level_sfm.py` puts z up from the cameras' mean up and
+  the floor at 0 from a RANSAC plane under them. The camera rode 2.26 m above
+  the ground. The street climbs by about 0.9 m over its last 40 m, so
+  `make_gs_scene.py --terrain` takes the ground's height from the camera
+  path.
+- **3DGS.** `gsplat_train --alpha-mask` on the faces, with the dataset's
+  blacked-out pixels (blurred faces, the camera's pole) left out of the
+  loss: 7,000 steps, 607k Gaussians, held-out PSNR 22.0 dB, 2.9 hours on the
+  CPU.
+- **Robot.** Its camera is at the capture height, 2.26 m over the ground, a
+  pole-mounted camera. A splat only looks right near the height of its
+  photos. It renders one 640 x 640, 90° face ahead; with `--mono`, because
+  640 x 640 rgb8 messages (1.2 MB) did not get through RustDDS to the
+  localization node. The fence keeps the robot within 3 m of the walk.
+- **Localization map.** `render_tum_seq.py` renders the 6 horizontal faces
+  of every frame, colour and depth, and `tum_rgbd_save_map` builds the map
+  from them: 1,799 keyframes, 40,345 landmarks. The occupancy grid comes
+  from that map.
+
+Nav2 drove to 4 goals spread along the walk, the last one at its end:
+
+| Run | Goals reached | Contacts | `/map_pose` error, RMSE / median / max | Images localized |
+| --- | ---: | ---: | --- | ---: |
+| default projection window (5 s, 2 m) | 3/4 | 0 | 94 / 2.4 / 250 cm | 466 of 800 |
+| `--projection_fresh_s 60 --projection_fresh_m 15 --projection_radius 40` | **4/4** | 0 | **3.6 / 1.7 / 21 cm** | 694 of 850 |
+
+In the first run, Nav2 cut across an S-bend about 64 m along the walk, away
+from where the photos were taken. The renders there broke up, and a few
+localizations failed in a row. That put the robot more than 2 m from its last
+fix, so map localization stopped searching around the predicted pose. The
+map-wide search does not work on renders (3 to 26 inliers), and none
+succeeded again. The wheel odometry then drifted 2.4 m, and the last goal
+could not be planned. With a 60 s, 15 m projection window, the search around
+the predicted pose picks up again where the renders are good. Of 850
+localizations, 692 were by projection.
+
+Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). First, the
+real 360° frames against the simulator at the same spots. Then the robot's
+drive, in 360°, with the map.
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every
