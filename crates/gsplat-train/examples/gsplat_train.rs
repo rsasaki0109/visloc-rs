@@ -3,8 +3,12 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu --example gsplat_train -- \
 //!     --data <colmap_root> --steps 7000 --out scene.ply [--eval-every 1000] \
-//!     [--max-face-size 1600] [--min-face-points 15] [--faces-dir <dir>]
+//!     [--max-face-size 1600] [--min-face-points 15] [--faces-dir <dir>] [--alpha-mask]
 //! ```
+//!
+//! `--alpha-mask` leaves out of the loss the pixels whose image alpha is
+//! below 128 (RGBA images: masked-out content such as blurred faces or the
+//! camera's holder).
 //!
 //! Initialises from `sparse/0/points3D.txt` (or `points3D.bin`; the model may
 //! be text or binary), holds out every 8th view (the brush / Inria split),
@@ -64,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--normal-start" => cfg.normal_start = next()?.parse()?,
             // Per-image affine colour correction (exposure / white balance).
             "--appearance" => cfg.appearance = true,
+            "--alpha-mask" => cfg.alpha_mask = true,
             "--max-face-size" => equirect.max_face_size = next()?.parse()?,
             "--min-face-points" => equirect.min_face_points = next()?.parse()?,
             "--faces-dir" => equirect.faces_dir = Some(PathBuf::from(next()?)),

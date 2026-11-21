@@ -25,7 +25,8 @@ differential drive driven by `cmd_vel`. It publishes:
 fx fy cx cy k1 k2 p1 p2 k3 0 0 0`, and its width and height; `camera_height` and
 `camera_forward`: where it sits on base_link, metres),
 the collision grid (`.npy`, 1 = occupied; its x0, y0, resolution), the
-start pose and the robot's radius. The splat is in the map's frame: metres,
+start pose, the robot's radius and optionally `ground` (a height map in the
+grid's frame, for a sloping street). The splat is in the map's frame: metres,
 z up, the floor at z = 0.
 """
 
@@ -127,6 +128,7 @@ class Sim(Node):
         self.renderer = Renderer(args.server, sp(scene['splat']), cam)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
+        self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
         self.pose = [x, y, yaw]          # true pose in the map frame
@@ -228,6 +230,14 @@ class Sim(Node):
                 self.record.write(f'{self.t:.3f},{self.pose[0]:.4f},{self.pose[1]:.4f},{self.pose[2]:.4f},'
                                   f'{self.odom[0]:.4f},{self.odom[1]:.4f},{self.odom[2]:.4f},{self.collisions}\n')
 
+    def ground_z(self, x, y):
+        if self.ground is None:
+            return 0.0
+        g = self.grid
+        i = min(max(int((x - g.x0) / g.res), 0), self.ground.shape[1] - 1)
+        j = min(max(int((y - g.y0) / g.res), 0), self.ground.shape[0] - 1)
+        return float(self.ground[j, i])
+
     def publish_scan(self, t):
         n = self.args.scan_rays
         r = self.grid.scan(self.pose[0], self.pose[1], self.pose[2], n, self.args.scan_range)
@@ -244,7 +254,7 @@ class Sim(Node):
         x, y, yaw = self.pose
         c, s = math.cos(yaw), math.sin(yaw)
         fwd = self.scene['camera_forward']
-        centre = np.array([x + c * fwd, y + s * fwd, self.scene['camera_height']])
+        centre = np.array([x + c * fwd, y + s * fwd, self.scene['camera_height'] + self.ground_z(x, y)])
         # camera axes in the map: x right = -left, y down, z forward
         R_wc = np.array([[s, 0, c], [-c, 0, s], [0, -1, 0]], dtype=float)
         R_cw = R_wc.T
