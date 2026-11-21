@@ -43,6 +43,7 @@ visloc-mapping
 visloc-slam
 visloc-basalt
 visloc-objects
+visloc-navigation
 visloc-gsplat-core
 visloc-gsplat-render
 visloc-sift-gpu

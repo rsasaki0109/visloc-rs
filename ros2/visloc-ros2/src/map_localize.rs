@@ -82,6 +82,14 @@ pub struct MapLocalizeOptions {
     /// agrees with it.
     pub projection_fresh_s: f64,
     pub projection_fresh_m: f64,
+    /// After an odometry reset (`OdomCorrector::reset`), the body's last
+    /// map pose is the projection prior for the new odometry frame, for
+    /// this long after that pose (and within `projection_fresh_m` of travel
+    /// in the new frame): a VIO reset by its lost-tracking monitor stops the
+    /// robot, so it is still about there. Fixes found with it pass the same
+    /// gates as any; 0 turns it off (map-wide matching only until the
+    /// correction is set again).
+    pub reset_prior_s: f64,
     /// Threads of the map-wide search.
     pub match_threads: usize,
     /// Map-wide search: landmarks closer than this to the best one count as
@@ -120,6 +128,7 @@ impl Default for MapLocalizeOptions {
             projection_radius_px: Some(20.0),
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
+            reset_prior_s: 30.0,
             match_threads: 1,
             duplicate_radius_m: None,
             extra_descriptors: 0,
@@ -710,6 +719,7 @@ pub enum FixEvent {
 /// Pairs fixes with odometry by stamp and keeps the [`OdomCorrection`].
 #[derive(Clone, Debug)]
 pub struct OdomCorrector {
+    options: MapLocalizeOptions,
     correction: OdomCorrection,
     odom: OdomBuffer,
     /// Fixes waiting for their odometry: stamp, map pose, weak.
@@ -719,11 +729,17 @@ pub struct OdomCorrector {
     latest_fix_ns: Option<i64>,
     fresh_ns: i64,
     fresh_m: f64,
+    /// The body's last map pose before an odometry reset, and its stamp.
+    carried: Option<(i64, SE3)>,
+    /// `carried` expressed for the new odometry frame: map from odom, and
+    /// the odometry position it was taken at.
+    reset_guess: Option<(SE3, Vector3<f64>)>,
 }
 
 impl OdomCorrector {
     pub fn new(options: &MapLocalizeOptions) -> Self {
         Self {
+            options: options.clone(),
             correction: OdomCorrection::new(options.correction.clone()),
             odom: OdomBuffer::new(options.odom_history_s),
             pending: VecDeque::new(),
@@ -732,6 +748,27 @@ impl OdomCorrector {
             latest_fix_ns: None,
             fresh_ns: (options.projection_fresh_s * 1e9) as i64,
             fresh_m: options.projection_fresh_m,
+            carried: None,
+            reset_guess: None,
+        }
+    }
+
+    /// Starts over after the odometry restarted in a new frame (a VIO
+    /// reset): the correction, the odometry and the queued fixes go; the map
+    /// pose is unset until fixes set it again. The stamp of the latest
+    /// localization stays, so that [`ImageCadence`] tries every image again.
+    /// The body's last map pose is carried over as a prior for the new frame
+    /// (`MapLocalizeOptions::reset_prior_s`), through further resets too.
+    pub fn reset(&mut self) {
+        let latest_fix_ns = self.latest_fix_ns;
+        let carried = self
+            .latest_map_pose()
+            .map(|pose| (pose.stamp_ns, pose.map_from_body))
+            .or_else(|| self.carried.clone());
+        *self = Self::new(&self.options);
+        self.latest_fix_ns = latest_fix_ns;
+        if self.options.reset_prior_s > 0.0 {
+            self.carried = carried;
         }
     }
 
@@ -776,6 +813,14 @@ impl OdomCorrector {
     ) -> (Vec<FixEvent>, Option<MapPose>) {
         self.odom.push(stamp_ns, odom_from_body.clone());
         self.correction.observe_odometry(stamp_ns, &odom_from_body);
+        if self.reset_guess.is_none() {
+            if let Some((_, map_from_body)) = &self.carried {
+                self.reset_guess = Some((
+                    map_from_body.compose(&odom_from_body.inverse()),
+                    odom_from_body.translation,
+                ));
+            }
+        }
         if self
             .latest_odom
             .as_ref()
@@ -795,7 +840,7 @@ impl OdomCorrector {
         let (Some(map_from_odom), Some((fix_ns, fix_position))) =
             (self.correction.map_from_odom(), self.correction.last_fix())
         else {
-            return OdomLookup::Unavailable;
+            return self.reset_prior(stamp_ns);
         };
         if stamp_ns - fix_ns > self.fresh_ns {
             return OdomLookup::Unavailable;
@@ -803,6 +848,30 @@ impl OdomCorrector {
         match self.odom.lookup(stamp_ns, self.max_gap_ns) {
             OdomLookup::Pose(odom_from_body)
                 if (odom_from_body.translation - fix_position).norm() > self.fresh_m =>
+            {
+                OdomLookup::Unavailable
+            }
+            OdomLookup::Pose(odom_from_body) => {
+                OdomLookup::Pose(map_from_odom.compose(&odom_from_body))
+            }
+            other => other,
+        }
+    }
+
+    /// Before the correction is set again after a reset: the carried map
+    /// pose, moved by the new frame's odometry (see [`Self::reset`]).
+    fn reset_prior(&self, stamp_ns: i64) -> OdomLookup {
+        let (Some((carried_ns, _)), Some((map_from_odom, start))) =
+            (&self.carried, &self.reset_guess)
+        else {
+            return OdomLookup::Unavailable;
+        };
+        if (stamp_ns - carried_ns) as f64 * 1e-9 > self.options.reset_prior_s {
+            return OdomLookup::Unavailable;
+        }
+        match self.odom.lookup(stamp_ns, self.max_gap_ns) {
+            OdomLookup::Pose(odom_from_body)
+                if (odom_from_body.translation - start).norm() > self.fresh_m =>
             {
                 OdomLookup::Unavailable
             }
@@ -1117,6 +1186,90 @@ mod tests {
             [FixOutcome::Unused]
         );
         assert_eq!(MapLocalizeOptions::default().weak_min_inliers, 15);
+    }
+
+    #[test]
+    fn reset_drops_the_correction_for_a_new_odometry_frame() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let odom = |i: i64| pose(i as f64 * 0.1, 0.0);
+        for i in 0..3 {
+            core.add_odom(i * 50 * MS, odom(i));
+            core.add_fix(i * 50 * MS, offset().compose(&odom(i)));
+        }
+        assert!(core.is_set());
+        let before = core.latest_map_pose().unwrap().map_from_body;
+        core.reset();
+        assert!(!core.is_set());
+        assert!(core.latest_map_pose().is_none());
+        assert_eq!(core.pending_fixes(), 0);
+        assert_eq!(core.latest_fix_ns(), Some(100 * MS));
+        assert!(matches!(core.prior(150 * MS), OdomLookup::Unavailable));
+        // The VIO restarted at its own origin; fixes set a new correction
+        // that puts the robot where it was.
+        let restarted = |i: i64| pose(i as f64 * 0.001, 0.0);
+        let map_from_new_odom = before.compose(&restarted(0).inverse());
+        for i in 3..6 {
+            core.add_odom(i * 50 * MS, restarted(i - 3));
+            core.add_fix(i * 50 * MS, map_from_new_odom.compose(&restarted(i - 3)));
+        }
+        assert!(core.is_set());
+        let after = core.latest_map_pose().unwrap().map_from_body;
+        assert!((after.translation - before.translation).norm() < 0.01);
+    }
+
+    #[test]
+    fn a_reset_carries_the_last_map_pose_as_a_prior() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let odom = |i: i64| pose(i as f64 * 0.1, 0.0);
+        for i in 0..3 {
+            core.add_odom(i * 50 * MS, odom(i));
+            core.add_fix(i * 50 * MS, offset().compose(&odom(i)));
+        }
+        let before = core.latest_map_pose().unwrap().map_from_body;
+        core.reset();
+        // Reset again before the new frame's first pose (a blackout resets
+        // the VIO every half second): the pose is still carried.
+        core.add_odom(200 * MS, pose(5.0, 0.0));
+        core.reset();
+        let restarted = |i: i64| pose(-3.0 + i as f64 * 0.01, 0.0);
+        core.add_odom(300 * MS, restarted(0));
+        core.add_odom(350 * MS, restarted(1));
+        let OdomLookup::Pose(prior) = core.prior(350 * MS) else {
+            panic!("no prior after the reset");
+        };
+        // Where the robot was, plus the 1 cm it moved in the new frame.
+        let expected = before
+            .compose(&restarted(0).inverse())
+            .compose(&restarted(1));
+        assert!((prior.translation - expected.translation).norm() < 1e-9);
+        assert!((prior.translation - before.translation).norm() < 0.02);
+        // Not after `reset_prior_s`, nor after `projection_fresh_m` of travel.
+        core.add_odom(31 * 1000 * MS, restarted(2));
+        assert!(matches!(
+            core.prior(31 * 1000 * MS),
+            OdomLookup::Unavailable
+        ));
+        let mut far = OdomCorrector::new(&MapLocalizeOptions::default());
+        for i in 0..3 {
+            far.add_odom(i * 50 * MS, odom(i));
+            far.add_fix(i * 50 * MS, offset().compose(&odom(i)));
+        }
+        far.reset();
+        far.add_odom(300 * MS, restarted(0));
+        far.add_odom(350 * MS, pose(0.0, 0.0));
+        assert!(matches!(far.prior(350 * MS), OdomLookup::Unavailable));
+        // Off with reset_prior_s 0.
+        let mut off = OdomCorrector::new(&MapLocalizeOptions {
+            reset_prior_s: 0.0,
+            ..MapLocalizeOptions::default()
+        });
+        for i in 0..3 {
+            off.add_odom(i * 50 * MS, odom(i));
+            off.add_fix(i * 50 * MS, offset().compose(&odom(i)));
+        }
+        off.reset();
+        off.add_odom(300 * MS, restarted(0));
+        assert!(matches!(off.prior(300 * MS), OdomLookup::Unavailable));
     }
 
     #[test]

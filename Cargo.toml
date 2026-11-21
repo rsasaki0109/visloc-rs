@@ -46,6 +46,7 @@ members = [
     "pipelines/fusion",
     "pipelines/basalt",
     "pipelines/objects",
+    "pipelines/navigation",
 ]
 # Standalone crates with their own Cargo.lock: the pyo3/maturin Python
 # bindings (an extension-module cdylib must not join `cargo test --workspace`
@@ -160,6 +161,7 @@ visloc-slam = { path = "pipelines/slam", version = "0.4.0" }
 visloc-fusion = { path = "pipelines/fusion", version = "0.4.0" }
 visloc-basalt = { path = "pipelines/basalt", version = "0.4.0" }
 visloc-objects = { path = "pipelines/objects", version = "0.4.0" }
+visloc-navigation = { path = "pipelines/navigation", version = "0.4.0" }
 ndarray = { version = "0.17", optional = true }
 visloc-sift-gpu = { path = "crates/sift-gpu", version = "0.4.0", optional = true }
 visloc-ba-gpu = { path = "crates/ba-gpu", version = "0.4.0", optional = true }
