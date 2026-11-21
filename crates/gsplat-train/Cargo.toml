@@ -48,6 +48,11 @@ path = "examples/gsplat_eval.rs"
 required-features = ["gpu"]
 
 [[example]]
+name = "gsplat_render_server"
+path = "examples/gsplat_render_server.rs"
+required-features = ["gpu"]
+
+[[example]]
 name = "gsplat_mesh"
 path = "examples/gsplat_mesh.rs"
 required-features = ["gpu"]
