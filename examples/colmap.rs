@@ -22,7 +22,27 @@
 //!   `--SiftExtraction.max_features`, `--SiftExtraction.use_gpu`
 //! - `exhaustive_matcher`: `--database_path`, `--SiftMatching.use_gpu`
 //! - `mapper`: `--database_path`, `--output_path`, `--Mapper.min_num_matches`,
-//!   `--Mapper.ba_use_gpu`
+//!   `--Mapper.ba_use_gpu`, and the GPS-prior flags below
+//! - `pose_prior_mapper`: `mapper` with `--Mapper.use_prior_position 1`
+//! - `spatial_matcher`: `exhaustive_matcher` restricted to pairs whose GPS
+//!   fixes are close (`--SpatialMatching.max_num_neighbors` 50,
+//!   `--SpatialMatching.max_distance` 100 m, `--SpatialMatching.ignore_z` 1)
+//!
+//! GPS priors, as in COLMAP >= 3.10 (`pose_priors` + `use_prior_position`):
+//! `feature_extractor` stores each image's EXIF GPS fix under `<db>.d/`, and
+//! `mapper --Mapper.use_prior_position 1` (or `pose_prior_mapper`) aligns the
+//! model to the fixes and keeps them as covariance-weighted camera-centre
+//! priors in every global bundle adjustment, so the model comes out metric in
+//! a local ENU frame (origin in `sparse/enu_origin.txt`). Flags:
+//! `--prior_position_std_x/_y/_z` (metres, used where a fix states none;
+//! default 1 m each, as COLMAP), `--overwrite_priors_covariance 1` (use them everywhere),
+//! `--Mapper.prior_position_ransac_max_error` (alignment inlier threshold,
+//! default 3 sigma), `--use_robust_loss_on_prior_position` (Cauchy loss, on
+//! by default here, unlike COLMAP; `0` turns it off) with
+//! `--prior_position_loss_scale` (default sqrt(chi2_95(3))),
+//! and this shim's `--pose_priors_path FILE`
+//! (`NAME LAT LON ALT [STD_H [STD_V]]` lines, or `NAME X Y Z ...` with
+//! `--pose_priors_format cartesian`) in place of the EXIF fixes.
 //!
 //! The `use_gpu` flags need a build with `--features gpu` (wgpu SIFT, batched
 //! GPU matching, GPU global bundle adjustment); pair verification always
@@ -35,6 +55,10 @@ use std::path::{Path, PathBuf};
 
 // Everything is reached through the `visloc_rs` facade (`src/lib.rs`).
 use rayon::prelude::*;
+use visloc_rs::io::gps_prior::{
+    read_exif_gps, spatial_pairs, GpsPriorSet, PriorCoordinates, PriorFrame,
+};
+use visloc_rs::slam::incremental_sfm::{estimate_position_prior_alignment, SfmPositionPriors};
 use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig};
 use visloc_rs::vision::matching::DescriptorMatch;
 use visloc_rs::vision::two_view::{
@@ -189,9 +213,27 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
         std::fs::create_dir_all(dir.join("features"))
             .map_err(|e| format!("mkdir {:?}: {e}", dir.join("features")))?;
         let images = list_images(&image_dir)?;
-        let config = SiftConfig {
-            max_keypoints,
-            ..SiftConfig::default()
+        // COLMAP's SIFT: the VLFeat-compatible detector (subpixel
+        // localization) and descriptor, with `gsplat_photos`' settings. The
+        // GPU extractor implements the legacy detector only, so `use_gpu`
+        // keeps that.
+        let config = if gpu {
+            SiftConfig {
+                max_keypoints,
+                ..SiftConfig::default()
+            }
+        } else {
+            SiftConfig {
+                max_keypoints,
+                normalization: visloc_rs::vision::features::sift::SiftNormalization::L1Root,
+                descriptor_magnification: 3.0,
+                max_orientations: 2,
+                prefer_larger_scale: true,
+                vlfeat_compatible_detector: true,
+                vlfeat_compatible_descriptor: true,
+                vlfeat_bilinear_orientations: true,
+                ..SiftConfig::default()
+            }
         };
         #[cfg(feature = "gpu")]
         let mut sift_gpu = if gpu {
@@ -202,6 +244,30 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
         };
         #[cfg(not(feature = "gpu"))]
         let _ = gpu;
+        // COLMAP's feature extractor reads each image's EXIF GPS into the
+        // database's pose priors; here they go to `<db>.d/gps_priors.txt`.
+        let mut gps = String::from("# NAME LAT_DEG LON_DEG ALT_M (EXIF GPS)\n");
+        let mut gps_count = 0usize;
+        for image in &images {
+            if let Some(fix) = read_exif_gps(image) {
+                let name = image.file_name().unwrap().to_string_lossy();
+                gps.push_str(&format!(
+                    "{name} {:.9} {:.9} {}\n",
+                    fix.lat_deg,
+                    fix.lon_deg,
+                    fix.alt_m.map_or("nan".to_string(), |a| format!("{a:.4}"))
+                ));
+                gps_count += 1;
+            }
+        }
+        if gps_count > 0 {
+            let gps_path = dir.join("gps_priors.txt");
+            std::fs::write(&gps_path, gps).map_err(|e| format!("write {gps_path:?}: {e}"))?;
+            println!(
+                "feature_extractor: EXIF GPS on {gps_count}/{} images -> {gps_path:?}",
+                images.len()
+            );
+        }
         for image in &images {
             let name = image.file_name().unwrap().to_string_lossy().to_string();
             let stem = Path::new(&name).file_stem().unwrap().to_string_lossy();
@@ -330,9 +396,31 @@ fn verify_pair(
 }
 
 fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
+    cmd_matcher(args, false)
+}
+
+/// COLMAP's `spatial_matcher`: only pairs whose GPS fixes are near each
+/// other (`--SpatialMatching.max_num_neighbors` 50,
+/// `--SpatialMatching.max_distance` 100 m, `--SpatialMatching.ignore_z` 1).
+fn cmd_spatial_matcher(args: &Args) -> Result<(), String> {
+    cmd_matcher(args, true)
+}
+
+fn cmd_matcher(args: &Args, spatial: bool) -> Result<(), String> {
     let db = PathBuf::from(args.get_or("database_path", "database.db"));
     let gpu = args.use_gpu("SiftMatching.use_gpu")?;
-    warn_unknown_flags(args, &["database_path", "SiftMatching.use_gpu"]);
+    warn_unknown_flags(
+        args,
+        &[
+            "database_path",
+            "SiftMatching.use_gpu",
+            "SpatialMatching.max_num_neighbors",
+            "SpatialMatching.max_distance",
+            "SpatialMatching.ignore_z",
+            "pose_priors_path",
+            "pose_priors_format",
+        ],
+    );
     #[cfg(not(feature = "gpu"))]
     let _ = gpu;
     let (features, names) = load_stored_features(&db)?;
@@ -340,9 +428,33 @@ fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
     let fx = 0.55 * w as f64;
     let camera = Camera::pinhole(1, w, h, fx, fx, w as f64 / 2.0, h as f64 / 2.0);
 
-    let all: Vec<(usize, usize)> = (0..names.len())
-        .flat_map(|i| ((i + 1)..names.len()).map(move |j| (i, j)))
-        .collect();
+    let all: Vec<(usize, usize)> = if spatial {
+        let (priors, _) = load_position_priors(args, &db, &names)?;
+        let positions: Vec<_> = priors
+            .priors
+            .iter()
+            .map(|p| p.map(|p| p.position))
+            .collect();
+        let max_neighbors: usize = args
+            .get_or("SpatialMatching.max_num_neighbors", "50")
+            .parse()
+            .map_err(|e| format!("max_num_neighbors: {e}"))?;
+        let max_distance = parse_f64(args, "SpatialMatching.max_distance", 100.0)?;
+        let ignore_z = !matches!(
+            args.get("SpatialMatching.ignore_z"),
+            Some("0") | Some("false")
+        );
+        let pairs = spatial_pairs(&positions, max_neighbors, max_distance, ignore_z);
+        println!(
+            "spatial_matcher: {} candidate pairs (up to {max_neighbors} neighbours within {max_distance} m)",
+            pairs.len()
+        );
+        pairs
+    } else {
+        (0..names.len())
+            .flat_map(|i| ((i + 1)..names.len()).map(move |j| (i, j)))
+            .collect()
+    };
     let total = all.len();
     #[cfg(feature = "gpu")]
     let gpu_bank = if gpu {
@@ -415,14 +527,95 @@ fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
     }
     std::fs::write(&path, text).map_err(|e| format!("write {path:?}: {e}"))?;
     println!(
-        "exhaustive_matcher: verified {}/{} pairs -> {path:?}",
+        "{}: verified {}/{} pairs -> {path:?}",
+        if spatial {
+            "spatial_matcher"
+        } else {
+            "exhaustive_matcher"
+        },
         pairs.len(),
         total
     );
     Ok(())
 }
 
+/// A COLMAP-style `0`/`1` flag.
+fn flag(args: &Args, key: &str) -> bool {
+    matches!(args.get(key), Some("1") | Some("true") | Some("True"))
+}
+
+fn parse_f64(args: &Args, key: &str, default: f64) -> Result<f64, String> {
+    args.get(key).map_or(Ok(default), |v| {
+        v.parse().map_err(|e| format!("--{key} {v:?}: {e}"))
+    })
+}
+
+/// The GPS priors of `names` for `--Mapper.use_prior_position`: the
+/// `--pose_priors_path` file, else the feature extractor's EXIF fixes.
+fn load_position_priors(
+    args: &Args,
+    db: &Path,
+    names: &[String],
+) -> Result<(SfmPositionPriors, PriorFrame), String> {
+    let (path, coordinates) = match args.get("pose_priors_path") {
+        Some(path) => (
+            PathBuf::from(path),
+            args.get_or("pose_priors_format", "wgs84")
+                .parse::<PriorCoordinates>()?,
+        ),
+        None => (data_dir(db).join("gps_priors.txt"), PriorCoordinates::Wgs84),
+    };
+    if !path.exists() {
+        return Err(format!(
+            "GPS priors needed: no {path:?} (the feature extractor \
+             writes it from EXIF GPS; or pass --pose_priors_path)"
+        ));
+    }
+    let mut set = GpsPriorSet::read(&path, coordinates).map_err(|e| e.to_string())?;
+    let std_x = parse_f64(args, "prior_position_std_x", 1.0)?;
+    let std_y = parse_f64(args, "prior_position_std_y", std_x)?;
+    let std_z = parse_f64(args, "prior_position_std_z", 1.0)?;
+    if flag(args, "overwrite_priors_covariance") {
+        for prior in set.priors.values_mut() {
+            prior.std_horizontal_m = None;
+            prior.std_vertical_m = None;
+        }
+    }
+    let (local, frame) = set.to_local_enu(names, None, nalgebra::Vector3::new(std_x, std_y, std_z));
+    let mut priors = SfmPositionPriors::from_local_priors(&local);
+    // Cauchy loss on by default (COLMAP's default is off): see
+    // docs/gps_prior_sfm.md. `--use_robust_loss_on_prior_position 0` turns it off.
+    priors.robust_loss_scale = None;
+    if !matches!(
+        args.get("use_robust_loss_on_prior_position"),
+        Some("0") | Some("false") | Some("False")
+    ) {
+        priors.robust_loss_scale = Some(parse_f64(
+            args,
+            "prior_position_loss_scale",
+            visloc_rs::slam::incremental_sfm::DEFAULT_PRIOR_LOSS_SCALE,
+        )?);
+    }
+    if let Some(max_error) = args.get("prior_position_ransac_max_error") {
+        priors.alignment_max_error = Some(
+            max_error
+                .parse()
+                .map_err(|e| format!("ransac max error: {e}"))?,
+        );
+    }
+    println!(
+        "GPS priors for {}/{} images from {path:?}",
+        priors.num_priors(),
+        names.len()
+    );
+    Ok((priors, frame))
+}
+
 fn cmd_mapper(args: &Args) -> Result<(), String> {
+    cmd_mapper_with(args, false)
+}
+
+fn cmd_mapper_with(args: &Args, force_prior_position: bool) -> Result<(), String> {
     let db = PathBuf::from(args.get_or("database_path", "database.db"));
     let output = PathBuf::from(args.get_or("output_path", "sparse"));
     let min_matches: usize = args
@@ -437,6 +630,16 @@ fn cmd_mapper(args: &Args) -> Result<(), String> {
             "output_path",
             "Mapper.min_num_matches",
             "Mapper.ba_use_gpu",
+            "use_prior_position",
+            "prior_position_std_x",
+            "prior_position_std_y",
+            "prior_position_std_z",
+            "overwrite_priors_covariance",
+            "prior_position_ransac_max_error",
+            "use_robust_loss_on_prior_position",
+            "prior_position_loss_scale",
+            "pose_priors_path",
+            "pose_priors_format",
         ],
     );
     #[cfg(feature = "gpu")]
@@ -501,12 +704,42 @@ fn cmd_mapper(args: &Args) -> Result<(), String> {
     let (w, h) = (1600u32, 1066u32);
     let fx = 0.55 * w as f64;
     let camera = Camera::pinhole(1, w, h, fx, fx, w as f64 / 2.0, h as f64 / 2.0);
+    let use_prior_position = force_prior_position || flag(args, "Mapper.use_prior_position");
+    let (position_priors, prior_frame) = if use_prior_position {
+        let (priors, frame) = load_position_priors(args, &db, &names)?;
+        (Some(priors), Some(frame))
+    } else {
+        (None, None)
+    };
     let config = IncrementalSfmConfig {
         min_seed_matches: min_matches,
+        position_priors: position_priors.clone(),
         ..IncrementalSfmConfig::default()
     };
     let result = incremental_sfm(&camera, &features, &pairwise, &config)
         .map_err(|e| format!("mapper failed: {e}"))?;
+    if let (Some(priors), Some(frame)) = (position_priors.as_ref(), prior_frame.as_ref()) {
+        match estimate_position_prior_alignment(&result.poses, priors) {
+            Some(check) => {
+                println!(
+                    "mapper: GPS priors: {}/{} registered prior images agree, RMSE {:.3} m (residual scale {:.4})",
+                    check.inliers.len(),
+                    check.num_candidates,
+                    check.inlier_rmse,
+                    check.similarity.scale
+                );
+                let sparse = output.join("sparse");
+                std::fs::create_dir_all(&sparse).map_err(|e| format!("mkdir {sparse:?}: {e}"))?;
+                let origin = sparse.join("enu_origin.txt");
+                std::fs::write(&origin, frame.describe())
+                    .map_err(|e| format!("write {origin:?}: {e}"))?;
+            }
+            None => println!(
+                "mapper: GPS priors were not used (fewer than {} registered images with a prior); the model keeps an arbitrary frame and scale",
+                priors.min_num_priors
+            ),
+        }
+    }
 
     // Write a COLMAP text model (cameras/images/points3D) via the exporter.
     type LandmarkObs = (usize, usize, nalgebra::Point2<f64>);
@@ -590,10 +823,12 @@ fn main() {
     let result = match args.flags.get("subcommand").map(String::as_str) {
         Some("feature_extractor") => cmd_feature_extractor(&args),
         Some("exhaustive_matcher") => cmd_exhaustive_matcher(&args),
+        Some("spatial_matcher") => cmd_spatial_matcher(&args),
         Some("mapper") => cmd_mapper(&args),
+        Some("pose_prior_mapper") => cmd_mapper_with(&args, true),
         Some("model_converter") => cmd_model_converter(&args),
         Some(other) => Err(format!(
-            "unknown subcommand `{other}` (expected feature_extractor | exhaustive_matcher | mapper | model_converter)"
+            "unknown subcommand `{other}` (expected feature_extractor | exhaustive_matcher | spatial_matcher | mapper | pose_prior_mapper | model_converter)"
         )),
         None => Err("usage: colmap <subcommand> [--flags] — see module docs".to_string()),
     };

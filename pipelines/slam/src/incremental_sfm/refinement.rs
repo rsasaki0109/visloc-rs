@@ -275,6 +275,29 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
     let poses_before = ba_debug.then(|| poses.to_vec());
     let points_before = ba_debug.then(|| track_point.to_vec());
     let registered_before = poses.iter().filter(|pose| pose.is_some()).count();
+    // GPS / position priors: move the model into the priors' frame first, so
+    // the warm start, the BA and its prior factor all see the aligned state.
+    let prior_alignment = config.position_priors.as_ref().and_then(|priors| {
+        let alignment = align_to_position_priors(poses, track_point, priors);
+        if position_prior_debug_enabled() {
+            match &alignment {
+                Some(a) => eprintln!(
+                    "sfm-prior: aligned registered={} candidates={} inliers={} scale={:.6e} rmse={:.3} max_error={:.3} degenerate={}",
+                    registered_before,
+                    a.num_candidates,
+                    a.inliers.len(),
+                    a.similarity.scale,
+                    a.inlier_rmse,
+                    a.max_error,
+                    a.degenerate,
+                ),
+                None => eprintln!(
+                    "sfm-prior: not aligned registered={registered_before} (too few registered prior images or no consensus)"
+                ),
+            }
+        }
+        alignment
+    });
     let warm_start_started = std::time::Instant::now();
     let warm_start_stats = if config.landmark_ba_warm_start_iterations > 0
         && registered_before >= config.landmark_ba_warm_start_min_registered_images
@@ -325,7 +348,28 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
     // anchor — the longest, best-conditioned baseline.
     let anchor = poses.iter().position(|p| p.is_some());
     let mut scale_anchor = None;
-    if let Some(anchor) = anchor {
+    // With aligned position priors the priors fix all 7 gauge DoF (COLMAP's
+    // `PosePriorBundleAdjuster` fixes no pose either); only a near-collinear
+    // prior set, which leaves the roll about its line free, keeps the anchor's
+    // rotation. Fewer than three usable prior rows fall back to the ordinary
+    // anchor + scale-anchor gauge.
+    let prior_factor = match (config.position_priors.as_ref(), prior_alignment.as_ref()) {
+        (Some(priors), Some(alignment)) => {
+            let factor = position_prior_factor(poses, priors, alignment);
+            (factor.observations.len() >= 3).then_some(factor)
+        }
+        _ => None,
+    };
+    let prior_gauge = prior_factor.is_some();
+    if let Some(factor) = prior_factor {
+        if prior_alignment.as_ref().is_some_and(|a| a.degenerate) {
+            if let Some(anchor) = anchor {
+                ba.fix_pose_rotation(anchor as u64);
+            }
+        }
+        ba.set_position_prior(factor);
+    }
+    if let Some(anchor) = anchor.filter(|_| !prior_gauge) {
         ba.fix_pose(anchor as u64);
         let anchor_center = poses[anchor]
             .as_ref()

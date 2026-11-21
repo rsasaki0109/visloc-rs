@@ -111,8 +111,9 @@ fn describe(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
                 ob = (wrapped / TAU) * 8.0;
                 ob = ob - 8.0 * floor(ob / 8.0);
                 val = m * exp(-(rx * rx + ry * ry) * inv_w);
-                cx = rx / cell + 1.5;
-                cy = ry / cell + 1.5;
+                // Bins in the keypoint frame (dx, dy), as the CPU `describe_raw`.
+                cx = dx / cell + 1.5;
+                cy = dy / cell + 1.5;
             }
         }
         s_val[t] = val;

@@ -244,10 +244,10 @@ var<workgroup> s_bin: array<u32, 64>;
 var<workgroup> s_val: array<f32, 64>;
 var<workgroup> hist: array<f32, 36>;
 
-// One workgroup per candidate. The legacy histogram reads the DoG gradient
-// at row `y` for `gx` and column `x + wx` for `gy`, independent of `wy`
-// (only the gaussian weight depends on it), so the window collapses to one
-// row of samples weighted by the column sum of the 2D gaussian.
+// One workgroup per candidate: the DoG gradient over the full
+// (2 radius + 1)^2 window, gaussian-weighted, as the CPU `assign_orientations`
+// isotropic path. (It used to read row `y` for every `wy`, a horizontal 1-D
+// slice that did not turn with the image.)
 @compute @workgroup_size(64)
 fn orientation(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     let ci = wid.y * 65535u + wid.x;
@@ -262,22 +262,20 @@ fn orientation(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
     let hist_sigma = p.hist_base * pow(p.k, f32(c.level) + c.ds) / f32(1u << p.octave);
     let radius = i32(ceil(hist_sigma * 3.0));
     let inv2s2 = 1.0 / (2.0 * hist_sigma * hist_sigma);
-    var col_sum = 0.0;
-    for (var wy = -radius; wy <= radius; wy = wy + 1) {
-        col_sum = col_sum + exp(-f32(wy * wy) * inv2s2);
-    }
     if (t < 36u) {
         hist[t] = 0.0;
     }
     let side = u32(2 * radius + 1);
-    for (var base = 0u; base < side; base = base + OT) {
+    let total = side * side;
+    for (var base = 0u; base < total; base = base + OT) {
         let s = base + t;
         var bin = 36u;
         var val = 0.0;
-        if (s < side) {
-            let wx = i32(s) - radius;
-            let gx = 0.5 * (dog_at(c.level, x + wx + 1, y) - dog_at(c.level, x + wx - 1, y));
-            let gy = 0.5 * (dog_at(c.level, x + wx, y + 1) - dog_at(c.level, x + wx, y - 1));
+        if (s < total) {
+            let wx = i32(s % side) - radius;
+            let wy = i32(s / side) - radius;
+            let gx = 0.5 * (dog_at(c.level, x + wx + 1, y + wy) - dog_at(c.level, x + wx - 1, y + wy));
+            let gy = 0.5 * (dog_at(c.level, x + wx, y + wy + 1) - dog_at(c.level, x + wx, y + wy - 1));
             let m = sqrt(gx * gx + gy * gy);
             if (m > 1.1920929e-7) {
                 var deg = degrees(atan2(gy, gx));
@@ -285,7 +283,7 @@ fn orientation(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
                     deg = deg + 360.0;
                 }
                 bin = min(u32(deg / 10.0), 35u);
-                val = m * exp(-f32(wx * wx) * inv2s2) * col_sum;
+                val = m * exp(-f32(wx * wx + wy * wy) * inv2s2);
             }
         }
         s_bin[t] = bin;

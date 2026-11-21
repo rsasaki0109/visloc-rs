@@ -62,6 +62,45 @@ All notable changes to `visloc-rs` will be documented here.
   carries the last map pose over an odometry reset as a projection prior
   (`reset_prior_s`): without it the robot did not relocalize there.
   `scripts/plot_nav_sim.py` draws the runs.
+- **GPS priors in incremental SfM (COLMAP `pose_prior_mapper` /
+  `use_prior_position`).** `IncrementalSfmConfig::position_priors` takes a
+  prior camera centre and per-axis σ per image.
+  - **What it does.** Once three registered images have one, every global
+    and periodic BA first aligns the model to the priors with a robust,
+    deterministic Sim(3). It then adds a covariance-weighted camera-centre
+    prior in place of the anchor/scale-anchor gauge. The model comes out
+    metric in local ENU.
+    - Every prior stays in the BA, under a Cauchy loss by default (COLMAP
+      uses least squares; `--gps-prior-least-squares` restores that).
+    - Without priors, or with fewer than three, nothing changes.
+  - **Inputs.** `visloc_io::gps_prior` reads EXIF GPS and a
+    `NAME LAT LON ALT [STD_H [STD_V]]` (or Cartesian) prior file and
+    converts fixes to ENU (exact WGS84).
+  - **CLIs.**
+    - `unordered_sfm_demo --gps-priors FILE | --gps-priors-from-exif`
+      (incremental mapper).
+    - In the `colmap` shim, `feature_extractor` stores EXIF GPS, and
+      `pose_prior_mapper` / `mapper --Mapper.use_prior_position 1` use it.
+    - Both write `enu_origin.txt`. σ defaults to 1 m per axis, as COLMAP.
+  - **Real onboard GNSS** (gravel-mine UAV set: 158 nadir images, low-cost
+    GNSS, a reference adjusted against surveyed control points; default
+    SIFT).
+    - The block's shape is right to 2.5 cm with priors, 0.47 m without.
+    - Camera positions land at 0.18 m once the GNSS's constant bias is
+      removed; the GNSS itself scatters 1.72 m.
+    - Least squares, Cauchy and σ 5/10 m are all equal there.
+  - **ETH3D courtyard, simulated GPS** (σ 0.5/0.5/1 m, two 30 m jumps):
+    38/38 registered, RMSE 0.30 m with the Cauchy default, 1.21 m with
+    least squares.
+  - **GPS pair selection** (COLMAP `spatial_matcher`):
+    `unordered_sfm_demo --pair-source spatial` and `colmap spatial_matcher`
+    pair each image with its nearest fixes (50 neighbours within 100 m,
+    horizontal; `visloc_io::gps_prior::spatial_pairs`).
+    - On the gravel set they recover 2,748 of the 2,781 pairs exhaustive
+      matching verifies, from 37 % of the candidates.
+    - VLAD retrieval was as good and cheaper there with the default SIFT.
+  - Details in docs/gps_prior_sfm.md.
+
 - **Localize a photo whose focal length is unknown**
   (`LocalizationPipeline::localize_with_unknown_focal`, `UnknownFocalLocalization`):
   P4Pf RANSAC (`visloc_vision::pnp::estimate_pose_with_focal`, minimal solver
@@ -281,6 +320,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **Built-in SIFT defaults to the COLMAP-compatible extractor**
+  (`unordered_sfm_demo --feature-extractor sift` and the `colmap` shim's
+  `feature_extractor`).
+  - The VLFeat/COLMAP-compatible detector (subpixel localization) and
+    descriptor, with `gsplat_photos`' settings (L1-root, magnification 3,
+    two orientations, larger scales first).
+  - The historical extractor reports integer-pixel keypoints. It stays
+    behind `--sift-legacy`, and is also used, with a note, when a flag
+    only it supports is given (`--sift-affine`, `--gpu-sift`, ...).
+  - **ETH3D courtyard** (38 photos): 38 registered instead of 23, and the
+    prior-free shape error is 0.088 m instead of 2.15 m.
+  - **Gravel-mine drone block:** 158 registered instead of 142–147, and
+    the shape error with GPS priors is 2.5 cm instead of 0.6 m.
+  - **The `colmap` shim** registers 37 of the 38 courtyard photos instead
+    of 12.
+  - The shim keeps the legacy extractor with `--SiftExtraction.use_gpu 1`.
+  - Feature extraction is slower: CPU only, with more keypoints matched.
+
 - **Stereo VO: the motion-scale rescue no longer locks in on a slowdown**
   (`StereoVoFrontendConfig::motion_scale_rescue_release_full_window`, on by
   default; `--no-motion-scale-rescue-release` restores the old behaviour).
@@ -303,6 +360,32 @@ All notable changes to `visloc-rs` will be documented here.
   rerun keeps later edits such as 0.4.0's highlights; `notes_ref` still
   picks another ref. A new `image` input chooses whether the image is
   rebuilt.
+
+### Fixed
+
+- **The default SIFT was not rotation invariant** (CPU `extract_sift` and
+  the GPU shaders, which mirrored it). A 180° turn of an image left 3
+  ratio-test matches, all wrong.
+  - **Orientation.** The isotropic orientation histogram read the gradient
+    at the keypoint's row for every window row, so orientations stayed near
+    0 / π whatever the image rotation.
+  - **Descriptor.** The default and scale-adaptive descriptors binned
+    samples by their image-frame offset instead of the keypoint-frame one,
+    so the 4×4 grid never turned with the keypoint.
+  - **Test.** The new `sift_descriptors_are_rotation_invariant` turns a
+    texture by 90° and 180°: 4 / 3 consistent matches before, 163 / 149
+    after.
+  - **Effect on the gravel-mine drone block**, whose strips alternate
+    heading by ~165°: exhaustive SfM registers 142 of 158 images (was 54)
+    and verifies 1,280 pairs (was 448).
+  - **Effect on ETH3D courtyard** (upright photos): 262 verified pairs and
+    32k inlier correspondences (were 233 and 21k).
+  - **The default SIFT output changes**, so results measured with the
+    built-in extractor shift. That includes
+    `--sift-vlfeat-compatible-descriptor`: its descriptor was already
+    rotation invariant, but it takes the default detector's orientations.
+    `--sift-vlfeat-compatible-detector` has its own orientation code and
+    is unchanged.
 
 ## 0.4.0 - 2026-11-17
 
