@@ -9,7 +9,7 @@ differential drive driven by `cmd_vel`. It publishes:
 - `odom` and `/tf` `odom -> base_link`: wheel odometry, with scale errors
   on the distance and the turn rate and a small yaw-rate bias, so it drifts
   as a real robot's does;
-- `camera/image` (`sensor_msgs/Image`, rgb8): the splat rendered at the
+- `camera/image` (`sensor_msgs/Image`, rgb8, or mono8 with `--mono`): the splat rendered at the
   camera's pose by `gsplat_render_server`, at `camera_hz`;
 - `/tf_static` `base_link -> camera_optical`;
 - `scan` (`sensor_msgs/LaserScan`, frame `base_link`): a 2D lidar, ray-cast
@@ -263,9 +263,13 @@ class Sim(Node):
         buf = self.renderer.render(R_cw, -R_cw @ centre)
         img = Image()
         img.header.stamp, img.header.frame_id = t, 'camera_optical'
-        img.height, img.width, img.encoding = cam['height'], cam['width'], 'rgb8'
-        img.step = cam['width'] * 3
-        img.data = buf
+        img.height, img.width = cam['height'], cam['width']
+        if self.args.mono:
+            a = np.frombuffer(buf, np.uint8).reshape(-1, 3).astype(np.uint16)
+            grey = ((a[:, 0] * 77 + a[:, 1] * 150 + a[:, 2] * 29) >> 8).astype(np.uint8)
+            img.encoding, img.step, img.data = 'mono8', cam['width'], grey.tobytes()
+        else:
+            img.encoding, img.step, img.data = 'rgb8', cam['width'] * 3, buf
         self.p_img.publish(img)
 
 
@@ -286,6 +290,8 @@ def main():
     p.add_argument('--max-alpha', dest='max_alpha', type=float, default=3.0)
     p.add_argument('--cmd-timeout', dest='cmd_timeout', type=float, default=0.5)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--mono', action='store_true',
+                   help='publish mono8 (a third of the bytes; large rgb8 images can stall some DDS stacks)')
     p.add_argument('--duration', type=float, default=0.0, help='stop after this many simulated seconds (0: never)')
     args = p.parse_args()
     with open(args.scene, encoding='utf-8') as f:

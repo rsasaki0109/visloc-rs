@@ -11,7 +11,8 @@ map's `occupancy.yaml`, and Nav2's navigation servers (the Gazebo setup's
 `nav2_params.yaml`). No AMCL: the robot's localization is visloc's.
 
 Arguments: scene, map, nodes, params_file, record (CSV of the true and
-odometry poses), rtf (largest real-time factor), log_level, and
+odometry poses), rtf (largest real-time factor), log_level, sim_args (extra
+`gs_sim.py` arguments, e.g. `--mono`), and
 localize_args (extra `visloc_map_localize_node` arguments, space-separated).
 """
 
@@ -35,6 +36,7 @@ def _setup(context):
     sim = [sys.executable, os.path.join(HERE, 'gs_sim.py'), '--scene', get('scene'), '--rtf', get('rtf')]
     if get('record'):
         sim += ['--record', get('record')]
+    sim += get('sim_args').split()
     return [
         ExecuteProcess(cmd=sim, output='screen', name='gs_sim'),
         ExecuteProcess(cmd=[os.path.join(get('nodes'), 'visloc_map_localize_node'), '--map', get('map'),
@@ -61,6 +63,7 @@ def generate_launch_description():
         DeclareLaunchArgument('record', default_value=''),
         DeclareLaunchArgument('rtf', default_value='1.0'),
         DeclareLaunchArgument('localize_args', default_value=''),
+        DeclareLaunchArgument('sim_args', default_value='', description='extra gs_sim.py arguments'),
         DeclareLaunchArgument('log_level', default_value='info', description="Nav2's log level"),
         OpaqueFunction(function=_setup),
         IncludeLaunchDescription(
