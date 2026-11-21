@@ -31,7 +31,8 @@ Scores are the leaderboard's means per challenge.
 | 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
 | 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
 | 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
-| 10 (2026-11-12) | 69.7 | **56.8** | 54.1 | **61.1** | **47.3** | **57.8** |
+| 10 (2026-11-12) | 69.7 | 56.8 | **54.1** | 61.1 | **47.3** | 57.8 |
+| 11 (2026-11-21) | **70.6** | **57.0** | 53.5 | **65.8** | 44.7 | **58.3** |
 | Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | FlexVIO (listed 2026-11-13) | 88.5 | 81.8 | 79.3 | 82.4 | 34.0 | 73.2 |
@@ -271,6 +272,24 @@ not evaluated, because the site could not be reached; submission 9 contains it.
   goes wrong where a tram passes, and the chain's first minute stayed about
   a metre uncertain where the wearer stands at the first marker. On the
   seven training sequences the fill adds a median of 4.2; here it adds 3.8.
+
+**Submission 11.** All 63 sequences again on GitHub Actions
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/44260664409), commit `06f4152`), with
+the Moving platform track bridged with the GPS as in submission 7 (the same ramps, within 10 s). Against
+submission 10:
+- **By day** the pass estimates the gyroscope's bias and scale change per degree of the SLAM cameras'
+  temperature, read from each recording's `.vrs`
+  ([The gyroscope and the temperature](lamaria_batch_ba.md#the-gyroscope-and-the-temperature)). The five
+  Short sequences of device 1WM093701G1276 (sequence_1_1, 1_3, 1_4, 1_13, 1_18) went back to SIFT in the
+  pass: submission 5's ALIKED runs were local, on a GPU. Short +0.9, Medium +0.2, Long −0.6.
+- **Low light** runs the batch pass after the online windows, with 30 iterations and the 3×3 gyroscope
+  response matrix ([Low light: the gyroscope's response
+  matrix](lamaria_batch_ba.md#low-light-the-gyroscopes-response-matrix)): +4.7, from 61.1 to 65.8.
+- **Moving platform** loses 2.6 (47.3 → 44.7): from new VIO and chain runs, under the same bridging.
+  Against submission 7 the ten sequences move by −8.0 … +2.5; sequence_5_5 (63.7 → 55.7), 5_10
+  (32.8 → 25.6) and 5_1 (43.4 → 37.4) lose most.
+
+The mean rises from 57.8 to 58.3, still sixth.
 
 ## Against GroundedSLAM, sequence by sequence
 
