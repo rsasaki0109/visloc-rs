@@ -125,6 +125,111 @@ impl SsimKernels {
     }
 }
 
+/// Normalised 1D gaussian, sigma 1.5, taps -5..5 (`ssim.wgsl`'s window).
+const GAUSS: [f32; 11] = [
+    0.0010284, 0.0075988, 0.0360008, 0.1093607, 0.2130055, 0.2660117, 0.2130055, 0.1093607,
+    0.0360008, 0.0075988, 0.0010284,
+];
+
+/// Separable 11x11 gaussian blur of one `w x h` map, zero padding: a
+/// horizontal pass, then a vertical one (the order `ssim.wgsl` uses), each
+/// as per-tap loops along a row so they vectorize.
+fn blur_plane(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    use rayon::prelude::*;
+    let mut tmp = vec![0.0f32; w * h];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let mut pad = vec![0.0f32; w + 10];
+        pad[5..5 + w].copy_from_slice(&src[y * w..(y + 1) * w]);
+        for (t, &g) in GAUSS.iter().enumerate() {
+            for (o, v) in out.iter_mut().zip(&pad[t..t + w]) {
+                *o += g * v;
+            }
+        }
+    });
+    let mut dst = vec![0.0f32; w * h];
+    dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        for (t, &g) in GAUSS.iter().enumerate() {
+            let yy = y as isize + t as isize - 5;
+            if yy < 0 || yy >= h as isize {
+                continue;
+            }
+            let row = &tmp[yy as usize * w..(yy as usize + 1) * w];
+            for (o, v) in out.iter_mut().zip(row) {
+                *o += g * v;
+            }
+        }
+    });
+    dst
+}
+
+/// The D-SSIM term on the host, for CPU adapters (lavapipe), where the
+/// tiled kernels' barriers make it ~50 ms a step at 600 x 440. Same
+/// definition as `ssim.wgsl`: `render` is RGB f32, `gt` packed RGBA8
+/// (alpha below 128 = masked out). Returns what the kernels add to
+/// `d_image`: `-lambda / (3 N) * dSSIM/dx` per pixel and channel.
+pub fn ssim_grad_host(render: &[f32], gt: &[u32], w: usize, h: usize, lambda: f32) -> Vec<f32> {
+    use rayon::prelude::*;
+    const C1: f32 = 0.0001;
+    const C2: f32 = 0.0009;
+    let n = w * h;
+    let valid: Vec<bool> = gt.iter().map(|g| (g >> 24) >= 128).collect();
+    let scale = lambda / (3.0 * n as f32);
+    let mut out = vec![0.0f32; n * 3];
+    let per_channel: Vec<Vec<f32>> = (0..3usize)
+        .into_par_iter()
+        .map(|c| {
+            let x: Vec<f32> = (0..n).map(|p| render[p * 3 + c]).collect();
+            let y: Vec<f32> = gt
+                .iter()
+                .map(|g| ((g >> (8 * c)) & 0xFF) as f32 / 255.0)
+                .collect();
+            let xx: Vec<f32> = x.iter().map(|v| v * v).collect();
+            let yy: Vec<f32> = y.iter().map(|v| v * v).collect();
+            let xy: Vec<f32> = x.iter().zip(&y).map(|(a, b)| a * b).collect();
+            let m: Vec<Vec<f32>> = [&x, &y, &xx, &yy, &xy]
+                .par_iter()
+                .map(|p| blur_plane(p, w, h))
+                .collect();
+            // dS/dmx, dS/dSxx, dS/dSxy at each valid window centre.
+            let (mut am, mut bm, mut cm) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
+            for p in 0..n {
+                if !valid[p] {
+                    continue;
+                }
+                let (mx, my) = (m[0][p], m[1][p]);
+                let a = 2.0 * mx * my + C1;
+                let b = 2.0 * (m[4][p] - mx * my) + C2;
+                let cc = mx * mx + my * my + C1;
+                let d = (m[2][p] - mx * mx) + (m[3][p] - my * my) + C2;
+                let s = a * b / (cc * d);
+                am[p] =
+                    (2.0 * my * b - 2.0 * my * a) / (cc * d) - s * (2.0 * mx / cc - 2.0 * mx / d);
+                bm[p] = -s / d;
+                cm[p] = 2.0 * a / (cc * d);
+            }
+            let g: Vec<Vec<f32>> = [&am, &bm, &cm]
+                .par_iter()
+                .map(|p| blur_plane(p, w, h))
+                .collect();
+            (0..n)
+                .map(|p| {
+                    if valid[p] {
+                        -scale * (g[0][p] + 2.0 * x[p] * g[1][p] + y[p] * g[2][p])
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    for (c, grad) in per_channel.iter().enumerate() {
+        for (p, v) in grad.iter().enumerate() {
+            out[p * 3 + c] = *v;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +312,19 @@ mod tests {
         }
         eprintln!("ssim grad worst error {worst:.2e} of max");
         assert!(worst < 1e-3, "worst relative error {worst}");
+
+        // The host version (CPU adapters) against the same reference.
+        let rf: Vec<f32> = render.iter().flatten().copied().collect();
+        let host = ssim_grad_host(&rf, &packed, w as usize, h as usize, lambda);
+        let mut worst_host = 0.0f64;
+        for (p, gp) in grad.iter().enumerate() {
+            for c in 0..3 {
+                let want = -(lambda as f64) * gp[c];
+                worst_host = worst_host.max((want - host[p * 3 + c] as f64).abs() / scale);
+            }
+        }
+        eprintln!("host ssim grad worst error {worst_host:.2e} of max");
+        assert!(worst_host < 1e-3, "host: worst relative error {worst_host}");
     }
 
     /// Sum over valid window centres and channels of the SSIM map (11x11

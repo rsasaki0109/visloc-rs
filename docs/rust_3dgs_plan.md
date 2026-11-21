@@ -665,7 +665,8 @@ differentiating against). Structure:
   where `rasterize_backward`'s subgroup reductions and atomics were 77% of
   a step. On a CPU adapter the renderer now runs both rasterizers on the
   host with rayon: TUM RGB-D pioneer (600 x 440, 7k steps) in 46 minutes
-  instead of 2 h 11 min, at the same PSNR (24.66 / 24.61 dB). Profile, settings and checks in
+  instead of 2 h 11 min, at the same PSNR (24.66 / 24.61 dB); with the
+  sorts and SSIM also on the host, 31.5 minutes (24.58 dB). Profile, settings and checks in
   [gsplat_cpu_training.md](gsplat_cpu_training.md).
 
 ### Stage 4 — Browser (optional, non-blocking)

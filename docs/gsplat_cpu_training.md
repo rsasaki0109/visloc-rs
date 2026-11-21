@@ -158,10 +158,45 @@ The backward went from 995 to 113 ms and the forward from 160 to 73 ms.
 | Host rasterizer, half resolution (scored at 600 x 440) | 27 min | 24.20 | 0.836 | 417k |
 | Host rasterizer, `--max-gaussians 200000` | 37 min | 24.43 | 0.842 | 215k |
 
+## Sorts and SSIM on the host
+
+At 400k gaussians (100 steps from the 7,000-step scene, `GSPLAT_TRAIN_PROFILE`),
+a step was still ~290 ms: the host rasterizers ~145 ms, L1 + SSIM 55 ms,
+Adam 35 ms, the depth sort (with the id pre-sort) 20 ms and the tile sort
+26 ms. With the host rasterizer on, three more stages now run on the host:
+
+- **Depth sort.** One `par_sort_unstable` of (depth bits, id) keys: the
+  same order as the device's two stable radix sorts. 20 -> 1 ms.
+- **Tile sort and tile offsets.** A counting sort by tile, which is stable,
+  as the radix sort is. The lists stay on the host for the rasterizers
+  (no readback in the backward pass) and are uploaded for the shader
+  passes. 27 ms -> under 1 ms.
+- **SSIM** (`loss::ssim_grad_host`): the same separable 11-tap blurs in
+  per-tap row loops that vectorize, on the image the host rasterizer
+  kept; its gradient is added to the L1 one in `d_image`. Not with
+  `--appearance`, whose backward reads `d_image` in the same pass.
+  ~55 -> ~21 ms. Its gradient matches the f64 reference to 1.2e-6 of the
+  maximum, as the shader's does.
+
+A step at 400k gaussians: 291 -> 228 ms. The sorts change nothing: a
+700-step run writes the same PLY, byte for byte, as with the device sorts.
+SSIM changes the last float bits, so the runs diverge as two seeds would:
+
+| Steps | Device sorts and SSIM | Host sorts and SSIM |
+| ---: | --- | --- |
+| 700 | 20.14 dB, 203 s | 20.03 dB, 140 s |
+| 2,000 | 22.05 dB, 636 s | 22.02 dB, 441 s |
+| 7,000 | 24.66 dB, 2,768 s * | 24.58 dB, **1,888 s** |
+
+\* Before the final-step densification change, which does not apply to
+a run at its cap.
+
+Both are deterministic: a run repeats its PLY byte for byte. From the
+first measurement to here, 7,000 steps went from 2 h 11 min to 31.5 min.
+
 ## What is left
 
-A step averages 0.4 s over the 7,000-step run (400k gaussians from step
-2,500). In the 200-step profile, the largest stages left beside the two
-host rasterizers (~190 ms) are SSIM (~50 ms) and the tile sort (~30 ms). The tile sort
-could move to the host as well, and the forward could keep its tile lists
-for the backward instead of reading them back.
+At 400k gaussians a step is now ~230 ms: the host rasterizers ~145 ms,
+Adam ~35 ms and SSIM ~21 ms. Adam updates every parameter every step
+(24M floats, memory-bound); updating only the visible gaussians would cut
+most of it but changes the optimizer, so it is not done here.

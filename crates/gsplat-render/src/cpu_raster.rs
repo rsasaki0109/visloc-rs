@@ -364,3 +364,57 @@ pub(crate) fn raster_forward(f: &Frame<'_>) -> Raster {
         });
     out
 }
+
+/// Host copies of a frame rasterized by [`raster_forward`], kept for the
+/// backward pass so it reads back only dL/dC.
+pub(crate) struct HostFrame {
+    /// The rendered image (RGB, row-major), as uploaded.
+    pub image: Vec<f32>,
+    pub projected: Vec<f32>,
+    pub sorted: Vec<u32>,
+    pub offsets: Vec<u32>,
+    pub final_t: Vec<f32>,
+    pub last_idx: Vec<u32>,
+}
+
+/// Sort `(tile, id)` intersections by tile, stably (a counting sort), and
+/// return the sorted tiles, the sorted ids and per tile `[start, end)` into
+/// them (`(u32::MAX, 0)` for an empty tile), as the device's radix sort and
+/// `tile_offsets.wgsl` produce them. Tiles past `num_tiles` sort last and
+/// get no range.
+pub(crate) fn sort_by_tile(
+    tiles: &[u32],
+    ids: &[u32],
+    num_tiles: u32,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    let nt = num_tiles as usize;
+    let mut next = vec![0usize; nt + 1];
+    for &t in tiles {
+        next[(t as usize).min(nt)] += 1;
+    }
+    let mut offsets = vec![0u32; nt * 2];
+    let mut at = 0usize;
+    for (t, slot) in next.iter_mut().enumerate() {
+        let count = *slot;
+        if t < nt {
+            let (s, e) = if count > 0 {
+                (at as u32, (at + count) as u32)
+            } else {
+                (u32::MAX, 0)
+            };
+            offsets[2 * t] = s;
+            offsets[2 * t + 1] = e;
+        }
+        *slot = at;
+        at += count;
+    }
+    let mut sorted_tiles = vec![0u32; tiles.len()];
+    let mut sorted = vec![0u32; tiles.len()];
+    for (&t, &id) in tiles.iter().zip(ids) {
+        let b = &mut next[(t as usize).min(nt)];
+        sorted_tiles[*b] = t;
+        sorted[*b] = id;
+        *b += 1;
+    }
+    (sorted_tiles, sorted, offsets)
+}
