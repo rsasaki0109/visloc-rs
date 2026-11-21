@@ -47,6 +47,15 @@ All notable changes to `visloc-rs` will be documented here.
   carries the last map pose over an odometry reset as a projection prior
   (`reset_prior_s`): without it the robot did not relocalize there.
   `scripts/plot_nav_sim.py` draws the runs.
+- **Localize a photo whose focal length is unknown**
+  (`LocalizationPipeline::localize_with_unknown_focal`, `UnknownFocalLocalization`):
+  P4Pf RANSAC (`visloc_vision::pnp::estimate_pose_with_focal`, minimal solver
+  vendored from OpenMVG-rs) estimates the focal length from the 2D-3D
+  correspondences, then the usual estimator and quality gate run with it.
+  Leave-one-out on the browser SfM's courtyard sample: 36/38 localized at a
+  1.03% median centre error, like the true-focal oracle (1.13%), against
+  351% with the no-EXIF prior (docs/unknown_focal_localization.md,
+  `bindings/sfm-web/examples/unknown_focal_loo.rs`).
 
 - **`merge_maps` merges maps of another calibration of the rig**
   (another day's): a camera that differs from the base map's under the same

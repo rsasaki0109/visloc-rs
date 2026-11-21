@@ -1694,3 +1694,77 @@ fn projection_window_reverse_ratio_rejects_invalid_configuration() {
         visloc_localization::CorrespondenceBuildError::InvalidQueryLandmarkRatio
     );
 }
+
+/// A query photographed at f = 900 px but described with f = 600 px (a wrong
+/// prior, as with a photo that has no EXIF): the fixed-focal path keeps few
+/// inliers, the unknown-focal path recovers the focal length and the pose.
+#[test]
+fn localizes_query_with_unknown_focal_length() {
+    let true_camera = Camera::pinhole(1, 1280, 960, 900.0, 900.0, 640.0, 480.0);
+    let prior_camera = Camera::pinhole(1, 1280, 960, 600.0, 600.0, 640.0, 480.0);
+    let pose = Pose::from_world_to_camera(
+        UnitQuaternion::from_euler_angles(0.05, -0.1, 0.02),
+        Vector3::new(0.2, -0.1, 0.5),
+    );
+    // Deterministic scattered points 4-9 m in front of the camera.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut map = VisualMap::new();
+    let mut store = LandmarkDescriptorStore::new();
+    let mut keypoints = Vec::new();
+    let mut descriptors = Vec::new();
+    for index in 0..80u64 {
+        let point = Point3::new(-2.5 + 5.0 * next(), -2.0 + 4.0 * next(), 4.0 + 5.0 * next());
+        let camera_point = pose.transform_world_point(&point);
+        let Some(mut pixel) = true_camera.project(&camera_point) else {
+            continue;
+        };
+        if !(0.0..1280.0).contains(&pixel.x) || !(0.0..960.0).contains(&pixel.y) {
+            continue;
+        }
+        pixel.x += next() - 0.5;
+        pixel.y += next() - 0.5;
+        let descriptor = vec![index as f32, 3.0, 1.0];
+        map.landmarks.insert(index, Landmark::new(index, point));
+        store.insert(index, descriptor.clone());
+        keypoints.push(pixel);
+        descriptors.push(descriptor);
+    }
+    assert!(keypoints.len() >= 50);
+    let query = QueryImage {
+        camera: prior_camera,
+        keypoints,
+        descriptors,
+    };
+    let pipeline = LocalizationPipeline::default();
+
+    let fixed = pipeline.localize_with_descriptor_store(&query, &map, &store);
+    let unknown = pipeline.localize_with_unknown_focal(
+        &query,
+        &map,
+        &store,
+        &visloc_rs::vision::pnp::P4PfRansacConfig::default(),
+    );
+
+    let camera = unknown.camera.expect("P4Pf should estimate a focal length");
+    let focal = camera.intrinsics().unwrap().0;
+    assert!((focal - 900.0).abs() < 9.0, "focal {focal}");
+    let result = unknown.result;
+    assert!(result.success);
+    assert!(result.inlier_count >= result.correspondence_count - 2);
+    let estimated = result.pose.unwrap();
+    let centre_error = (estimated.camera_center_world() - pose.camera_center_world()).norm();
+    assert!(centre_error < 0.05, "camera centre off by {centre_error} m");
+
+    assert!(
+        !fixed.success || fixed.inlier_count < result.inlier_count / 2,
+        "the wrong prior should cost most inliers: {} vs {}",
+        fixed.inlier_count,
+        result.inlier_count
+    );
+}

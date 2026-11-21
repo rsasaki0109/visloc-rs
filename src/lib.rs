@@ -121,6 +121,7 @@ pub use visloc_localization::{
     IntersectCandidateSelector, LocalizationConfig, LocalizationPipeline, LocalizationPrior,
     MapProvider, MapProviderStats, PriorSubmapSelector, ProjectionCorrespondenceBuilder,
     RadiusLandmarkSelector, RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
+    UnknownFocalLocalization,
 };
 pub use visloc_mapping::{
     build_stereo_metric_points, build_stereo_replenish_candidates, AppliedMapUpdate,
