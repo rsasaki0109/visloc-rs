@@ -309,6 +309,9 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.ones(cyclists, int)])
             n += cyclists
         self.xy, self.yaw = np.zeros((n, 2)), np.zeros(n)
+        self.normal = np.zeros((n, 2))
+        self.dodge = np.zeros(n)        # extra side offset while stepping round the robot (m)
+        self.waited = np.zeros(n)       # seconds blocked by the robot
         self._place()
 
     def _at(self, s):
@@ -321,23 +324,43 @@ class Crowd:
     def _place(self):
         p, d = self._at(self.s)
         normal = np.stack([-d[:, 1], d[:, 0]], 1)
+        self.normal = normal
         for i in range(len(self.s)):
-            off = self.side[i]                    # shrink the side offset until the spot is free
+            off = self.side[i] + self.dodge[i]    # shrink the side offset until the spot is free
             while abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
                 off *= 0.7
             self.xy[i] = p[i] + off * normal[i]
             self.yaw[i] = math.atan2(d[i, 1] * self.dir[i], d[i, 0] * self.dir[i])
 
     def step(self, dt, robot_xy):
+        """Walk on. Someone with the robot just ahead steps aside, away from it, slowing
+        down; they stop only while still in its way (a wall on that side: after 3 s they
+        try the other side). Once past, they drift back to their own line."""
         for i in range(len(self.s)):
             rel = np.asarray(robot_xy) - self.xy[i]
             ahead = rel @ [math.cos(self.yaw[i]), math.sin(self.yaw[i])]
+            lateral = rel @ self.normal[i]                       # robot's side offset from this person
             gap = self.yield_m * (2.5 if self.kind[i] else 1.0)
-            if 0 < ahead < gap and abs(rel @ [-math.sin(self.yaw[i]), math.cos(self.yaw[i])]) < 0.7:
-                continue                          # the robot is just in front: wait
-            self.s[i] += self.dir[i] * self.v[i] * dt
+            clear = 0.9 if self.kind[i] else 0.75
+            speed = self.v[i]
+            if 0 < ahead < gap and abs(lateral) < clear:
+                away = -1.0 if lateral > 0 else 1.0
+                if self.waited[i] > 3.0:
+                    away = -away                                 # that side is blocked: try the other
+                if self.waited[i] > 6.0:
+                    self.waited[i] = 0.0
+                self.dodge[i] = float(np.clip(self.dodge[i] + away * 0.8 * dt, -2.0, 2.0))
+                self.waited[i] += dt
+                speed = 0.0 if abs(lateral) < 0.5 else 0.35 * self.v[i]
+            else:
+                self.waited[i] = 0.0
+                if ahead < -0.5 or abs(lateral) > clear + 0.3:   # past or well clear: back to their line
+                    self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
+            if speed == 0.0:
+                continue
+            self.s[i] += self.dir[i] * speed * dt
             # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
-            self.phase[i] = (self.phase[i] + self.v[i] * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
+            self.phase[i] = (self.phase[i] + speed * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
             if self.s[i] < 0 or self.s[i] > self.length:
                 self.s[i] = min(max(self.s[i], 0), self.length)
                 self.dir[i] *= -1
