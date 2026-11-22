@@ -42,10 +42,12 @@
 //!   dropped, as the SLAM's map export drops single-view ones. A landmark's
 //!   descriptor is its observations' medoid.
 //!
-//! - **Smoothing.** With `--smoothing-sigma PX`, each keyframe is blurred
-//!   (Gaussian, PX pixels) before its corners and descriptors are taken, and
-//!   the map records it (`feature_smoothing_sigma`), so the localizers blur
-//!   their queries alike; against sensor noise.
+//! - **Frontend.** With `--local-contrast`, each keyframe's local contrast is
+//!   equalized (CLAHE, 8 x 8 tiles) before its corners and descriptors are
+//!   taken; with `--smoothing-sigma PX`, it is then blurred (Gaussian, PX
+//!   pixels). The map records both (`feature_local_contrast`,
+//!   `feature_smoothing_sigma`), so the localizers prepare their queries
+//!   alike: against dark or noisy images.
 //!
 //! The camera is Freiburg 1's (FULL_OPENCV, `--fx` ... `--k3` to override;
 //! Freiburg 3's images are already undistorted, so pass zero coefficients).
@@ -59,6 +61,7 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Point2, Point3, Quaternion, Rotation3, UnitQuaternion, Vector3};
 use serde_json::json;
+use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::mapper::features::{
     compute_angles, compute_descriptors, detect_keypoints_mapping_with,
 };
@@ -86,6 +89,7 @@ struct Args {
     match_radius_px: f64,
     max_hamming: u32,
     smoothing_sigma: f64,
+    local_contrast: bool,
     min_observations: usize,
     keep_world: bool,
 }
@@ -95,7 +99,7 @@ impl Args {
         "usage: tum_rgbd_save_map --seq-dir DIR --trajectory FILE --out DIR \
          [--keyframe-m M] [--keyframe-deg D] [--max-points N] [--min-depth M] \
          [--max-depth M] [--depth-scale S] [--track-keyframes N] [--match-radius-px P] \
-         [--max-hamming N] [--min-observations N] [--smoothing-sigma PX] [--keep-world] [--fx F --fy F --cx C --cy C \
+         [--max-hamming N] [--min-observations N] [--local-contrast] [--smoothing-sigma PX] [--keep-world] [--fx F --fy F --cx C --cy C \
          --k1 K --k2 K --p1 P --p2 P --k3 K]"
             .into()
     }
@@ -123,6 +127,7 @@ impl Args {
             match_radius_px: 4.0,
             max_hamming: 60,
             smoothing_sigma: 0.0,
+            local_contrast: false,
             min_observations: 2,
             keep_world: false,
         };
@@ -160,6 +165,7 @@ impl Args {
                 "--match-radius-px" => args.match_radius_px = number(&option, value()?)?,
                 "--max-hamming" => args.max_hamming = number(&option, value()?)?,
                 "--smoothing-sigma" => args.smoothing_sigma = number(&option, value()?)?,
+                "--local-contrast" => args.local_contrast = true,
                 "--min-observations" => args.min_observations = number(&option, value()?)?,
                 "--keep-world" => args.keep_world = true,
                 name if intrinsic(name).is_some() => {
@@ -393,8 +399,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
     let mut tracks: BTreeMap<u64, Track> = BTreeMap::new();
     let mut next_landmark = 1_u64;
-    let smoothing = GaussianSmoothing {
-        sigma: args.smoothing_sigma,
+    let frontend = map_files::Frontend {
+        local_contrast: args.local_contrast.then(LocalContrast::default),
+        smoothing: (args.smoothing_sigma > 0.0).then_some(GaussianSmoothing {
+            sigma: args.smoothing_sigma,
+        }),
+        quality_level: None,
     };
     let mut last_keyframe_pose: Option<SE3> = None;
     let mut keyframe_index = 0_usize;
@@ -416,9 +426,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if (depth_stamps[d] - t).abs() > 0.02 {
             continue;
         }
-        let grey = smoothing.apply(&grey_image(&args.seq_dir.join(file))?);
+        let grey = frontend.prepare(&grey_image(&args.seq_dir.join(file))?);
         let (depth_width, depth_pixels) = depth_image(&args.seq_dir.join(&depth[d].1))?;
-        let quality = map_files::Frontend::default().quality_level();
+        let quality = frontend.quality_level();
         let corners = detect_keypoints_mapping_with(&grey, args.max_points, quality);
         let angles = compute_angles(&grey, &corners, true);
         let descriptors = compute_descriptors(&grey, &corners, &angles)?;
@@ -618,10 +628,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             "levelling": map_files::se3_json(&aligned),
         },
     });
-    if args.smoothing_sigma > 0.0 {
-        summary["feature_smoothing_sigma"] = json!(args.smoothing_sigma);
-    }
-    map_files::Frontend::default().write_json(&mut summary);
+    frontend.write_json(&mut summary);
     let summary = map_files::write(&args.out, &map, &store, &images, summary)?;
     println!(
         "wrote {}: {} keyframe images, {} landmarks, {} observations",
