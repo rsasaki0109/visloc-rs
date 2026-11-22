@@ -32,8 +32,8 @@
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
-use nalgebra::{Matrix3, Vector3};
 use nalgebra::Quaternion;
+use nalgebra::{Matrix3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian};
 use visloc_gsplat_core::lens::{Lens, Projection};
@@ -54,7 +54,11 @@ fn dynamic_gaussian(v: Option<&[f32]>, sh_degree: u32) -> Gaussian {
             scale_log: Vector3::new(v[3], v[4], v[5]),
             rotation: Quaternion::new(v[6], v[7], v[8], v[9]),
             opacity_logit: v[10],
-            sh_dc: [(v[11] - 0.5) / SH_C0, (v[12] - 0.5) / SH_C0, (v[13] - 0.5) / SH_C0],
+            sh_dc: [
+                (v[11] - 0.5) / SH_C0,
+                (v[12] - 0.5) / SH_C0,
+                (v[13] - 0.5) / SH_C0,
+            ],
             sh_rest: rest,
             sh_degree,
         },
@@ -143,9 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!(
         "gsplat_render_server: {} gaussians (+{dynamic} dynamic slots), {}x{}",
-        first_dynamic,
-        camera.width,
-        camera.height
+        first_dynamic, camera.width, camera.height
     );
 
     let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
@@ -158,10 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         if let Some(count) = line.trim().strip_prefix("dyn") {
-            let k: usize = count
-                .trim()
-                .parse()
-                .map_err(|e| format!("dyn K: {e}"))?;
+            let k: usize = count.trim().parse().map_err(|e| format!("dyn K: {e}"))?;
             if k > dynamic {
                 return Err(format!("dyn {k}: only {dynamic} --dynamic slots").into());
             }
