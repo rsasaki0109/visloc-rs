@@ -641,7 +641,9 @@ could not be planned. With a 60 s, 15 m projection window, the search around
 the predicted pose picks up again where the renders are good. Of 850
 localizations, 692 were by projection.
 
-Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). First, the
+Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). A 12 s GIF of it:
+[assets/hero_real2sim_street.gif](assets/hero_real2sim_street.gif). Both show
+OverMaps360 footage (CC BY-NC 4.0). First, the
 real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a 3D model of a delivery robot drawn into the

@@ -548,11 +548,6 @@ relocalizes. Not yet tried on a real robot. See [docs/navigation.md](docs/naviga
   <sub>Gazebo, the public OpenRobotics Depot (CC BY 4.0), stereo + IMU only: 5/5 goals at 6.1 cm pose RMSE, through a 5 s camera blackout.</sub>
 </p>
 
-<p align="center">
-  <img src="docs/assets/hero_real2sim_street.gif" alt="Real to sim. First, a real 360-degree video frame of a town street above the same spot rendered from a 3D Gaussian splat that visloc-rs's own SfM and 3DGS built from that video. Then a third-person view inside the splat: a small delivery robot with a camera mast drives the street with Nav2. Green rays run from its camera to the map features visloc matched in its latest image, an inset shows that image with the matched features circled, a cyan ring marks where visloc puts the robot, and a minimap shows goals turning green." width="640"><br>
-  <sub>Real to sim: a public 360° street walk (OverMaps360, CC BY-NC 4.0) rebuilt by visloc-rs's SfM + 3DGS on a CPU, and a robot localizing in it with visloc while Nav2 drives: 4/4 goals over 121 m at 2.2 cm median pose error, camera 1.2 m up, 97% of its images localized. Green: the map features it matched (<a href="docs/navigation.md#real-to-sim-a-simulator-made-of-a-3d-gaussian-splat-of-real-photos">notes</a>).</sub>
-</p>
-
 ## More results
 
 Local public-data development measurements, not official leaderboard submissions.
