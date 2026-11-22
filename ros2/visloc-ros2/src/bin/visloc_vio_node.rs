@@ -20,6 +20,13 @@
 //! estimator and publishes nothing until tracking holds again. Every
 //! estimator reset bumps the count on `odom_reset` (`std_msgs/Int32`,
 //! transient-local): the odometry frame starts over.
+//!
+//! With `wheel_odom_topic` (and `base_frame`) set as well, a lost-tracking
+//! reset does not stop the outputs: the pose is carried on by the wheel
+//! odometry's motion until tracking holds again, and the new estimator's
+//! poses continue from there ([`visloc_ros2::odom_bridge`]). The odometry
+//! frame stays the same, so no `odom_reset` is published and the robot can
+//! keep driving.
 
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -36,14 +43,16 @@ use visloc_ros2::dds::{
     output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::image::decode_luma;
+use visloc_ros2::map_localize::se3_from_ros;
 use visloc_ros2::msgs::{Image, Imu, Int32, Odometry, Path, PoseStamped, TfMessage};
+use visloc_ros2::odom_bridge::{BridgeState, OdomBridge};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::sync::{SensorPacket, VioInputs};
 use visloc_ros2::tf_tree::StaticTransforms;
 use visloc_ros2::tracking::{TrackingConfig, TrackingMonitor, TrackingVerdict};
 use visloc_ros2::vio::{
     imu_sample_from_msg, odometry_msg, pose_stamped_msg, rebase, tf_msg, PathAccumulator,
-    TrackedFrame, VioCore, VioError, VioFrames, VioFrontend, VioOptions,
+    TrackedFrame, VioCore, VioError, VioEstimate, VioFrames, VioFrontend, VioOptions,
 };
 use visloc_ros2::vio_mapper::{
     map_pose_msg, map_to_odom_transform, new_online_mapper, MapperParams, MapperSession,
@@ -94,6 +103,11 @@ PARAMETERS (--name value  or  -p name:=value):
   lost_after_s           ... for this long (s)                                   [0.5]
   recover_after_s        ... and good again for this long (s)                    [1.0]
   lost_max_speed         lost tracking: an estimated speed above this (m/s) (0: off) [0]
+  wheel_odom_topic       while tracking is lost, carry the outputs on with this
+                         wheel odometry (nav_msgs/Odometry), in the same odometry
+                         frame; its child frame is placed relative to the output
+                         frame by /tf_static; needs the lost-tracking monitor;
+                         not with the mapper (empty: off)                        []
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -204,6 +218,31 @@ impl Shared {
     }
 }
 
+/// A wheel odometry pose as the pose of the node's output frame, through
+/// /tf_static (`None` until the two frames are connected).
+fn wheel_in_output(
+    transforms: &Mutex<StaticTransforms>,
+    sample: &WheelSample,
+    output_body: &str,
+) -> Option<visloc_core::geometry::SE3> {
+    let wheel_from_output = transforms
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .lookup(&sample.child_frame, output_body)?;
+    Some(sample.pose.compose(&wheel_from_output))
+}
+
+/// One wheel odometry message, for the lost-tracking bridge.
+#[derive(Clone, Debug)]
+struct WheelSample {
+    seq: u64,
+    child_frame: String,
+    stamp_ns: i64,
+    pose: visloc_core::geometry::SE3,
+    velocity_body: Vector3<f64>,
+    angular_body: Vector3<f64>,
+}
+
 /// Frontend-thread output: a tracked frame, or a tracking error for the
 /// estimator thread to handle, tagged with the stream generation.
 type FrontendResult = (u64, Result<TrackedFrame, VioError>);
@@ -284,6 +323,21 @@ fn run() -> Result<(), String> {
         recover_after_s: args.parsed_or("recover_after_s", 1.0f64)?,
         max_speed_m_s: args.parsed_or("lost_max_speed", 0.0f64)?,
     };
+    let wheel_odom_topic = args
+        .string("wheel_odom_topic")
+        .filter(|topic| !topic.is_empty());
+    if wheel_odom_topic.is_some() {
+        if !tracking.enabled() {
+            return Err(
+                "wheel_odom_topic needs the lost-tracking monitor (lost_min_observations \
+                 or lost_max_speed)"
+                    .into(),
+            );
+        }
+        if mapper_params.is_some() {
+            return Err("wheel_odom_topic is not supported with the online mapper".into());
+        }
+    }
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
@@ -411,14 +465,41 @@ fn run() -> Result<(), String> {
         })
         .transpose()?;
 
-    let mut tf_static = base_frame
-        .is_some()
+    let mut tf_static = (base_frame.is_some() || wheel_odom_topic.is_some())
         .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
         .transpose()?;
     let transforms = tf_static.as_ref().map_or_else(
         || Arc::new(Mutex::new(StaticTransforms::new())),
         |listener| Arc::clone(listener.transforms()),
     );
+
+    // The newest wheel odometry: (sequence number, stamp, pose, body velocity, yaw rate).
+    let wheel_latest: Arc<Mutex<Option<WheelSample>>> = Arc::new(Mutex::new(None));
+    if let Some(topic) = &wheel_odom_topic {
+        let wheel_sub = ros.subscription::<Odometry>(topic, sensor_qos(50))?;
+        let latest = Arc::clone(&wheel_latest);
+        let mut seq = 0u64;
+        spawn_receiver("wheel-rx", wheel_sub, move |msg: Odometry| {
+            seq += 1;
+            *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(WheelSample {
+                seq,
+                child_frame: msg.child_frame_id.clone(),
+                stamp_ns: msg.header.stamp.to_nanos(),
+                pose: se3_from_ros(&msg.pose.pose),
+                velocity_body: Vector3::new(
+                    msg.twist.twist.linear.x,
+                    msg.twist.twist.linear.y,
+                    msg.twist.twist.linear.z,
+                ),
+                angular_body: Vector3::new(
+                    msg.twist.twist.angular.x,
+                    msg.twist.twist.angular.y,
+                    msg.twist.twist.angular.z,
+                ),
+            });
+        })?;
+        eprintln!("visloc_vio_node: through lost tracking, the outputs follow {topic}");
+    }
 
     let subscriptions = std::iter::once((0usize, left_sub))
         .chain(right_sub.map(|subscription| (1usize, subscription)));
@@ -547,7 +628,65 @@ fn run() -> Result<(), String> {
     let mut resets = 0i32;
     let mut held = 0u64;
     let mut observations = ObservationStats::default();
+    let mut bridge = OdomBridge::new();
+    let mut wheel_published = 0u64;
+    let mut outages = 0u32;
+    // While tracking is lost, publishes the wheel-bridged pose of each new
+    // wheel odometry message.
+    let mut publish_bridged = |bridge: &mut OdomBridge, path: &mut PathAccumulator| {
+        if bridge.state() != BridgeState::Wheels {
+            return;
+        }
+        let Some(sample) = wheel_latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        if sample.seq == wheel_published {
+            return;
+        }
+        let Some(pose) = wheel_in_output(&transforms, &sample, &output_frames.body_frame) else {
+            return;
+        };
+        wheel_published = sample.seq;
+        let Some(pose) = bridge.wheels(&pose) else {
+            return;
+        };
+        let Some(wheel_from_out) = transforms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookup(&sample.child_frame, &output_frames.body_frame)
+        else {
+            return;
+        };
+        let out_from_wheel = wheel_from_out.rotation.inverse();
+        let estimate = VioEstimate {
+            frame_id: 0,
+            stamp_ns: sample.stamp_ns,
+            header_stamp_ns: sample.stamp_ns,
+            velocity_world: pose.rotation * (out_from_wheel * sample.velocity_body),
+            imu_to_world: pose,
+            gyro_bias: Vector3::zeros(),
+            accel_bias: Vector3::zeros(),
+            angular_velocity_body: Some(out_from_wheel * sample.angular_body),
+            is_keyframe: false,
+            observation_count: 0,
+        };
+        publish_logged(&odom_pub, odometry_msg(&estimate, &output_frames), "odom");
+        let pose_msg = pose_stamped_msg(&estimate, &output_frames);
+        if let Some(path_pub) = &path_pub {
+            path.push(pose_msg.clone());
+            publish_logged(path_pub, path.msg(&output_frames.odom_frame), "path");
+        }
+        publish_logged(&pose_pub, pose_msg, "pose");
+        if let Some(tf_pub) = &tf_pub {
+            publish_logged(tf_pub, tf_msg(&estimate, &output_frames), "tf");
+        }
+    };
     loop {
+        publish_bridged(&mut bridge, &mut path);
         if shutdown
             .as_ref()
             .is_some_and(|signals| signals.load(Ordering::SeqCst) > 0)
@@ -613,6 +752,7 @@ fn run() -> Result<(), String> {
                 TrackingVerdict::Publish => {}
                 TrackingVerdict::Hold => {
                     held += 1;
+                    publish_bridged(&mut bridge, &mut path);
                     continue;
                 }
                 TrackingVerdict::Lost(reason) => {
@@ -668,6 +808,24 @@ fn run() -> Result<(), String> {
                         rebase(&estimate, &imu_from_base)
                     }
                 };
+                let estimate = if wheel_odom_topic.is_some() {
+                    let resumed = bridge.state() == BridgeState::Wheels;
+                    let pose = bridge.vio(&estimate.imu_to_world);
+                    if resumed {
+                        eprintln!(
+                            "visloc_vio_node: tracking holds again after {:.2} m on wheel odometry; \
+                             VIO continues from there (outage {outages})",
+                            bridge.bridged_m()
+                        );
+                    }
+                    VioEstimate {
+                        velocity_world: bridge.offset().rotation * estimate.velocity_world,
+                        imu_to_world: pose,
+                        ..estimate
+                    }
+                } else {
+                    estimate
+                };
                 publish_logged(&odom_pub, odometry_msg(&estimate, &output_frames), "odom");
                 let pose = pose_stamped_msg(&estimate, &output_frames);
                 if let Some(path_pub) = &path_pub {
@@ -716,10 +874,41 @@ fn run() -> Result<(), String> {
                     // frame of the new generation.
                     generation = shared.restart_stream();
                     backend.reset()?;
-                    path.clear();
                     monitor.restart();
                     resets += 1;
-                    publish_logged(&odom_reset_pub, Int32 { data: resets }, "odom_reset");
+                    let wheel_pose = wheel_odom_topic.as_ref().and_then(|_| {
+                        wheel_latest
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                    });
+                    // Lost again before tracking held: still bridging from the first loss.
+                    let new_outage = bridge.state() == BridgeState::Vio;
+                    let bridged = wheel_pose.is_some_and(|sample| {
+                        match wheel_in_output(&transforms, &sample, &output_frames.body_frame) {
+                            Some(pose) => bridge.lost(&pose),
+                            None => {
+                                eprintln!(
+                                    "visloc_vio_node: no /tf_static transform {} <- {}; \
+                                     cannot drive on wheel odometry",
+                                    sample.child_frame, output_frames.body_frame
+                                );
+                                false
+                            }
+                        }
+                    });
+                    if bridged {
+                        if new_outage {
+                            outages += 1;
+                        }
+                        eprintln!(
+                            "visloc_vio_node: driving on wheel odometry until tracking holds \
+                             again (outage {outages}); the odometry frame stays"
+                        );
+                    } else {
+                        path.clear();
+                        publish_logged(&odom_reset_pub, Int32 { data: resets }, "odom_reset");
+                    }
                     eprintln!(
                         "visloc_vio_node: estimator reset {resets}; re-initializing from IMU{}",
                         if monitor.config().enabled() {

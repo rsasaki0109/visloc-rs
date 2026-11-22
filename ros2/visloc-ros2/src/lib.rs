@@ -30,6 +30,7 @@ pub mod localize;
 pub mod map_localize;
 pub mod msgs;
 pub mod nav_sim;
+pub mod odom_bridge;
 pub mod params;
 pub mod queue;
 pub mod sync;
