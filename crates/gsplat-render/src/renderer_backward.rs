@@ -205,37 +205,60 @@ impl Renderer {
             let prof = std::env::var("GSPLAT_PROFILE").is_ok();
             let t0 = std::time::Instant::now();
             let npix = (self.image_w * self.image_h) as usize;
-            let bufs = read_many(
-                dev,
-                queue,
-                &[
-                    (&self.scratch.projected_splats, frame.nv * 9 * 4),
-                    (&self.scratch.compact_sorted, frame.ni * 4),
-                    (&self.tile_offsets, frame.num_tiles as usize * 2 * 4),
-                    (&self.residuals.final_t, npix * 4),
-                    (&self.residuals.last_idx, npix * 4),
-                    (&st.d_image, npix * 3 * 4),
-                ],
-            );
-            let t_read = t0.elapsed();
-            let f32s = |b: &[u8]| -> Vec<f32> { bytemuck::cast_slice(b).to_vec() };
-            let u32s = |b: &[u8]| -> Vec<u32> { bytemuck::cast_slice(b).to_vec() };
-            let (projected, sorted, offsets) = (f32s(&bufs[0]), u32s(&bufs[1]), u32s(&bufs[2]));
-            let (final_t, last_idx, d_image) = (f32s(&bufs[3]), u32s(&bufs[4]), f32s(&bufs[5]));
-            let grads = super::cpu_raster::raster_backward(
-                &super::cpu_raster::Frame {
-                    img_w: self.image_w,
-                    img_h: self.image_h,
-                    bg: self.last_bg,
-                    projected: &projected,
-                    sorted: &sorted,
-                    offsets: &offsets,
-                    final_t: &final_t,
-                    last_idx: &last_idx,
-                    d_image: &d_image,
-                },
-                frame.nv,
-            );
+            let t_read;
+            // With a host-rasterized frame only dL/dC comes back; otherwise
+            // also the lists and the residuals.
+            let grads = if let Some(hf) = self.host_frame.as_ref() {
+                let bufs = read_many(dev, queue, &[(&st.d_image, npix * 3 * 4)]);
+                let d_image: Vec<f32> = bytemuck::cast_slice(&bufs[0]).to_vec();
+                t_read = t0.elapsed();
+                super::cpu_raster::raster_backward(
+                    &super::cpu_raster::Frame {
+                        img_w: self.image_w,
+                        img_h: self.image_h,
+                        bg: self.last_bg,
+                        projected: &hf.projected,
+                        sorted: &hf.sorted,
+                        offsets: &hf.offsets,
+                        final_t: &hf.final_t,
+                        last_idx: &hf.last_idx,
+                        d_image: &d_image,
+                    },
+                    frame.nv,
+                )
+            } else {
+                let bufs = read_many(
+                    dev,
+                    queue,
+                    &[
+                        (&self.scratch.projected_splats, frame.nv * 9 * 4),
+                        (&self.scratch.compact_sorted, frame.ni * 4),
+                        (&self.tile_offsets, frame.num_tiles as usize * 2 * 4),
+                        (&self.residuals.final_t, npix * 4),
+                        (&self.residuals.last_idx, npix * 4),
+                        (&st.d_image, npix * 3 * 4),
+                    ],
+                );
+                t_read = t0.elapsed();
+                let f32s = |b: &[u8]| -> Vec<f32> { bytemuck::cast_slice(b).to_vec() };
+                let u32s = |b: &[u8]| -> Vec<u32> { bytemuck::cast_slice(b).to_vec() };
+                let (projected, sorted, offsets) = (f32s(&bufs[0]), u32s(&bufs[1]), u32s(&bufs[2]));
+                let (final_t, last_idx, d_image) = (f32s(&bufs[3]), u32s(&bufs[4]), f32s(&bufs[5]));
+                super::cpu_raster::raster_backward(
+                    &super::cpu_raster::Frame {
+                        img_w: self.image_w,
+                        img_h: self.image_h,
+                        bg: self.last_bg,
+                        projected: &projected,
+                        sorted: &sorted,
+                        offsets: &offsets,
+                        final_t: &final_t,
+                        last_idx: &last_idx,
+                        d_image: &d_image,
+                    },
+                    frame.nv,
+                )
+            };
             let t_cpu = t0.elapsed();
             queue.write_buffer(&st.screen_grads, 0, bytemuck::cast_slice(&grads));
             let mut enc2 = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor {

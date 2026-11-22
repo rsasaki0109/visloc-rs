@@ -125,6 +125,234 @@ impl SsimKernels {
     }
 }
 
+/// Normalised 1D gaussian, sigma 1.5, taps -5..5 (`ssim.wgsl`'s window).
+const GAUSS: [f32; 11] = [
+    0.0010284, 0.0075988, 0.0360008, 0.1093607, 0.2130055, 0.2660117, 0.2130055, 0.1093607,
+    0.0360008, 0.0075988, 0.0010284,
+];
+
+/// One output row of the horizontal 11-tap blur of `src` (zero padding),
+/// per tap along the row so it vectorizes. `pad` is scratch of `w + 10`.
+fn blur_row_h(src: &[f32], pad: &mut [f32], out: &mut [f32]) {
+    let w = src.len();
+    pad[..5].fill(0.0);
+    pad[5..5 + w].copy_from_slice(src);
+    pad[5 + w..].fill(0.0);
+    out.fill(0.0);
+    for (t, &g) in GAUSS.iter().enumerate() {
+        for (o, v) in out.iter_mut().zip(&pad[t..t + w]) {
+            *o += g * v;
+        }
+    }
+}
+
+/// The D-SSIM term on the host, for CPU adapters (lavapipe), where the
+/// tiled kernels' barriers make it ~50 ms a step at 600 x 440. Same
+/// definition as `ssim.wgsl`. Keeps its scratch between calls.
+///
+/// Rows run in parallel in four passes over row-major blocks (per image
+/// row, every map's row): the horizontal blur of x, y, x^2, y^2, xy per
+/// channel; the vertical blur and dS/dmx, dS/dSxx, dS/dSxy per window
+/// centre; the horizontal blur of those; the vertical blur and the
+/// gradient.
+pub struct SsimHost {
+    w: usize,
+    h: usize,
+    /// Horizontal blurs, 15 maps per row (5 per channel).
+    hm: Vec<f32>,
+    /// dS/dmx, dS/dSxx, dS/dSxy, 9 maps per row (3 per channel).
+    abc: Vec<f32>,
+    /// Their horizontal blurs, 9 maps per row.
+    hg: Vec<f32>,
+}
+
+impl SsimHost {
+    pub fn new(w: usize, h: usize) -> Self {
+        Self {
+            w,
+            h,
+            hm: vec![0.0; w * h * 15],
+            abc: vec![0.0; w * h * 9],
+            hg: vec![0.0; w * h * 9],
+        }
+    }
+
+    /// Add what the kernels add to `d_image` (RGB per pixel):
+    /// `-lambda / (3 N) * dSSIM/dx`. `render` is RGB f32, `gt` packed RGBA8
+    /// (alpha below 128 = masked out).
+    pub fn add_grad(&mut self, render: &[f32], gt: &[u32], lambda: f32, d_image: &mut [f32]) {
+        use rayon::prelude::*;
+        const C1: f32 = 0.0001;
+        const C2: f32 = 0.0009;
+        let (w, h) = (self.w, self.h);
+        let n = w * h;
+        let scale = lambda / (3.0 * n as f32);
+        let gtc = |p: usize, c: usize| ((gt[p] >> (8 * c)) & 0xFF) as f32 / 255.0;
+        let valid = |p: usize| (gt[p] >> 24) >= 128;
+        // 1. Horizontal blur of x, y, x^2, y^2, xy.
+        self.hm
+            .par_chunks_mut(15 * w)
+            .enumerate()
+            .for_each(|(y, rows)| {
+                let mut pad = vec![0.0f32; w + 10];
+                let mut src = vec![0.0f32; w];
+                for c in 0..3 {
+                    for q in 0..5 {
+                        for (x, v) in src.iter_mut().enumerate() {
+                            let p = y * w + x;
+                            let (a, b) = (render[p * 3 + c], gtc(p, c));
+                            *v = [a, b, a * a, b * b, a * b][q];
+                        }
+                        let m = c * 5 + q;
+                        blur_row_h(&src, &mut pad, &mut rows[m * w..(m + 1) * w]);
+                    }
+                }
+            });
+        // 2. Vertical blur, then the SSIM partials at valid centres.
+        let hm = &self.hm;
+        self.abc
+            .par_chunks_mut(9 * w)
+            .enumerate()
+            .for_each(|(y, rows)| {
+                let mut m = vec![0.0f32; 15 * w];
+                for (t, &g) in GAUSS.iter().enumerate() {
+                    let yy = y as isize + t as isize - 5;
+                    if yy < 0 || yy >= h as isize {
+                        continue;
+                    }
+                    let src = &hm[yy as usize * 15 * w..(yy as usize + 1) * 15 * w];
+                    for (o, v) in m.iter_mut().zip(src) {
+                        *o += g * v;
+                    }
+                }
+                for c in 0..3 {
+                    let q = |k: usize, x: usize| m[(c * 5 + k) * w + x];
+                    for x in 0..w {
+                        let (ra, rb, rc) = if valid(y * w + x) {
+                            let (mx, my) = (q(0, x), q(1, x));
+                            let a = 2.0 * mx * my + C1;
+                            let b = 2.0 * (q(4, x) - mx * my) + C2;
+                            let cc = mx * mx + my * my + C1;
+                            let d = (q(2, x) - mx * mx) + (q(3, x) - my * my) + C2;
+                            let s = a * b / (cc * d);
+                            (
+                                (2.0 * my * b - 2.0 * my * a) / (cc * d)
+                                    - s * (2.0 * mx / cc - 2.0 * mx / d),
+                                -s / d,
+                                2.0 * a / (cc * d),
+                            )
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        };
+                        rows[(c * 3) * w + x] = ra;
+                        rows[(c * 3 + 1) * w + x] = rb;
+                        rows[(c * 3 + 2) * w + x] = rc;
+                    }
+                }
+            });
+        // 3. Horizontal blur of the partials.
+        let abc = &self.abc;
+        self.hg
+            .par_chunks_mut(9 * w)
+            .enumerate()
+            .for_each(|(y, rows)| {
+                let mut pad = vec![0.0f32; w + 10];
+                for m in 0..9 {
+                    let src = &abc[(y * 9 + m) * w..(y * 9 + m + 1) * w];
+                    blur_row_h(src, &mut pad, &mut rows[m * w..(m + 1) * w]);
+                }
+            });
+        // 4. Vertical blur and the gradient.
+        let hg = &self.hg;
+        d_image
+            .par_chunks_mut(3 * w)
+            .enumerate()
+            .for_each(|(y, out)| {
+                let mut g = vec![0.0f32; 9 * w];
+                for (t, &gw) in GAUSS.iter().enumerate() {
+                    let yy = y as isize + t as isize - 5;
+                    if yy < 0 || yy >= h as isize {
+                        continue;
+                    }
+                    let src = &hg[yy as usize * 9 * w..(yy as usize + 1) * 9 * w];
+                    for (o, v) in g.iter_mut().zip(src) {
+                        *o += gw * v;
+                    }
+                }
+                for x in 0..w {
+                    let p = y * w + x;
+                    if !valid(p) {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        let ds = g[(c * 3) * w + x]
+                            + 2.0 * render[p * 3 + c] * g[(c * 3 + 1) * w + x]
+                            + gtc(p, c) * g[(c * 3 + 2) * w + x];
+                        out[x * 3 + c] += -scale * ds;
+                    }
+                }
+            });
+    }
+}
+
+/// `loss_l1.wgsl` on the host (CPU adapters): writes `d_image` =
+/// `weight * sign(render - gt) / (3 N)` per pixel and channel (0 at masked
+/// pixels, alpha below 128) with the kernel's operations in its order, and
+/// returns the step's mean-L1 log in its fixed point (1e-6 units), summed
+/// per 256-pixel workgroup with the kernel's tree reduction.
+pub fn l1_grad_host(render: &[f32], gt: &[u32], weight: f32, d_image: &mut [f32]) -> u64 {
+    use rayon::prelude::*;
+    let npix = gt.len();
+    let wgsl_sign = |v: f32| {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    };
+    d_image
+        .par_chunks_mut(256 * 3)
+        .enumerate()
+        .map(|(wg, d)| {
+            let mut partial = [0.0f32; 256];
+            for (lid, (dp, l)) in d.chunks_mut(3).zip(partial.iter_mut()).enumerate() {
+                let i = wg * 256 + lid;
+                let packed = gt[i];
+                let g = [
+                    (packed & 0xFF) as f32 / 255.0,
+                    ((packed >> 8) & 0xFF) as f32 / 255.0,
+                    ((packed >> 16) & 0xFF) as f32 / 255.0,
+                ];
+                let diff = [0, 1, 2].map(|c| render[i * 3 + c] - g[c]);
+                let valid = if (packed >> 24) >= 128 { 1.0f32 } else { 0.0 };
+                let scale = valid / (3.0 * npix as f32);
+                let ws = weight * scale;
+                for c in 0..3 {
+                    dp[c] = wgsl_sign(diff[c]) * ws;
+                }
+                *l = (diff[0].abs() + diff[1].abs() + diff[2].abs()) * scale;
+            }
+            let mut stride = 128;
+            while stride > 0 {
+                for lid in 0..stride {
+                    partial[lid] += partial[lid + stride];
+                }
+                stride >>= 1;
+            }
+            (partial[0] * 1e6 + 0.5) as u32 as u64
+        })
+        .sum()
+}
+
+/// [`SsimHost::add_grad`] into a zero image (tests).
+pub fn ssim_grad_host(render: &[f32], gt: &[u32], w: usize, h: usize, lambda: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h * 3];
+    SsimHost::new(w, h).add_grad(render, gt, lambda, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +435,56 @@ mod tests {
         }
         eprintln!("ssim grad worst error {worst:.2e} of max");
         assert!(worst < 1e-3, "worst relative error {worst}");
+
+        // The host version (CPU adapters) against the same reference.
+        let rf: Vec<f32> = render.iter().flatten().copied().collect();
+        let host = ssim_grad_host(&rf, &packed, w as usize, h as usize, lambda);
+        let mut worst_host = 0.0f64;
+        for (p, gp) in grad.iter().enumerate() {
+            for c in 0..3 {
+                let want = -(lambda as f64) * gp[c];
+                worst_host = worst_host.max((want - host[p * 3 + c] as f64).abs() / scale);
+            }
+        }
+        eprintln!("host ssim grad worst error {worst_host:.2e} of max");
+        assert!(worst_host < 1e-3, "host: worst relative error {worst_host}");
+    }
+
+    #[test]
+    fn host_l1_matches_kernel_definition() {
+        // 300 pixels (two workgroups): a masked pixel, a zero difference,
+        // and differences of both signs.
+        let n = 300;
+        let gt: Vec<u32> = (0..n as u32)
+            .map(|i| {
+                (i % 256)
+                    | ((i * 7) % 256) << 8
+                    | ((i * 13) % 256) << 16
+                    | if i == 5 { 0 } else { 255 << 24 }
+            })
+            .collect();
+        let mut render: Vec<f32> = (0..n * 3).map(|k| (k % 17) as f32 / 16.0).collect();
+        render[3 * 9] = 9.0 / 255.0; // pixel 9, red: diff 0
+        let mut d = vec![1.0f32; n * 3];
+        let fixed = l1_grad_host(&render, &gt, 0.8, &mut d);
+        let mut sum = 0.0f64;
+        for i in 0..n {
+            for c in 0..3 {
+                let g = ((gt[i] >> (8 * c)) & 0xFF) as f32 / 255.0;
+                let diff = render[i * 3 + c] - g;
+                let valid = i != 5;
+                let want = if !valid || diff == 0.0 {
+                    0.0
+                } else {
+                    diff.signum() * 0.8 / (3.0 * n as f32)
+                };
+                assert_eq!(d[i * 3 + c], want, "pixel {i} channel {c}");
+                if valid {
+                    sum += diff.abs() as f64 / (3.0 * n as f64);
+                }
+            }
+        }
+        assert!((fixed as f64 * 1e-6 - sum).abs() < 2e-6, "{fixed} vs {sum}");
     }
 
     /// Sum over valid window centres and channels of the SSIM map (11x11

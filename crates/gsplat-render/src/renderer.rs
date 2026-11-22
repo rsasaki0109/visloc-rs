@@ -16,6 +16,7 @@
 //! Stages 3 and 5's sorts run on the host at this stage; a device-side radix
 //! sort is a planned follow-up (see `docs/rust_3dgs_plan.md`).
 
+use rayon::prelude::*;
 use visloc_gsplat_core::camera::CameraView;
 use visloc_gsplat_core::cpu_render::Image;
 use visloc_gsplat_core::gaussian::Scene;
@@ -576,6 +577,9 @@ pub struct Renderer {
     cpu_raster: bool,
     /// Background of the last render (the backward pass needs it).
     last_bg: [f32; 3],
+    /// Host copies of the last frame's lists and residuals when it was
+    /// rasterized on the host (the backward pass reuses them).
+    host_frame: Option<cpu_raster::HostFrame>,
 }
 
 /// Visible gaussians, intersections and tiles of a rendered frame.
@@ -860,6 +864,7 @@ impl Renderer {
             geo_enabled: false,
             cpu_raster,
             last_bg: [0.0; 3],
+            host_frame: None,
         })
     }
 
@@ -935,6 +940,12 @@ impl Renderer {
 
     pub fn cpu_raster(&self) -> bool {
         self.cpu_raster
+    }
+
+    /// The last render's image (RGB, row-major) when it was rasterized on
+    /// the host, without a readback; `None` otherwise.
+    pub fn host_image(&self) -> Option<&[f32]> {
+        self.host_frame.as_ref().map(|f| f.image.as_slice())
     }
 
     pub fn set_skip_readback(&mut self, skip: bool) {
@@ -1123,7 +1134,11 @@ impl Renderer {
         // depths (a densification clone has exactly its parent's depth) would
         // keep that order and change from run to run. Sorting by gaussian id
         // first makes ties nearest-first by id, and the frame deterministic.
-        if nv > 0 {
+        let host = self.cpu_raster && !self.geo_enabled;
+        self.host_frame = None;
+        if nv > 0 && host {
+            self.host_depth_sort(nv);
+        } else if nv > 0 {
             let id_bits =
                 crate::sort::key_bits_for((self.num_gaussians() as u32).saturating_sub(1));
             self.sort_in_place(
@@ -1185,7 +1200,9 @@ impl Renderer {
         prof.mark(&self.ctx.device, "map");
 
         // ----- Device-side tile-id sort over the isect list. -----
-        if ni > 0 {
+        if host {
+            // The host sorts the lists and rasterizes in one go (below).
+        } else if ni > 0 {
             // Sort (tile id, compact id) pairs in `tile_pairs` directly. Keys
             // are tile ids < num_tiles; the LSD sort is stable, so the depth
             // order from the first sort survives within each tile.
@@ -1216,7 +1233,7 @@ impl Renderer {
         prof.mark(&self.ctx.device, "tile_sort");
 
         // ----- Pass 3: tile_offsets + rasterize. -----
-        {
+        if !host {
             let mut encoder =
                 self.ctx
                     .device
@@ -1230,7 +1247,7 @@ impl Renderer {
             self.ctx.queue.submit(Some(encoder.finish()));
         }
         prof.mark(&self.ctx.device, "tile_offsets");
-        if self.cpu_raster && !self.geo_enabled {
+        if host {
             self.host_rasterize(nv, ni, num_tiles);
         } else {
             let mut encoder =
@@ -1253,9 +1270,43 @@ impl Renderer {
         }
     }
 
-    /// `rasterize` on the host (see [`Self::set_cpu_raster`]): read the
-    /// projected splats and tile lists back, composite, and upload the image
-    /// and the per-pixel residuals the backward pass reads.
+    /// The depth sort on the host (see [`Self::set_cpu_raster`]): the same
+    /// order as the device's two stable radix sorts (by id, then by the
+    /// depth's f32 bits), written back to the device buffers.
+    fn host_depth_sort(&mut self, nv: usize) {
+        let (dev, queue) = (&self.ctx.device, &self.ctx.queue);
+        let bufs = read_many(
+            dev,
+            queue,
+            &[
+                (&self.scratch.global_from_compact, nv * 4),
+                (&self.scratch.depths, nv * 4),
+            ],
+        );
+        let ids: &[u32] = bytemuck::cast_slice(&bufs[0]);
+        let depth_bits: &[u32] = bytemuck::cast_slice(&bufs[1]);
+        let mut keys: Vec<u64> = ids
+            .iter()
+            .zip(depth_bits)
+            .map(|(&id, &d)| ((d as u64) << 32) | id as u64)
+            .collect();
+        keys.par_sort_unstable();
+        let ids: Vec<u32> = keys.iter().map(|k| *k as u32).collect();
+        let depths: Vec<u32> = keys.iter().map(|k| (*k >> 32) as u32).collect();
+        queue.write_buffer(
+            &self.scratch.global_from_compact,
+            0,
+            bytemuck::cast_slice(&ids),
+        );
+        queue.write_buffer(&self.scratch.depths, 0, bytemuck::cast_slice(&depths));
+    }
+
+    /// The tile sort, tile offsets and `rasterize` on the host (see
+    /// [`Self::set_cpu_raster`]): read the projected splats and the unsorted
+    /// (tile, compact id) list back, sort it by tile with a counting sort
+    /// (stable, so each tile keeps the depth order, as the device's radix
+    /// sort does), composite, and upload the image, the residuals and the
+    /// sorted lists. The host copies are kept for the backward pass.
     fn host_rasterize(&mut self, nv: usize, ni: usize, num_tiles: u32) {
         let (dev, queue) = (&self.ctx.device, &self.ctx.queue);
         let bufs = read_many(
@@ -1263,13 +1314,14 @@ impl Renderer {
             queue,
             &[
                 (&self.scratch.projected_splats, nv * 9 * 4),
-                (&self.scratch.compact_sorted, ni * 4),
-                (&self.tile_offsets, num_tiles as usize * 2 * 4),
+                (&self.tile_pairs[0].keys, ni * 4),
+                (&self.tile_pairs[0].values, ni * 4),
             ],
         );
         let projected: Vec<f32> = bytemuck::cast_slice(&bufs[0]).to_vec();
-        let sorted: Vec<u32> = bytemuck::cast_slice(&bufs[1]).to_vec();
-        let offsets: Vec<u32> = bytemuck::cast_slice(&bufs[2]).to_vec();
+        let tiles: &[u32] = bytemuck::cast_slice(&bufs[1]);
+        let ids: &[u32] = bytemuck::cast_slice(&bufs[2]);
+        let (sorted_tiles, sorted, offsets) = cpu_raster::sort_by_tile(tiles, ids, num_tiles);
         let r = cpu_raster::raster_forward(&cpu_raster::Frame {
             img_w: self.image_w,
             img_h: self.image_h,
@@ -1281,13 +1333,25 @@ impl Renderer {
             last_idx: &[],
             d_image: &[],
         });
-        queue.write_buffer(&self.out_img, 0, bytemuck::cast_slice(&r.image));
-        queue.write_buffer(&self.residuals.final_t, 0, bytemuck::cast_slice(&r.final_t));
-        queue.write_buffer(
-            &self.residuals.last_idx,
-            0,
-            bytemuck::cast_slice(&r.last_idx),
+        let w = |buf: &wgpu::Buffer, data: &[u8]| queue.write_buffer(buf, 0, data);
+        w(&self.out_img, bytemuck::cast_slice(&r.image));
+        w(&self.residuals.final_t, bytemuck::cast_slice(&r.final_t));
+        w(&self.residuals.last_idx, bytemuck::cast_slice(&r.last_idx));
+        // The device lists too, so the shader passes stay usable.
+        w(
+            &self.tile_pairs[0].keys,
+            bytemuck::cast_slice(&sorted_tiles),
         );
+        w(&self.tile_pairs[0].values, bytemuck::cast_slice(&sorted));
+        w(&self.tile_offsets, bytemuck::cast_slice(&offsets));
+        self.host_frame = Some(cpu_raster::HostFrame {
+            image: r.image,
+            projected,
+            sorted,
+            offsets,
+            final_t: r.final_t,
+            last_idx: r.last_idx,
+        });
     }
 
     /// Render `view` and also return, per pixel, the median depth (camera z
