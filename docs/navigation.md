@@ -894,11 +894,32 @@ buildings that would identify it stand beyond the map's 20 m depth limit.
 The splat (PSNR 18) also puts the depth of the real corners less precisely
 than the Riga street's splat (PSNR 22) does.
 
-So a map of the rendered images (what the simulator uses) and a map of real
-photos do not localize each other's images. A real robot needs a map of
-its own camera's images. The second walk gave no fix in this plaza, so
-cross-session localization still has to be shown on a street with nearby
-structure.
+**A second place, with structure close by.** Two other walks of the same
+day pass the same temple pavilion 12 minutes apart. The pavilion has
+pillars, railings, chairs and walls within a few metres. The map is built
+from the first walk's first 100 s, and the second walk is cut where it
+passes the same ground (its 80–180 s):
+
+| Queries | Prior 10 m + retrieval | the same, smoothed + CLAHE map |
+| --- | ---: | ---: |
+| the held-out real photos (898) | 286, median 2.4 cm | **524**, median 2.4 cm |
+| the splat rendered at the same poses (898) | 39, median 2.5 cm | **169**, median 2.7 cm |
+| the second walk, 12 min later (1800) | 48 | **163** |
+
+The second walk has its own SfM frame. Its localized camera centres were
+fitted to its SfM centres by a similarity. Every localized image fitted
+(no outliers), at a scale of 0.98. The residuals were 22 cm median and
+within 50 cm for 94%, against 10 cm median for the 48 fixes of the plain
+map. That is the first real cross-session localization here. It localized
+9% of the images, enough to correct wheel odometry every few metres, not to
+run on alone.
+
+Smoothing and CLAHE nearly double the real fixes. They raise the renders
+from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza
+they had not rescued the renders or the second walk, so nearby structure
+matters most. A real robot should still map with its own camera. The
+renders now localize often enough against a real-photo map to keep a
+simulated robot on its course, between fixes, on wheel odometry.
 
 ## The occupancy grid of a visual map
 
