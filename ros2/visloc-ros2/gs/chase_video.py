@@ -16,6 +16,8 @@ splat's depth, and overlays:
 - the map's landmarks within 12 m (white dots);
 - green rays from the robot's camera to the landmarks its latest localization
   matched (`visloc_map_localize_node --dump_inliers`, the `--inliers` CSV);
+  when no image has localized for 0.8 s, the last fix's rays turn grey and
+  the caption says how long the robot has run on wheel odometry;
 - an inset with that localized camera image and its matched keypoints, a minimap
   and the goals.
 
@@ -142,16 +144,21 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     img = Image.fromarray(rgb.astype(np.uint8)); d = ImageDraw.Draw(img)
     # the latest localization (its PnP inliers), if recent
     k = bisect.bisect_right(FT, int(round(t * 1e9))) - 1
-    fix = FIX[FT[k]] if k >= 0 and t - FT[k] * 1e-9 < 0.8 else None
+    since = t - FT[k] * 1e-9 if k >= 0 else None
+    fix = FIX[FT[k]] if since is not None and since < 0.8 else None
+    # without a fresh fix, the last one's landmarks stay, greyed out
+    shown = fix if fix else (FIX[FT[k]] if since is not None else None)
+    line_col, dot_col, dot_edge = ((70, 255, 130), (70, 255, 130), (0, 90, 30)) if fix else \
+        ((150, 150, 150), (170, 170, 170), (70, 70, 70))
     cam_top = np.array([x, y, z0 + scene["camera_height"]])
-    if fix:
-        ids = [i for _, _, i in fix if i in LM]
+    if shown:
+        ids = [i for _, _, i in shown if i in LM]
         P = np.array([LM[i] for i in ids]); pts, ok = project(np.vstack([cam_top, P]), R_wc, c_w)
         if ok[0]:
             for (u, v), good in zip(pts[1:], ok[1:]):
-                if good: d.line((tuple(pts[0]), (u, v)), fill=(70, 255, 130), width=1)
+                if good: d.line((tuple(pts[0]), (u, v)), fill=line_col, width=1)
             for (u, v), good in zip(pts[1:], ok[1:]):
-                if good: d.ellipse((u - 4, v - 4, u + 4, v + 4), fill=(70, 255, 130), outline=(0, 90, 30))
+                if good: d.ellipse((u - 4, v - 4, u + 4, v + 4), fill=dot_col, outline=dot_edge)
     # inset: the robot's own camera, at the localized image's time, with its matched features
     tf = FT[k] * 1e-9 if fix else t
     rr = sim[min(bisect.bisect_left(ST, tf), len(sim) - 1)]
@@ -168,8 +175,13 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
             u, v = px_ * sx, py_ * sy
             idr.ellipse((u - 3, v - 3, u + 3, v + 3), outline=(70, 255, 130), width=2)
     img.paste(inset, (W - 336, 16)); d.rectangle((W - 337, 15, W - 15, 17 + inset.height), outline=(255, 255, 255), width=2)
-    label = f"camera: {len(fix)} features matched" if fix else "robot's camera"
-    d.text((W - 336, 22 + inset.height), label, font=F(18), fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+    if fix:
+        label, col = f"camera: {len(fix)} features matched", (255, 255, 255)
+    elif since is not None:
+        label, col = f"no map match for {since:.1f} s:\non wheel odometry until the next", (255, 170, 40)
+    else:
+        label, col = "robot's camera", (255, 255, 255)
+    d.text((W - 336, 22 + inset.height), label, font=F(18), fill=col, stroke_width=2, stroke_fill=(0, 0, 0))
     # minimap
     m = Image.new('RGB', (MW, MH), (25, 28, 36)); md = ImageDraw.Draw(m)
     md.line([mto(*p) for p in path], fill=(90, 96, 110), width=8)
@@ -182,7 +194,7 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     reached = sum(t >= dt for dt in done_t)
     d.text((24, 16), f'goal {min(reached + 1, len(goals))}/{len(goals)}' if reached < len(goals) else f'all {len(goals)} goals reached',
            font=F(30), fill=(255, 255, 255), stroke_width=3, stroke_fill=(0, 0, 0))
-    d.text((24, 54), 'green: map features visloc matched   cyan ring: where visloc puts the robot   red: path', font=F(20), fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+    d.text((24, 54), 'green: map features visloc matched (grey: last match)   cyan ring: visloc estimate   red: path', font=F(20), fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
     img.save(f'{OUT}/{n:05d}.jpg', quality=90); n += 1
 srv.stdin.close(); fpv.stdin.close()
 print(n, 'frames')
