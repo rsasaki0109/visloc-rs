@@ -164,7 +164,7 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     rgb = np.asarray(img, float)
     if CROWD:
         people_at(t)
-        for px_, py_ in CROWD.xy:                 # soft contact shadows
+        for px_, py_ in CROWD.xy[np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1]) > 2.0]:  # contact shadows
             ring = [(px_ + 0.28 * math.cos(a_), py_ + 0.28 * math.sin(a_), gz(px_, py_) + 0.01) for a_ in np.linspace(0, 2 * math.pi, 24)]
             pts, ok = project(ring, R_wc, c_w)
             if ok.all():
@@ -172,11 +172,12 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
                 rgb = rgb * (1 - np.asarray(sm.filter(ImageFilter.GaussianBlur(5)), float)[..., None] / 255)
         dist = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1])
         far = dist > math.hypot(x - c_w[0], y - c_w[1])
+        near = ~far & (dist > 2.0)               # not those brushing past the chase camera itself
         all_xy, all_yaw, all_ph = CROWD.xy, CROWD.yaw, CROWD.phase
         CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[far], all_yaw[far], all_ph[far]
         rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
         rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
-        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[~far], all_yaw[~far], all_ph[~far]
+        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[near], all_yaw[near], all_ph[near]
         rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
     else:
         rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
@@ -210,7 +211,7 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
         frgb = np.frombuffer(fb[:CW * CH * 3], np.uint8).reshape(CH, CW, 3).astype(float)
         people_at(tf)
         frgb = CROWD.draw(frgb, np.frombuffer(fb[CW * CH * 3:], '<f4').reshape(CH, CW), R_fw.T, cf,
-                          float(CAM['model'].split()[3]), gz)
+                          float(CAM["model"].split()[3]), gz, fast=True)
         inset = Image.fromarray(np.clip(frgb, 0, 255).astype(np.uint8)).convert('L').convert('RGB')
     else:
         inset = Image.frombytes('RGB', (CW, CH), ask(fpv, R_fw, -R_fw @ cf, CW * CH * 3)).convert('L').convert('RGB')
