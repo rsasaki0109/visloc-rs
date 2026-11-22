@@ -911,7 +911,9 @@ fn run() -> Result<(), String> {
                     }
                     eprintln!(
                         "visloc_vio_node: estimator reset {resets}; re-initializing from IMU{}",
-                        if monitor.config().enabled() {
+                        if bridge.state() == BridgeState::Wheels {
+                            "; outputs on wheel odometry until tracking holds again"
+                        } else if monitor.config().enabled() {
                             "; outputs held until tracking holds again"
                         } else {
                             ""

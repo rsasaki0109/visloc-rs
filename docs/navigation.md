@@ -281,7 +281,36 @@ above had no false alarm (the 9 resets all fell in the blackout) and needed
 no spin. In normal driving frames went down to 5 tracked observations,
 briefly. A gap longer than a few seconds still needs someone (or a behavior
 tree) to resend the goal, and the robot stays where it stopped until the
-cameras see again; wheel odometry would let it go on.
+cameras see again.
+
+**Driving on through it, on the wheels.** A wheeled robot does not have to
+stop. With `wheel_odom_topic` (`nav.launch.py wheel_odom:=/wheel_odom`, the
+diff drive's odometry), `visloc_vio_node` still resets the estimator when
+tracking is lost. It no longer goes silent, though: it carries the
+published pose on by the wheel odometry's motion since the last good VIO
+pose (`visloc_ros2::odom_bridge`). Once tracking holds again, it moves the
+new estimator's poses by a yaw and a translation so that they continue from
+where the wheels took the robot. The `odom` frame never jumps, so it
+publishes no `odom_reset`, and `map -> odom` stays as it was. The same
+blackout, with the monitor at `lost_min_observations 10` and
+`lost_max_speed 1.0`:
+
+| 5 s camera blackout in the hallway | goals reached | contacts | `/map_pose` error, RMSE / max | robot during the blackout | drive time |
+| --- | ---: | ---: | --- | --- | ---: |
+| monitor on, outputs stop | 5/5 (goal 2 on the 2nd try) | 0 | 1.5 cm / 4.4 cm | stops | 126 s |
+| monitor on, **wheel odometry through it** | **5/5, all at the first try** | 0 | 1.7 cm / 4.4 cm | **drives on, 1.62 m** | 118 s |
+
+The estimator was reset 9 times in the blackout, as before. The outputs
+followed the wheels at 0.3 m/s the whole way, with 2 cm of error against the
+truth, and VIO took over again 1 s after the cameras came back. Gazebo's
+wheel odometry has no slip. A real robot's drifts more, so how far it can
+go blind depends on its wheels. A few metres on an indoor floor should hold
+within the costmap's inflation.
+
+`wheel_odom_topic` needs the lost-tracking monitor. The wheel odometry's
+child frame (`base_link` here) is placed against the node's output frame by
+/tf_static. It does not work with the online mapper, whose map frame
+follows the VIO's.
 
 The second pair of runs as seen from a camera following the robot (Gazebo,
 rendered for the video only; it sees a plain floor through a visibility
