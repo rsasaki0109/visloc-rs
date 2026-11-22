@@ -779,6 +779,98 @@ to 200 ms (`gz/nav2_params.yaml`). Its servers had answered too late.
 Video: [media/gs_street_pedestrians.mp4](media/gs_street_pedestrians.mp4)
 (map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
 
+### One command from a 360-degree video
+
+`gs/real2sim.py` runs the whole chain on an Insta360 `.insv` file:
+
+```bash
+python3 ros2/visloc-ros2/gs/real2sim.py --insv walk.insv --out runs/walk \
+  [--frames 300] [--imu-frame-period 0.333683] [--camera-height 1.2] [--goals 4] [--nav]
+```
+
+1. Frames.
+2. SfM, in metres from the camera's IMU.
+3. Levelling.
+4. Masks of the blurred faces.
+5. 3DGS.
+6. The simulator scene with goals along the walk.
+7. The localization map rendered at the robot's camera height, and its
+   occupancy grid.
+8. With `--nav`, Nav2 to the goals.
+
+Each step records its time in `timing.json` and is skipped when its output
+exists, so a stopped run resumes. On a second OverMaps360 walk (a temple
+plaza in Bangkok, 300 frames, 121 m), on 4 CPU cores with no GPU, it took:
+
+| Step | Time |
+| --- | ---: |
+| frames | 30 s |
+| SfM (3000 faces, all registered, 161k points) | 38 min |
+| levelling | 6 s |
+| masks | 7 min |
+| 3DGS (7000 steps, 609k Gaussians, eval PSNR 18.3) | 37 min |
+| scene | 2 s |
+| map (1799 keyframes) and occupancy | 23 min |
+
+That is about 1 h 45 min from the video to a simulator with its map.
+
+### Appearance change, and real photos as queries
+
+**In the simulator.** `gs/perturb_replay.py` copies the street replay of
+the 1.2 m camera with every image changed: darker, gamma, contrast, noise,
+blur, "night" (dark, gamma, noise and a little blur), or patches of other
+images over 40% of each image (changed signs, parked cars). Each replay was
+localized with the tuned settings against the map of the unchanged renders.
+The map (`tum_rgbd_save_map`) can also smooth every image
+(`--smoothing-sigma 1.5`) and equalize its local contrast
+(`--local-contrast`, CLAHE). The map's `map.json` records both, and the
+localizers apply them to the queries too.
+
+| Images (858) | Plain | Smoothed σ 1.5 | CLAHE + smoothed |
+| --- | ---: | ---: | ---: |
+| unchanged | 835 | 841 | 843 |
+| gamma 2.5 | 785 | 826 | 842 |
+| noise σ 10 | 218, wrong by metres | 838 | |
+| noise σ 25 | 0 | 621 | 553 |
+| blur σ 2 px | 0 | 829 | |
+| blur σ 3 px | 0 | 0 | 0 |
+| night, half strength | 726 | 835 | |
+| night, three quarters | 0 | 762 | 743 |
+| night, full | 0 | 0 | 0 |
+| 40% patched | 554 | 758 | 787 |
+
+Smoothing makes the corners robust to noise and to mild blur. CLAHE helps
+with gamma and with changed content. A full synthetic night (10–20% of the
+light, with noise) still fails: real cameras raise exposure and gain at
+night, which this test does not model, and real night also brings lamps and
+shadows that it cannot fake.
+
+**With real photos.** `gs/real_map_test.py` builds a map from real photos
+of a `real2sim.py` walk: the horizontal faces of every other frame, with
+depth rendered from the splat at each photo's SfM pose. It then localizes
+images one at a time, with no odometry, against that map:
+
+| Queries | Global search | Prior 10 m + retrieval | the same, smoothed + CLAHE map |
+| --- | ---: | ---: | ---: |
+| the held-out real photos (900) | 184 | 197 | **359**, median error 7 cm |
+| the splat rendered at the same poses (900) | 0 | 0 | 5 |
+| a second walk of the same plaza, 2.4 h later (1800) | 0 | 0 | 0 |
+
+On the held-out photos, the forward and backward faces localize about 40% of
+the time and the side faces about 10%. In this narrow street the side
+views change most between frames, and they blur.
+
+This plaza is a hard case. Its floor is a repeated tile pattern, and the
+buildings that would identify it stand beyond the map's 20 m depth limit.
+The splat (PSNR 18) also puts the depth of the real corners less precisely
+than the Riga street's splat (PSNR 22) does.
+
+So a map of the rendered images (what the simulator uses) and a map of real
+photos do not localize each other's images. A real robot needs a map of
+its own camera's images. The second walk gave no fix in this plaza, so
+cross-session localization still has to be shown on a street with nearby
+structure.
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every
