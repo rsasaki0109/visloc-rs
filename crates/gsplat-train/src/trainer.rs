@@ -187,6 +187,10 @@ pub struct Trainer {
     loss_acc: wgpu::Buffer,
     loss_steps: usize,
     ssim: SsimKernels,
+    /// Host SSIM scratch (CPU adapters), made on first use.
+    ssim_host: Option<crate::loss::SsimHost>,
+    /// The L1 log of host-computed losses (fixed point, as `loss_acc`).
+    host_loss_acc: u64,
     adam_pipeline: wgpu::ComputePipeline,
     stats_pipeline: wgpu::ComputePipeline,
     stats_uniforms: wgpu::Buffer,
@@ -597,6 +601,8 @@ impl Trainer {
             loss_acc,
             loss_steps: 0,
             ssim,
+            ssim_host: None,
+            host_loss_acc: 0,
             adam_pipeline,
             stats_pipeline,
             stats_uniforms,
@@ -833,7 +839,9 @@ impl Trainer {
         // on the host from the image the rasterizer kept (the kernels' barriers
         // are slow there). Not with the appearance model, whose backward reads
         // d_image within the same pass.
-        let host_ssim = ssim_on && self.appearance.is_none() && st.renderer.host_image().is_some();
+        // The L1 term too, so d_image is written once from the host.
+        let host_loss = self.appearance.is_none() && st.renderer.host_image().is_some();
+        let host_ssim = ssim_on && host_loss;
         {
             let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("loss"),
@@ -893,10 +901,12 @@ impl Trainer {
                     pass.set_bind_group(0, b_apply, &[]);
                     pass.dispatch_workgroups(x, y, 1);
                 }
-                pass.set_pipeline(&self.loss_pipeline);
-                pass.set_bind_group(0, &st.loss_bind, &[]);
-                let (x, y) = groups_2d(npix);
-                pass.dispatch_workgroups(x, y, 1);
+                if !host_loss {
+                    pass.set_pipeline(&self.loss_pipeline);
+                    pass.set_bind_group(0, &st.loss_bind, &[]);
+                    let (x, y) = groups_2d(npix);
+                    pass.dispatch_workgroups(x, y, 1);
+                }
                 if ssim_on && !host_ssim {
                     self.ssim.encode(&mut pass, &st.ssim_bind);
                 }
@@ -929,19 +939,24 @@ impl Trainer {
             }
             queue.submit(Some(enc.finish()));
         }
-        if host_ssim {
-            // d_image holds the weighted L1 gradient; add the SSIM term.
+        if host_loss {
+            // The weighted L1 gradient (the weight the loss uniforms hold),
+            // then the SSIM term, into d_image.
             let d_buf = st.renderer.d_image_buffer()?.clone();
-            let add = crate::loss::ssim_grad_host(
-                st.renderer.host_image().expect("checked above"),
-                &self.gt_host[vi],
-                self.width as usize,
-                self.height as usize,
-                self.cfg.ssim_weight,
-            );
-            let mut d = read_f32(&dev, &queue, &d_buf, add.len());
-            for (a, b) in d.iter_mut().zip(&add) {
-                *a += b;
+            let (w, h) = (self.width as usize, self.height as usize);
+            let image = st.renderer.host_image().expect("checked above");
+            let l1_weight = if ssim_on || self.cfg.ssim_every <= 1 {
+                1.0 - self.cfg.ssim_weight
+            } else {
+                1.0
+            };
+            let mut d = vec![0.0f32; w * h * 3];
+            self.host_loss_acc +=
+                crate::loss::l1_grad_host(image, &self.gt_host[vi], l1_weight, &mut d);
+            if host_ssim {
+                self.ssim_host
+                    .get_or_insert_with(|| crate::loss::SsimHost::new(w, h))
+                    .add_grad(image, &self.gt_host[vi], self.cfg.ssim_weight, &mut d);
             }
             queue.write_buffer(&d_buf, 0, bytemuck::cast_slice(&d));
         }
@@ -1424,10 +1439,11 @@ impl Trainer {
 
     /// Mean L1 loss over the steps since the last call (reads the device).
     pub fn take_mean_loss(&mut self) -> f32 {
+        let host = std::mem::take(&mut self.host_loss_acc);
         let st = self.st();
         let (dev, queue) = (&st.renderer.ctx.device, &st.renderer.ctx.queue);
         let v = read_f32(dev, queue, &self.loss_acc, 1);
-        let bits = v.first().map(|x| x.to_bits()).unwrap_or(0);
+        let bits = v.first().map(|x| x.to_bits()).unwrap_or(0) as u64 + host;
         let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         enc.clear_buffer(&self.loss_acc, 0, None);
         queue.submit(Some(enc.finish()));
