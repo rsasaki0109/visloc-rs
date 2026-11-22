@@ -680,6 +680,53 @@ For a 1.2 m camera:
 | 2.26 m (the capture height), the third run | 4/4 | 0 | 4.1 / 1.7 / 34 cm | — |
 | **1.2 m** | **4/4** | 0 | **4.3 / 2.2 / 24 cm** | 663 of 850 |
 
+**Fewer failed localizations.** In the 1.2 m run, 22% of the localizations
+failed, and the longest stretch on wheel odometry alone was 18.5 s. To find
+out why, the drive was replayed offline. Each attempt's camera image was
+rendered at the true pose, and `basalt_euroc_localize_demo --odometry` (the
+same localization, with the wheel odometry as its prior) localized it. The
+replay localized 685 of 858 images, as the live run did. Each setting then
+took 26 s to try.
+
+- **What failed.** Every failure had too few matches in the first place:
+  median 17, against 117 when localization succeeded. The views were not
+  poor (there were facades in every one), nor far from the map's views
+  (median 0.34 m). Repeated windows draw wrong matches. Far landmarks, whose
+  depth is the splat's, miss the 3 px gate.
+- **What helped.**
+  - A looser descriptor distance (`--max_hamming 90`, from 70).
+  - A 5 px inlier threshold (`--reprojection_threshold 5`).
+  - 20 inliers instead of 30 (`--min_inliers 20`).
+  - The odometry correction's own gate still rejects the fixes that
+    disagree.
+
+| Localization settings | Images localized | Longest gap | Pose error, RMSE / median / max |
+| --- | ---: | ---: | --- |
+| as before (replay) | 685 of 858 | 12.0 s | 4.0 / 1.9 / 21 cm |
+| `max_hamming 90`, `reprojection_threshold 5`, `min_inliers 20` (replay) | 835 of 858 | 7.0 s | 3.1 / 1.9 / 22 cm |
+| the same, live with Nav2 (4/4 goals, 0 contacts) | 827 of 850 | 6.0 s | 4.7 / 2.2 / 36 cm |
+
+Live, the correction rejected 91 fixes and reset 5 times. Its worst error
+grew to 36 cm, but the robot had a fresh fix in 98% of the video's frames,
+against 81% before.
+
+**Mono or stereo.** The same drive was also replayed with a stereo pair
+(0.12 m baseline, 10 Hz) and an IMU synthesized from the true trajectory
+(200 Hz, with noise). `basalt_euroc_localize_demo --vio` then runs visloc's
+stereo-inertial VIO as the odometry. Map localization uses one image either
+way, so only the odometry between fixes differs:
+
+| Odometry between fixes | Images localized | Longest gap | Pose error, RMSE / median / max |
+| --- | ---: | ---: | --- |
+| **wheel odometry (mono camera)** | 835 of 858 | 7.0 s | **3.1 / 1.9 / 22 cm** |
+| stereo-inertial VIO | 837 of 859 | 6.5 s | 5.9 / 1.9 / 35 cm |
+
+The simulator's wheel odometry has a 2% distance error and a 3% turn
+error. Over the few seconds between fixes, the VIO on rendered stereo
+images did not beat it: the correction rejected 82 of its fixes and reset 6
+times. Stereo also costs four times the rendering. So the simulated robot
+keeps one camera and its wheel odometry.
+
 The video's frames come from two scripts. The run needs
 `visloc_map_localize_node --dump_inliers` (in `gs_nav.launch.py`'s
 `localize_args`) and `gs_sim.py --record`:
