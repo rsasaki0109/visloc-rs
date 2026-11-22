@@ -123,7 +123,42 @@ fn fast_exp(x: f32) -> f32 {
     let p = p * r + 1.666_666_5e-1;
     let p = p * r + 0.5;
     let y = p * r * r + r + 1.0;
-    y * f32::from_bits(((n as i32).wrapping_add(127) as u32) << 23)
+    // 2^n. `n` is an integer in [-126, 127]; adding 1.5 * 2^23 puts it in
+    // the low mantissa bits, read out without a float-to-int conversion
+    // (Rust's saturating `as i32` does not vectorize).
+    const MAGIC: f32 = 12_582_912.0;
+    let ni = (n + MAGIC).to_bits().wrapping_sub(MAGIC.to_bits());
+    y * f32::from_bits(ni.wrapping_add(127) << 23)
+}
+
+/// The lanes of one tile row a splat can reach: `k_lo..k_hi`, each 0, 8 or
+/// 16 (an 8-lane half is one AVX2 vector), or `None` for neither half.
+/// `level` is `(c00, c01, c11, s2)` of a positive-definite conic with the
+/// level `sigma = s2 / 2` (alpha = 1/255); `dy` is the row's pixel centre
+/// minus the mean; lane `k`'s centre is `x0 + k + 0.5`. Solves the conic
+/// for x on that row, one pixel wider; without a level, both halves.
+#[inline(always)]
+fn row_lanes(
+    level: Option<(f32, f32, f32, f32)>,
+    dy: f32,
+    mu_x: f32,
+    x0: f32,
+) -> Option<(usize, usize)> {
+    let Some((c00, c01, c11, s2)) = level else {
+        return Some((0, 16));
+    };
+    let disc = (c01 * dy) * (c01 * dy) - c00 * (c11 * dy * dy - s2);
+    let half = if disc > 0.0 { disc.sqrt() / c00 } else { 0.0 };
+    let xc = mu_x - c01 * dy / c00 - x0 - 0.5;
+    let (lo, hi) = (xc - half - 1.0, xc + half + 1.0);
+    let a = lo <= 7.0 && hi >= 0.0;
+    let b = lo <= 15.0 && hi >= 8.0;
+    match (a, b) {
+        (true, true) => Some((0, 16)),
+        (true, false) => Some((0, 8)),
+        (false, true) => Some((8, 16)),
+        (false, false) => None,
+    }
 }
 
 /// The backward walk of one tile; `slots[j - start]` receives the tile's sum
@@ -180,11 +215,13 @@ fn tile_backward(f: &Frame<'_>, tile_bw: u32, tile: u32, start: usize, slots: &m
         // sigma = ln(255 opacity), one pixel wider).
         let (mut ly0, mut ly1) = (0i64, h as i64 - 1);
         let det = c00 * c11 - c01 * c01;
+        let mut level = None;
         if c00 > 0.0 && c11 > 0.0 && det > 0.0 {
             let s2 = 2.0 * (255.0 * opac).ln().max(0.0);
             let hy = (s2 * c00 / det).sqrt() + 1.0;
             ly0 = ly0.max((mu_y - hy - 0.5 - y0 as f32).floor() as i64);
             ly1 = ly1.min((mu_y + hy - 0.5 - y0 as f32).ceil() as i64);
+            level = Some((c00, c01, c11, s2));
         }
         if ly0 > ly1 {
             continue;
@@ -195,42 +232,60 @@ fn tile_backward(f: &Frame<'_>, tile_bw: u32, tile: u32, start: usize, slots: &m
         let mut any = false;
         for ly in ly0 as usize..=ly1 as usize {
             let dy = (y0 as usize + ly) as f32 + 0.5 - mu_y;
+            let Some((k_lo, k_hi)) = row_lanes(level, dy, mu_x, x0 as f32) else {
+                continue;
+            };
             let mut row_any = 0u32;
-            for k in 0..W {
-                let dx = xs[k] - mu_x;
-                let sigma = 0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
-                let e = fast_exp(-sigma);
-                let raw = opac * e;
-                let a = raw.min(0.99);
-                // (`sigma >= 0` is also false for NaN, as in the shader.)
-                let hit = ju < last[ly][k] && sigma >= 0.0 && a >= 1.0 / 255.0;
-                row_any |= hit as u32;
-                let a = if hit { a } else { 0.0 };
-                let t_before = t_cur[ly][k] / (1.0 - a);
-                let at = a * t_before;
-                let g = [gr[0][ly][k], gr[1][ly][k], gr[2][ly][k]];
-                let b = [be[0][ly][k], be[1][ly][k], be[2][ly][k]];
-                acc[6][k] += at * g[0];
-                acc[7][k] += at * g[1];
-                acc[8][k] += at * g[2];
-                let d_alpha = t_before
-                    * ((col[0] - b[0]) * g[0] + (col[1] - b[1]) * g[1] + (col[2] - b[2]) * g[2]);
-                for ch in 0..3 {
-                    be[ch][ly][k] = a * col[ch] + (1.0 - a) * b[ch];
-                }
-                t_cur[ly][k] = t_before;
-                // A clamped alpha passes no gradient to opacity, conic, mean.
-                let live = hit && raw <= 0.99;
-                let d_sigma = if live { -d_alpha * a } else { 0.0 };
-                let g_u = d_sigma * -(c00 * dx + c01 * dy);
-                let g_v = d_sigma * -(c01 * dx + c11 * dy);
-                acc[0][k] += g_u;
-                acc[1][k] += g_v;
-                acc[2][k] += d_sigma * 0.5 * dx * dx;
-                acc[3][k] += d_sigma * dx * dy;
-                acc[4][k] += d_sigma * 0.5 * dy * dy;
-                acc[5][k] += if live { d_alpha * e } else { 0.0 };
-                acc[9][k] += g_u.abs() * img_w + g_v.abs() * img_h;
+            // Each 8-lane half (one AVX2 vector) with a constant offset, so it
+            // vectorizes.
+            macro_rules! lanes8 {
+                ($base:expr) => {
+                    for kk in 0..8 {
+                        let k = $base + kk;
+                        let dx = xs[k] - mu_x;
+                        let sigma = 0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
+                        let e = fast_exp(-sigma);
+                        let raw = opac * e;
+                        let a = raw.min(0.99);
+                        // (`sigma >= 0` is also false for NaN, as in the shader.)
+                        let hit = ju < last[ly][k] && sigma >= 0.0 && a >= 1.0 / 255.0;
+                        row_any |= hit as u32;
+                        let a = if hit { a } else { 0.0 };
+                        let t_before = t_cur[ly][k] / (1.0 - a);
+                        let at = a * t_before;
+                        let g = [gr[0][ly][k], gr[1][ly][k], gr[2][ly][k]];
+                        let b = [be[0][ly][k], be[1][ly][k], be[2][ly][k]];
+                        acc[6][k] += at * g[0];
+                        acc[7][k] += at * g[1];
+                        acc[8][k] += at * g[2];
+                        let d_alpha = t_before
+                            * ((col[0] - b[0]) * g[0]
+                                + (col[1] - b[1]) * g[1]
+                                + (col[2] - b[2]) * g[2]);
+                        for ch in 0..3 {
+                            be[ch][ly][k] = a * col[ch] + (1.0 - a) * b[ch];
+                        }
+                        t_cur[ly][k] = t_before;
+                        // A clamped alpha passes no gradient to opacity, conic, mean.
+                        let live = hit && raw <= 0.99;
+                        let d_sigma = if live { -d_alpha * a } else { 0.0 };
+                        let g_u = d_sigma * -(c00 * dx + c01 * dy);
+                        let g_v = d_sigma * -(c01 * dx + c11 * dy);
+                        acc[0][k] += g_u;
+                        acc[1][k] += g_v;
+                        acc[2][k] += d_sigma * 0.5 * dx * dx;
+                        acc[3][k] += d_sigma * dx * dy;
+                        acc[4][k] += d_sigma * 0.5 * dy * dy;
+                        acc[5][k] += if live { d_alpha * e } else { 0.0 };
+                        acc[9][k] += g_u.abs() * img_w + g_v.abs() * img_h;
+                    }
+                };
+            }
+            if k_lo == 0 {
+                lanes8!(0);
+            }
+            if k_hi == 16 {
+                lanes8!(8);
             }
             any |= row_any != 0;
         }
@@ -311,11 +366,13 @@ pub(crate) fn raster_forward(f: &Frame<'_>) -> Raster {
                         let col = [p[6].max(0.0), p[7].max(0.0), p[8].max(0.0)];
                         let (mut ly0, mut ly1) = (0i64, h as i64 - 1);
                         let det = c00 * c11 - c01 * c01;
+                        let mut level = None;
                         if c00 > 0.0 && c11 > 0.0 && det > 0.0 {
                             let s2 = 2.0 * (255.0 * opac).ln().max(0.0);
                             let hy = (s2 * c00 / det).sqrt() + 1.0;
                             ly0 = ly0.max((mu_y - hy - 0.5 - y0 as f32).floor() as i64);
                             ly1 = ly1.min((mu_y + hy - 0.5 - y0 as f32).ceil() as i64);
+                            level = Some((c00, c01, c11, s2));
                         }
                         if ly0 > ly1 {
                             continue;
@@ -326,24 +383,35 @@ pub(crate) fn raster_forward(f: &Frame<'_>) -> Raster {
                                 continue;
                             }
                             let dy = (y0 + ly) as f32 + 0.5 - mu_y;
-                            let mut alive = 0u32;
-                            for k in 0..W {
-                                let dx = xs[k] - mu_x;
-                                let sigma = 0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
-                                let a = (opac * fast_exp(-sigma)).min(0.99);
-                                let t = trans[ly][k];
-                                let hit = t > 1e-4 && sigma >= 0.0 && a >= 1.0 / 255.0;
-                                let a = if hit { a } else { 0.0 };
-                                let ta = t * a;
-                                for ch in 0..3 {
-                                    acc[ch][ly][k] += ta * col[ch];
+                            let Some((k_lo, k_hi)) = row_lanes(level, dy, mu_x, x0 as f32) else {
+                                continue;
+                            };
+                            for base in [0usize, 8] {
+                                if base < k_lo || base >= k_hi {
+                                    continue;
                                 }
-                                let t = t * (1.0 - a);
-                                trans[ly][k] = t;
-                                last[ly][k] = if hit { next } else { last[ly][k] };
-                                alive |= (t > 1e-4) as u32;
+                                // A fixed 8-lane loop (one AVX2 vector).
+                                for kk in 0..8 {
+                                    let k = base + kk;
+                                    let dx = xs[k] - mu_x;
+                                    let sigma =
+                                        0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
+                                    let a = (opac * fast_exp(-sigma)).min(0.99);
+                                    let t = trans[ly][k];
+                                    let hit = t > 1e-4 && sigma >= 0.0 && a >= 1.0 / 255.0;
+                                    let a = if hit { a } else { 0.0 };
+                                    let ta = t * a;
+                                    for ch in 0..3 {
+                                        acc[ch][ly][k] += ta * col[ch];
+                                    }
+                                    let t = t * (1.0 - a);
+                                    trans[ly][k] = t;
+                                    last[ly][k] = if hit { next } else { last[ly][k] };
+                                }
                             }
-                            if alive == 0 {
+                            // Over the whole row: lanes outside k_lo..k_hi
+                            // may still be live.
+                            if trans[ly].iter().all(|&t| t <= 1e-4) {
                                 live_rows &= !(1 << ly);
                             }
                         }
