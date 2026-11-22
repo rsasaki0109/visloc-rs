@@ -1686,6 +1686,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "visloc-navigation"
+version = "0.4.0"
+dependencies = [
+ "nalgebra",
+ "visloc-core",
+ "visloc-localization",
+ "visloc-vision",
+]
+
+[[package]]
 name = "visloc-objects"
 version = "0.4.0"
 dependencies = [
@@ -1714,6 +1724,7 @@ dependencies = [
  "visloc-io",
  "visloc-localization",
  "visloc-mapping",
+ "visloc-navigation",
  "visloc-objects",
  "visloc-sift-gpu",
  "visloc-slam",

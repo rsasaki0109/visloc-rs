@@ -27,8 +27,8 @@ use visloc_ros2::map_localize::{
     Matching, OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Odometry, PointCloud2, PoseWithCovarianceStamped, TfMessage,
-    Time,
+    DiagnosticArray, Header, Image, Int32, Odometry, PointCloud2, PoseWithCovarianceStamped,
+    TfMessage, Time,
 };
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::queue::DropOldestQueue;
@@ -72,6 +72,10 @@ PARAMETERS (--name value  or  -p name:=value):
                          failure, and with <= 0 always, match map-wide             [20]
   projection_fresh_s     ... only within this many seconds of the newest fix          [5]
   projection_fresh_m     ... and this many metres of odometry travel from it          [2]
+  reset_prior_s          after a VIO reset (odom_reset), the last map pose is the
+                         prior for this many seconds (0: off)                         [30]
+  dump_inliers           CSV file: each accepted localization's PnP inliers,
+                         `timestamp_ns,x,y,landmark_id` (keypoint px), for visualizations [none]
   prior_wait_ms          longest wait for the odometry of an image's stamp before
                          matching map-wide instead                                    [300]
   match_threads          threads of the map-wide search                               [1]
@@ -90,7 +94,9 @@ PARAMETERS (--name value  or  -p name:=value):
 TOPICS (remap with --remap from=to or -r from:=to):
   in : image (sensor_msgs/Image, raw), odom (nav_msgs/Odometry, gravity-aligned;
        its header.frame_id and child_frame_id name the odometry and body frames),
-       /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
+       /tf_static (tf2_msgs/TFMessage, with extrinsics tf), odom_reset (std_msgs/Int32,
+       from visloc_vio_node: when it changes, the odometry restarted in a new frame, and
+       the map pose starts over from new fixes)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, after two agreeing fixes), map_fix (geometry_msgs/
        PoseWithCovarianceStamped, the body pose of each image localized with min_inliers,
@@ -120,6 +126,17 @@ fn run() -> Result<(), String> {
         other => return Err(format!("extrinsics: expected map or tf, got {other:?}")),
     };
     let camera_frame = args.string("camera_frame");
+    let mut dump_inliers = match args.string("dump_inliers") {
+        Some(path) => {
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create(&path).map_err(|e| format!("dump_inliers {path}: {e}"))?,
+            );
+            std::io::Write::write_all(&mut file, b"timestamp_ns,x,y,landmark_id\n")
+                .map_err(|e| format!("dump_inliers {path}: {e}"))?;
+            Some(file)
+        }
+        None => None,
+    };
     let publish_tf = args.flag("publish_tf", true)?;
     let publish_map_cloud = args.flag("publish_map_cloud", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
@@ -150,6 +167,7 @@ fn run() -> Result<(), String> {
         args.parsed_or("projection_fresh_s", options.projection_fresh_s)?;
     options.projection_fresh_m =
         args.parsed_or("projection_fresh_m", options.projection_fresh_m)?;
+    options.reset_prior_s = args.parsed_or("reset_prior_s", options.reset_prior_s)?;
     let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
     let duplicate_radius = args.parsed_or("duplicate_radius", 0.0f64)?;
@@ -176,6 +194,7 @@ fn run() -> Result<(), String> {
     let fix_topic = args.topic("map_fix");
     let diagnostics_topic = args.topic("/diagnostics");
     let map_cloud_topic = args.topic("map_cloud");
+    let odom_reset_topic = args.topic("odom_reset");
     args.finish()?;
 
     let map = load_basalt_map(&map_dir)?;
@@ -210,6 +229,7 @@ fn run() -> Result<(), String> {
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let image_sub = ros.subscription::<Image>(&image_topic, sensor_qos(2))?;
     let odom_sub = ros.subscription::<Odometry>(&odom_topic, sensor_qos(50))?;
+    let odom_reset_sub = ros.subscription::<Int32>(&odom_reset_topic, latched_qos(1))?;
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let fix_pub = ros.publisher::<PoseWithCovarianceStamped>(&fix_topic, output_qos(10))?;
@@ -233,6 +253,24 @@ fn run() -> Result<(), String> {
         |listener| Arc::clone(listener.transforms()),
     );
     let body_frame = Arc::new(Mutex::new(None::<String>));
+
+    // A VIO reset: the odometry frame starts over, so the correction does.
+    {
+        let core = Arc::clone(&core);
+        let topic = odom_reset_topic.clone();
+        let mut last = None::<i32>;
+        spawn_receiver("odom-reset-rx", odom_reset_sub, move |msg: Int32| {
+            if last.is_some_and(|count| count != msg.data) {
+                core.lock().unwrap_or_else(|e| e.into_inner()).reset();
+                eprintln!(
+                    "visloc_map_localize_node: odometry reset ({} on {topic}); map pose unset \
+                     until new fixes",
+                    msg.data
+                );
+            }
+            last = Some(msg.data);
+        })?;
+    }
 
     // Odometry: pair with fixes, then publish map -> odom and the map pose.
     let odom_messages = Arc::new(AtomicU64::new(0));
@@ -364,6 +402,18 @@ fn run() -> Result<(), String> {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
                 localized += 1;
+                if let Some(file) = dump_inliers.as_mut() {
+                    let rows: String = fix
+                        .inlier_matches
+                        .iter()
+                        .map(|(p, id)| format!("{},{:.2},{:.2},{id}\n", stamp.to_nanos(), p.x, p.y))
+                        .collect();
+                    if let Err(error) = std::io::Write::write_all(file, rows.as_bytes())
+                        .and_then(|()| std::io::Write::flush(file))
+                    {
+                        eprintln!("visloc_map_localize_node: dump_inliers: {error}");
+                    }
+                }
                 publish_logged(
                     &fix_pub,
                     map_fix_msg(stamp.to_nanos(), map_from_body, &map_frame, &options),

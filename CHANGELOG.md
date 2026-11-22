@@ -6,6 +6,62 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Real to sim: a robot simulator made of a 3D Gaussian splat** (docs/navigation.md,
+  `ros2/visloc-ros2/gs/`). From public photos (TUM RGB-D's Pioneer hall),
+  visloc-rs's SfM (put in metres by a 7-number fit to the motion capture,
+  3.7 cm RMSE) and 3DGS (held-out PSNR 25.0 dB) make the world;
+  `gs_sim.py` drives a robot through it with the camera rendered by the new
+  `gsplat_render_server` (pose in, image and optionally depth out), wheel
+  odometry, a scan of a collision grid built from the splat, and `/clock`.
+  Nav2 on `visloc_map_localize_node` reaches 5/5 goals with no contacts at
+  8.7 cm `/map_pose` RMSE, on a map built from the splat's renders
+  (`render_tum_seq.py`); a map of the real images localizes 4 of 450
+  rendered images. Also `gsplat_train --alpha-mask`, `level_sfm.py`;
+  and from a public 360-degree street walk (OverMaps360, its own IMU for
+  scale, no ground truth), Nav2 reaches 4/4 goals along 121 m at 3.6 cm
+  `/map_pose` RMSE with a longer projection window (`equirect.py` renders
+  the robot's 360-degree view for videos).
+- **Robot navigation with Nav2** (docs/navigation.md). New crate
+  `visloc-navigation`: `OccupancyMapper` builds the 2D occupancy grid of a
+  visual map from its landmarks and camera-to-landmark rays (a 2.5D log-odds
+  grid, so low furniture survives rays passing over it), written in ROS
+  `map_server` format; `examples/visual_map_to_occupancy.rs` converts a saved
+  map for Nav2. `visloc_navigation::sim` simulates a camera robot (textured
+  apartment, differential drive, drifting wheel odometry, synthetic
+  detections, depth scan, mapping run) and `sim_robot` localizes it with
+  visloc's pipeline (P3P-RANSAC) and `OdomCorrection`. New ROS 2 node
+  `visloc_nav_sim_node` (with `sensor_msgs/LaserScan` and
+  `geometry_msgs/Twist`), `launch/nav_sim.launch.py`, Nav2 parameters without
+  AMCL, and `tools/nav_sim_goals.py`. Nav2 Jazzy in simulation: 5/5 goals at
+  3.8 cm pose RMSE and 0 collisions on visloc localization, 0/5 on wheel
+  odometry alone, 5/5 with an unmapped obstacle (replanned). ROS-free:
+  `examples/nav_sim_build_map.rs`, `examples/nav_sim_drive.rs`. In Gazebo
+  (`ros2/visloc-ros2/gz/`: world with rendered stereo cameras, IMU and lidar,
+  mapping recorder, goal runner): Nav2 on the real nodes
+  (`visloc_vio_node` + `visloc_map_localize_node`) and a map from visloc's own
+  SLAM reaches 5/5 goals at 1.6 cm `/map_pose` RMSE, and 5/5 with an
+  unmapped box (lidar obstacle layer, detour). The Gazebo Nav2 parameters
+  lower both obstacle-height limits, since the SLAM map's frame starts at
+  the IMU, 0.5 m above the floor. `visloc_vio_node` detects lost tracking
+  (`lost_min_observations`, `lost_max_speed`; off by default): it resets the
+  estimator and publishes nothing until tracking holds again, and announces
+  each reset on `odom_reset`, on which `visloc_map_localize_node`
+  relocalizes (it used to keep its old `map -> odom` across a VIO reset). A
+  5 s camera blackout in Gazebo: the robot stops within 7 cm and goes on
+  1 s after the cameras come back (5/5 goals, 4.4 cm max error), instead of
+  driving 1.5 m blind with up to 43 cm of error. A threshold of 20
+  observations raised a false alarm under extra CPU load; 10 did not. The
+  Gazebo goal runner can turn a robot that stopped in front of a bare wall
+  until it relocalizes (`--spin-after`). A 3D video of the runs:
+  `docs/media/gz_nav2_blackout_3d.mp4`.
+  In the public Depot warehouse (OpenRobotics, Gazebo Fuel, CC BY 4.0;
+  `gz/make_depot_world.py`, which projects its meshes into a collision grid,
+  and `--scene` for the route and goal tools): SLAM within 4.0 cm of the
+  ground truth over 115 m, 5/5 goals at 6.1 cm `/map_pose` RMSE through the
+  blackout with the monitor (20 cm max error without). Map localization now
+  carries the last map pose over an odometry reset as a projection prior
+  (`reset_prior_s`): without it the robot did not relocalize there.
+  `scripts/plot_nav_sim.py` draws the runs.
 - **GPS priors in incremental SfM (COLMAP `pose_prior_mapper` /
   `use_prior_position`).** `IncrementalSfmConfig::position_priors` takes a
   prior camera centre and per-axis σ per image.

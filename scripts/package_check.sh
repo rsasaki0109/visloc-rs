@@ -25,6 +25,7 @@ visloc-mapping
 visloc-slam
 visloc-basalt
 visloc-objects
+visloc-navigation
 visloc-gsplat-core
 visloc-gsplat-render
 visloc-sift-gpu
@@ -53,6 +54,7 @@ pipelines/slam/Cargo.toml
 pipelines/fusion/Cargo.toml
 pipelines/basalt/Cargo.toml
 pipelines/objects/Cargo.toml
+pipelines/navigation/Cargo.toml
 "
 
 for manifest in $manifests; do

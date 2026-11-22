@@ -92,6 +92,7 @@ the docs record open gaps.
 | Robot rig cameras vs. a prebuilt map | Relocalization | **Benchmarked** | OpenLORIS (robot-mounted rig): 98.96% of 1,250 held-out frames localized against a map built from other frames, median 2.9 mm | `localize_openloris_map` |
 | Wheeled robot: stereo + IMU (RealSense T265), wheel odometry | Localization in a saved SLAM map, odometry corrected into its frame | **Benchmarked** | OpenLORIS-Scene office, other sessions up to 2.8 days later with furniture moved: VIO + map gives 94–99.8% of frames a map pose at 2.8–7.6 cm, and 1.1–2.4 cm with the stereo baseline corrected from the wheel odometry; wheel odometry + map 3.5–5.1 cm with its reference point and level calibrated from the VIO, and the same through the ROS 2 nodes from a rosbag2; across the day/night lighting change only with local contrast equalization (daylight session: 33% of frames at 2.6 cm; dawn session: none) | `scripts/openloris_to_euroc.py`, `basalt_euroc_localize_demo --vio` or `--odometry` ([notes](docs/openloris_map_localization.md)) |
 | Robot camera sequence vs. a prebuilt map | Sequential map-matching localization | **Benchmarked** (simulation) | RNE house (drjohnson): 387/400 frames at 5.6 cm ATE, 38 ms per frame (median) with `--gpu --motion-model`. RNE checker corridor: 203/400 at 1.57 m, limited by repetitive texture | `localize_rne_map_sequence` |
+| Camera robot + wheel odometry vs. a prebuilt map, driven by Nav2 | Navigation: occupancy grid from the visual map, `map -> odom` for Nav2 (no AMCL) | Experimental (simulation) | Simulated apartment, Nav2 Jazzy over ROS 2: 5/5 goals at 3.8 cm pose RMSE, 0 collisions (wheel odometry alone 0/5); replans around an obstacle missing from the map. Gazebo, rendered stereo + IMU, real nodes, SLAM-built map: 5/5 goals at 1.6 cm, also around an unmapped box; stops on lost VIO tracking (5 s camera blackout) and relocalizes; 5/5 in the public Depot warehouse at 6.1 cm | `visual_map_to_occupancy`, `visloc_nav_sim_node` ([notes](docs/navigation.md)) |
 | Camera + GNSS prior | Tracking | Example only | Synthetic smoke test; no tight GNSS fusion | `track_sequence_with_gnss_prior` |
 | VO + GNSS positions | Joint pose-graph fusion | Experimental (synthetic) | ~1 km synthetic loop: ATE 5.25 m (VO only) → 0.90 m fused; multipath jumps rejected, 15 s dropout bridged. Loosely coupled (receiver ENU positions; no raw pseudoranges, no IMU) | `gnss_vo_fusion_demo` ([notes](docs/gnss_fusion.md)) |
 | Unordered photos + GPS (EXIF or a file) | Georeferenced SfM: robust Sim(3) to the fixes, then position priors in every global BA (COLMAP `pose_prior_mapper`) | Experimental | Drone block with real onboard GNSS (158 images): shape right to 2.5 cm (0.47 m without priors); camera error 0.18 m with the GNSS bias removed, vs 1.72 m for the GNSS itself | `unordered_sfm_demo --gps-priors-from-exif`, `colmap pose_prior_mapper` ([notes](docs/gps_prior_sfm.md)) |
@@ -530,6 +531,28 @@ cd ros2/visloc-ros2 && cargo build --release
 The nodes are tested over DDS (RustDDS to RustDDS) but not yet against a ROS 2
 install; see the crate README for topics, parameters, QoS notes and limits.
 
+**Navigation with Nav2.** `visual_map_to_occupancy` turns a saved visual map
+into the occupancy grid Nav2's `map_server` loads, and visloc's `map -> odom`
+takes the place of AMCL. In simulation (`visloc_nav_sim_node`: a camera robot
+in a simulated apartment, localized by visloc's own pipeline), Nav2 Jazzy
+reaches 5/5 goals with 0 collisions at 3.8 cm pose RMSE, against 0/5 on wheel
+odometry alone, and replans around an obstacle missing from the map. In
+Gazebo, with rendered stereo images and the real robot nodes
+(`visloc_vio_node`, `visloc_map_localize_node`) on a map from visloc's own
+SLAM, it reaches 5/5 goals at 1.6 cm pose RMSE, also around an unmapped
+box, and stops when the VIO loses tracking (cameras blacked out) until it
+relocalizes. Not yet tried on a real robot. See [docs/navigation.md](docs/navigation.md).
+
+<p align="center">
+  <img src="docs/assets/hero_nav2_depot.gif" alt="A camera-only robot driven by Nav2 through the public Depot warehouse in Gazebo. Top left: the robot's stereo camera. Top right: the colour 3D Gaussian splat of the map, rendered at the camera's pose. Bottom: visloc's occupancy grid built from the visual map, with the robot's path in red, visloc's estimate as a cyan ring and five goals turning green as they are reached. Midway the cameras black out for 5 s: visloc reports tracking lost and Nav2 stops the robot, which then spins in place, relocalizes on the map and goes on to reach all five goals." width="640"><br>
+  <sub>Gazebo, the public OpenRobotics Depot (CC BY 4.0), stereo + IMU only: 5/5 goals at 6.1 cm pose RMSE, through a 5 s camera blackout.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/hero_real2sim_street.gif" alt="Real to sim. First, a real 360-degree video frame of a town street above the same spot rendered from a 3D Gaussian splat that visloc-rs's own SfM and 3DGS built from that video. Then a third-person view inside the splat: a small delivery robot with a camera mast drives the street with Nav2. Green rays run from its camera to the map features visloc matched in its latest image, an inset shows that image with the matched features circled, a cyan ring marks where visloc puts the robot, and a minimap shows goals turning green." width="640"><br>
+  <sub>Real to sim: a public 360° street walk rebuilt by visloc-rs's SfM + 3DGS on a CPU, and a robot localizing in it with visloc while Nav2 drives: 4/4 goals over 121 m, camera 1.2 m up, 97% of its images localized. Green: the map features it matched (<a href="docs/navigation.md#real-to-sim-a-simulator-made-of-a-3d-gaussian-splat-of-real-photos">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
+</p>
+
 ## More results
 
 Local public-data development measurements, not official leaderboard submissions.
@@ -555,6 +578,7 @@ previously lived here.
 - **Reproduce a result:** [reproducibility contract](docs/reproducibility.md) (what is bit-identical, what is not, and the rules new code follows).
 - **Understand supported configurations:** [feature matrix](docs/feature_matrix.md), [API stability](docs/api_stability.md), [COLMAP compatibility](docs/colmap_compatibility.md), and [migration notes](docs/migration.md).
 - **Inspect VO and loop-closure evidence:** [KITTI multi-sequence](docs/kitti_multiseq_benchmark.md), [KITTI loop closure](docs/kitti_loop_closure_benchmark.md), [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md), [TUM RGB-D](docs/tum_rgbd_benchmark.md), and [tracking persistence](docs/tracking_persistence_benchmark.md).
+- **Drive a robot with Nav2:** [navigation with Nav2 on visloc localization](docs/navigation.md) (occupancy grids from visual maps, simulated closed loop).
 - **Inspect VI-SLAM (Basalt Rust port) evidence:** [VI-SLAM benchmark details](docs/vi_slam_benchmarks.md), [localizing against a saved map](docs/basalt_map_localization.md), [faithful-port final closure report](work/m11_basalt_faithful_port_final_closure_20260914.md), and [upstream oracle / provenance](benchmarks/basalt/README.md).
 - **Where VI-SLAM goes next:** [global-consistency plan](docs/vi_slam_global_consistency_plan.md) — same-protocol ORB-SLAM3 measurements, the 9/11 official-calibration + mapper result (now online and real time on 11/11, §1.5-1.6) and its scale-bias root cause, the paused persistent-map prototype, and the staged plan targeting VIO tracking robustness on the two remaining losses (MH_04, MH_05).
 - **Inspect SfM evidence:** [SfM benchmark details](docs/sfm_benchmarks.md), [EuRoC reconstruction](docs/euroc_sfm_benchmark.md), [sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md), [unordered SfM](docs/unordered_sfm_benchmark.md), and [registry evidence for the head-to-head](docs/generated/sfm_vs_colmap_headtohead.md).

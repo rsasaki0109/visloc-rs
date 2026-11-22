@@ -12,6 +12,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
 | `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and corrects the VIO odometry into the map frame. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
 | `visloc_wheel_calibration_node` | A robot's wheel odometry calibrated while driving, against `visloc_vio_node` and `visloc_map_localize_node`'s localizations: where the wheel odometry is measured relative to `base_link`, the lean of `base_link`, and the map's scale. Publishes the wheel odometry as `base_link`'s pose and `odom -> base_link`, for `visloc_map_localize_node`. |
+| `visloc_nav_sim_node` | A simulated camera robot (`visloc_navigation::sim`) localized by visloc in its map, for driving with Nav2 without a robot: takes `cmd_vel`, publishes wheel odometry, a depth scan and `map -> odom` (in place of AMCL). See [docs/navigation.md](../../docs/navigation.md). |
 
 This crate is **not** a member of the root Cargo workspace (it is listed in
 the root `[workspace] exclude` and declares its own `[workspace]`), has its
@@ -65,6 +66,7 @@ frame; see [the online mapper](#online-mapper-mappertrue) below.
 | `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame`, or `odom_frame -> base_frame`; with `mapper`, also `map_frame -> odom_frame` |
 | `map_pose` | `geometry_msgs/PoseStamped` | out | only with `mapper`: the same pose in `map_frame`, loop-closure corrected |
 | `map_path` | `nav_msgs/Path` | out | only with `mapper` and `publish_path`: last `path_max_length` `map_pose`s |
+| `odom_reset` | `std_msgs/Int32` | out | number of estimator resets so far (0 at start), transient-local; each reset starts a new `odom` frame, and `visloc_map_localize_node` relocalizes on it |
 
 Output stamps are the left image's header stamps.
 
@@ -93,6 +95,10 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `mapper_queue` | `64` | mapper packets waiting for the mapper; when full, new packets are dropped (counted as `mapper_dropped`) |
 | `mapper_optimize_every_k` | `100` | new keyframes between background global BA passes (the demo's `--optimize-every-k`) |
 | `mapper_trajectory_out` | none | on SIGINT/SIGTERM, write the loop-closed trajectory of every frame here (TUM) |
+| `lost_min_observations` | `0` (off) | fewer tracked observations than this in a frame is weak tracking ([lost tracking](#lost-tracking)) |
+| `lost_after_s` | `0.5` | weak tracking for this long is lost tracking |
+| `recover_after_s` | `1.0` | after a reset, tracking must hold this long before anything is published again |
+| `lost_max_speed` | `0` (off) | an estimated speed above this (m/s) is lost tracking at once |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -117,7 +123,32 @@ seed is the exception: it uses the latest gyro bias the estimator has
 published, not the previous frame's. `cam_time_offset_ns` from the
 calibration is added to camera stamps. On an estimator error the node logs
 it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
-the dropped-frame counts and the frontend/estimator time per frame.
+the dropped-frame counts, the frontend/estimator time per frame, and the
+min/avg tracked observations per frame.
+
+### Lost tracking
+
+When the cameras see nothing (a covered lens, a blank wall up close, the
+lights off), the VIO integrates the IMU alone and its pose runs away, while
+a robot driving on it goes on as if nothing happened. With
+`lost_min_observations` (and/or `lost_max_speed`) the node watches every
+estimate: fewer tracked observations than that for `lost_after_s`, or a
+speed above `lost_max_speed`, counts as lost tracking. The node then resets
+the estimator, as on an estimator error, and publishes nothing (no
+`odom`, `pose`, TF) until tracking has held for `recover_after_s`. A
+navigation stack loses the robot's pose and stops it instead of driving
+blind. Each reset, from the monitor or an estimator error, bumps
+`odom_reset`; `visloc_map_localize_node` then drops its `map -> odom` and
+localizes every image until it has a new one. A dip shorter than
+`lost_after_s` is still published. Off by default. In Gazebo, a 5 s camera
+blackout with `lost_min_observations 20 lost_max_speed 1.0` stopped the
+robot within 7 cm, where without it the robot drove 1.5 m blind with up to
+43 cm of error ([docs/navigation.md](../../docs/navigation.md)). Leave a
+margin: under extra CPU load the VIO dropped frames, tracked 19
+observations for 0.5 s in normal driving and the monitor fired. With 10, no
+false alarm in the runs there. A robot stopped in front of a bare wall may
+not relocalize where it stands; something must turn it (the Gazebo goal
+runner's `--spin-after`).
 
 ### Monocular (`mono:=true`)
 
@@ -413,6 +444,7 @@ measurements behind the defaults.
 | `image` | `sensor_msgs/Image` | in | raw images of the map's `camera` (cam0 by default), the same stream the VIO uses |
 | `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of a body frame, e.g. `visloc_vio_node`'s or a ground robot's wheel odometry; its `header.frame_id` names the odometry frame and its `child_frame_id` the body |
 | `/tf_static` | `tf2_msgs/TFMessage` | in | only with `extrinsics tf`: where the camera sits relative to the body |
+| `odom_reset` | `std_msgs/Int32` | in | `visloc_vio_node`'s reset count (transient-local): on a change, the correction is dropped and the node localizes every image until it has a new one |
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once the correction is set |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once the correction is set (not `pose`, which `visloc_vio_node` publishes) |
 | `map_fix` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose of each image localized with `min_inliers`, stamped with the image (for `visloc_wheel_calibration_node`) |
@@ -439,6 +471,7 @@ measurements behind the defaults.
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
 | `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the correction's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
+| `dump_inliers` | none | CSV file: each accepted localization's PnP inliers, `timestamp_ns,x,y,landmark_id` (the image keypoint in pixels and the map landmark it matched), for visualizations |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
@@ -926,6 +959,36 @@ enough for the lean only, and the VIO turns 180° only at the end of the
 36 s session. A saved calibration from a drive with turns and straight
 runs stays the best start; these sessions are too short for refining to
 improve on it.
+
+## `visloc_nav_sim_node`
+
+A camera robot in the simulated apartment of `visloc_navigation::sim`,
+localized in a map saved by `nav_sim_build_map`
+(`cargo run --release --example nav_sim_build_map -- --out runs/nav_sim/map`)
+with visloc's localization pipeline and `OdomCorrection`. It presents the
+robot to Nav2 the way a base driver plus a localization node do, so Nav2
+runs unchanged with no AMCL. `launch/nav_sim.launch.py` starts it with
+Nav2's `map_server` (on the map's `occupancy.yaml`) and navigation servers
+(`launch/nav_sim_nav2_params.yaml`). `tools/nav_sim_goals.py` sends goals
+and scores the drive against the ground truth. Results and commands:
+[docs/navigation.md](../../docs/navigation.md).
+
+| topic | type | dir | notes |
+|---|---|---|---|
+| `cmd_vel` | `geometry_msgs/Twist` | in | zero after `cmd_timeout_s` without one |
+| `odom` | `nav_msgs/Odometry` | out | wheel odometry, `odom -> base_link` |
+| `scan` | `sensor_msgs/LaserScan` | out | depth-camera slice, 87 degrees, 4 m, frame `base_link`; `+inf` beyond range |
+| `/tf` | `tf2_msgs/TFMessage` | out | `odom -> base_link`; `map -> odom` once localized |
+| `ground_truth` | `nav_msgs/Odometry` | out | true pose in `map` (evaluation) |
+| `map_pose` | `geometry_msgs/PoseStamped` | out | the pose the robot believes, `map -> odom -> base_link` |
+| `collisions` | `std_msgs/Int32` | out | simulation steps a wall stopped the robot |
+
+Parameters: `map_dir` (required), `mode` (`visloc`, `odometry` or
+`ground_truth`: where `map -> odom` comes from), `world_seed`, `start_x`,
+`start_y`, `start_yaw`, `extra_box` (`x0,y0,x1,y1,height`, an obstacle the
+map lacks), `rate_hz` (20), `camera_rate_hz` (5), `cmd_timeout_s` (0.5),
+`record` (a CSV of true and believed poses), and the frame names. Stamps
+are wall-clock time, so run Nav2 with `use_sim_time: false`.
 
 ## Tests
 

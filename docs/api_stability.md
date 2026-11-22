@@ -120,6 +120,7 @@ Feature support is defined in [feature_matrix.md](feature_matrix.md).
 - `visloc-slam`: minimal online orchestration over tracking and local mapping.
 - `visloc-fusion`: loose-coupling sensor priors that can guide localization/tracking without forcing a GNSS/INS backend.
 - `visloc-objects`: image-space multi-object tracking (ByteTrack) and CLEAR MOT scoring, the first stage of metric object estimation.
+- `visloc-navigation`: occupancy grids for Nav2 (`map_server` format) built from visual maps, and a simulation of a camera robot localized in its map (`sim`, `sim_robot`). Experimental.
 
 Pipeline crates should compose lower-level crates. They should not move algorithmic primitives out of `visloc-vision` or map semantics out of `visloc-core`.
 

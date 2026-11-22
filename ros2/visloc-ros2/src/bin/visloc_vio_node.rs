@@ -14,6 +14,12 @@
 //! `map -> odom` correction, `map_pose` and `map_path`; on SIGINT/SIGTERM it
 //! runs the mapper's final optimization and can write the corrected
 //! trajectory (see [`visloc_ros2::vio_mapper`]).
+//!
+//! With `lost_min_observations` or `lost_max_speed` set, the node watches
+//! for lost tracking ([`visloc_ros2::tracking`]): it then resets the
+//! estimator and publishes nothing until tracking holds again. Every
+//! estimator reset bumps the count on `odom_reset` (`std_msgs/Int32`,
+//! transient-local): the odometry frame starts over.
 
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,14 +31,16 @@ use nalgebra::Vector3;
 
 use visloc_basalt::mapper_correction::tum_string;
 use visloc_basalt::RawU16Image;
+use visloc_ros2::dds::latched_qos;
 use visloc_ros2::dds::{
     output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::image::decode_luma;
-use visloc_ros2::msgs::{Image, Imu, Odometry, Path, PoseStamped, TfMessage};
+use visloc_ros2::msgs::{Image, Imu, Int32, Odometry, Path, PoseStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::sync::{SensorPacket, VioInputs};
 use visloc_ros2::tf_tree::StaticTransforms;
+use visloc_ros2::tracking::{TrackingConfig, TrackingMonitor, TrackingVerdict};
 use visloc_ros2::vio::{
     imu_sample_from_msg, odometry_msg, pose_stamped_msg, rebase, tf_msg, PathAccumulator,
     TrackedFrame, VioCore, VioError, VioFrames, VioFrontend, VioOptions,
@@ -80,6 +88,12 @@ PARAMETERS (--name value  or  -p name:=value):
   mapper_optimize_every_k  new keyframes between background global BA passes   [100]
   mapper_trajectory_out  on shutdown (SIGINT/SIGTERM), write the loop-closed
                          trajectory of every frame here (TUM, IMU frame)        [none]
+  lost_min_observations  lost tracking: fewer tracked observations per frame than
+                         this for lost_after_s resets the estimator and stops the
+                         outputs until tracking holds for recover_after_s (0: off) [0]
+  lost_after_s           ... for this long (s)                                   [0.5]
+  recover_after_s        ... and good again for this long (s)                    [1.0]
+  lost_max_speed         lost tracking: an estimated speed above this (m/s) (0: off) [0]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -87,7 +101,8 @@ TOPICS (remap with --remap from=to or -r from:=to):
   in : left/image_raw, right/image_raw (sensor_msgs/Image), imu (sensor_msgs/Imu),
        /tf_static (tf2_msgs/TFMessage, with base_frame)
   out: odom (nav_msgs/Odometry), pose (geometry_msgs/PoseStamped),
-       path (nav_msgs/Path), /tf (tf2_msgs/TFMessage)
+       path (nav_msgs/Path), /tf (tf2_msgs/TFMessage),
+       odom_reset (std_msgs/Int32, estimator resets so far; transient-local)
        with mapper: map_pose (geometry_msgs/PoseStamped), map_path (nav_msgs/Path),
        map_frame -> odom_frame on /tf
 ";
@@ -132,6 +147,32 @@ impl StageTime {
         );
         *self = Self::default();
         summary
+    }
+}
+
+/// Tracked observations per frame over a status period.
+#[derive(Default)]
+struct ObservationStats {
+    sum: u64,
+    min: Option<usize>,
+    frames: u64,
+}
+
+impl ObservationStats {
+    fn add(&mut self, count: usize) {
+        self.sum += count as u64;
+        self.min = Some(self.min.map_or(count, |m| m.min(count)));
+        self.frames += 1;
+    }
+
+    /// `min/avg` and resets the period.
+    fn take(&mut self) -> String {
+        let text = match self.min {
+            Some(min) => format!("{min}/{:.0}", self.sum as f64 / self.frames as f64),
+            None => "-".into(),
+        };
+        *self = Self::default();
+        text
     }
 }
 
@@ -237,6 +278,12 @@ fn run() -> Result<(), String> {
         .flag("mono", false)?
         .then(|| args.parsed_or("mono_camera", 0usize))
         .transpose()?;
+    let tracking = TrackingConfig {
+        min_observations: args.parsed_or("lost_min_observations", 0usize)?,
+        lost_after_s: args.parsed_or("lost_after_s", 0.5f64)?,
+        recover_after_s: args.parsed_or("recover_after_s", 1.0f64)?,
+        max_speed_m_s: args.parsed_or("lost_max_speed", 0.0f64)?,
+    };
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
@@ -260,6 +307,7 @@ fn run() -> Result<(), String> {
     let tf_static_topic = args.topic("/tf_static");
     let map_pose_topic = args.topic("map_pose");
     let map_path_topic = args.topic("map_path");
+    let odom_reset_topic = args.topic("odom_reset");
     args.finish()?;
 
     let read = |path: &str| {
@@ -319,6 +367,8 @@ fn run() -> Result<(), String> {
     let imu_sub = ros.subscription::<Imu>(&imu_topic, sensor_qos(imu_depth))?;
     let odom_pub = ros.publisher::<Odometry>(&odom_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseStamped>(&pose_topic, output_qos(10))?;
+    let odom_reset_pub = ros.publisher::<Int32>(&odom_reset_topic, latched_qos(1))?;
+    publish_logged(&odom_reset_pub, Int32 { data: 0 }, "odom_reset");
     let path_pub = if publish_path {
         Some(ros.publisher::<Path>(&path_topic, output_qos(1))?)
     } else {
@@ -428,6 +478,20 @@ fn run() -> Result<(), String> {
             String::new()
         },
     );
+    if tracking.enabled() {
+        eprintln!(
+            "visloc_vio_node: lost-tracking monitor on: fewer than {} observations for {} s{}; \
+             recovery after {} s; resets on {odom_reset_topic}",
+            tracking.min_observations,
+            tracking.lost_after_s,
+            if tracking.max_speed_m_s > 0.0 {
+                format!(" or faster than {} m/s", tracking.max_speed_m_s)
+            } else {
+                String::new()
+            },
+            tracking.recover_after_s,
+        );
+    }
     if let Some(params) = &mapper_params {
         eprintln!(
             "visloc_vio_node: online mapper on; out: {map_pose_topic}{} and {} -> {} on /tf",
@@ -479,6 +543,10 @@ fn run() -> Result<(), String> {
     let mut tf_log = RateLimitedLog::new(Duration::from_secs(5));
     let mut last_status = Instant::now();
     let mut estimator_time = StageTime::default();
+    let mut monitor = TrackingMonitor::new(tracking);
+    let mut resets = 0i32;
+    let mut held = 0u64;
+    let mut observations = ObservationStats::default();
     loop {
         if shutdown
             .as_ref()
@@ -497,13 +565,20 @@ fn run() -> Result<(), String> {
             eprintln!(
                 "visloc_vio_node: processed={processed} pairs={} dropped_behind={} \
                  sync_dropped={} imu_out_of_order={} imu_evicted={} \
-                 frontend={frontend_time} estimator={} (avg/max){}",
+                 frontend={frontend_time} estimator={} (avg/max) observations={} resets={resets} \
+                 held={held}{}{}",
                 stats.pairs,
                 stats.frames_dropped_behind,
                 stats.sync_dropped,
                 stats.imu_out_of_order,
                 stats.imu_evicted,
                 estimator_time.take(),
+                observations.take(),
+                if monitor.is_tracking() {
+                    ""
+                } else {
+                    " (tracking lost)"
+                },
                 mapper.as_ref().map_or_else(String::new, |session| format!(
                     " {}",
                     session.status().summary()
@@ -525,13 +600,35 @@ fn run() -> Result<(), String> {
         let started = Instant::now();
         let estimated = tracked.and_then(|frame| backend.estimate_with_marg_data(frame));
         estimator_time.add(started.elapsed());
+        // Why the estimator must start over, if it must.
+        let mut estimated = estimated;
+        if let Ok((estimate, _)) = &estimated {
+            *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
+            observations.add(estimate.observation_count);
+            match monitor.update(
+                estimate.header_stamp_ns,
+                estimate.observation_count,
+                estimate.velocity_world.norm(),
+            ) {
+                TrackingVerdict::Publish => {}
+                TrackingVerdict::Hold => {
+                    held += 1;
+                    continue;
+                }
+                TrackingVerdict::Lost(reason) => {
+                    estimated = Err(VioError {
+                        message: format!("tracking lost ({reason}); resetting the estimator"),
+                        needs_reset: true,
+                    });
+                }
+            }
+        }
         match estimated {
             Ok((estimate, marg_data)) => {
                 processed += 1;
                 if processed == 1 {
                     eprintln!("visloc_vio_node: first pose published");
                 }
-                *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
                 if let Some(session) = mapper.as_mut() {
                     // The IMU pose, as the mapper's keyframe poses are.
                     session.record_vio_pose(
@@ -608,14 +705,29 @@ fn run() -> Result<(), String> {
                 }
             }
             Err(error) => {
-                error_log.log(|| format!("{error}"));
+                if error.needs_reset && !monitor.is_tracking() && monitor.config().enabled() {
+                    // Lost tracking: always logged, it stops the robot.
+                    eprintln!("visloc_vio_node: {error}");
+                } else {
+                    error_log.log(|| format!("{error}"));
+                }
                 if error.needs_reset {
                     // The frontend resets itself when it pops the first
                     // frame of the new generation.
                     generation = shared.restart_stream();
                     backend.reset()?;
                     path.clear();
-                    eprintln!("visloc_vio_node: estimator reset; re-initializing from IMU");
+                    monitor.restart();
+                    resets += 1;
+                    publish_logged(&odom_reset_pub, Int32 { data: resets }, "odom_reset");
+                    eprintln!(
+                        "visloc_vio_node: estimator reset {resets}; re-initializing from IMU{}",
+                        if monitor.config().enabled() {
+                            "; outputs held until tracking holds again"
+                        } else {
+                            ""
+                        }
+                    );
                     if mapper.is_some() {
                         // The new VIO world frame is unrelated to the old
                         // one, so the map starts over too.

@@ -339,6 +339,23 @@ pub struct Twist {
     pub linear: Vector3,
     pub angular: Vector3,
 }
+ros_type!(Twist, "geometry_msgs", "Twist");
+
+/// `sensor_msgs/LaserScan`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LaserScan {
+    pub header: Header,
+    pub angle_min: f32,
+    pub angle_max: f32,
+    pub angle_increment: f32,
+    pub time_increment: f32,
+    pub scan_time: f32,
+    pub range_min: f32,
+    pub range_max: f32,
+    pub ranges: Vec<f32>,
+    pub intensities: Vec<f32>,
+}
+ros_type!(LaserScan, "sensor_msgs", "LaserScan");
 
 /// `geometry_msgs/TwistWithCovariance`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
