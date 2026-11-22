@@ -125,7 +125,8 @@ def main():
     p.add_argument('--map-args', default='', help='extra tum_rgbd_save_map arguments')
     p.add_argument('--loc-args', default='--max-hamming 90 --reprojection-px 5 --min-inliers 20',
                    help='basalt_euroc_localize_demo arguments')
-    p.add_argument('--tag', default='', help='suffix of the map and result directories')
+    p.add_argument('--map-tag', default='', help='suffix of the map directory (one per --map-args)')
+    p.add_argument('--tag', default='', help='suffix of the result directories')
     args = p.parse_args()
     from PIL import Image  # noqa: PLC0415
     os.makedirs(args.out, exist_ok=True)
@@ -165,13 +166,13 @@ def main():
                 f.writelines(lines)
         with open(traj, 'w', encoding='utf-8') as f:
             f.writelines(tum_rows(mapping))
-    mapd = os.path.join(args.out, 'map' + args.tag)
+    mapd = os.path.join(args.out, 'map' + args.map_tag)
     if not os.path.exists(os.path.join(mapd, 'map.json')):
         run([os.path.join(EX, 'tum_rgbd_save_map'), '--seq-dir', seq, '--trajectory', traj, '--out', mapd,
              '--fx', 320, '--fy', 320, '--cx', 320, '--cy', 320, '--k1', 0, '--k2', 0, '--p1', 0, '--p2', 0, '--k3', 0,
              '--match-radius-px', 12, '--max-depth', 20, '--keyframe-m', 0.3, '--keyframe-deg', 10,
              '--max-hamming', 70, '--keep-world', *shlex.split(args.map_args)],
-            log=os.path.join(args.out, f'map{args.tag}.log'))
+            log=os.path.join(args.out, f'map{args.map_tag}.log'))
 
     truth = os.path.join(args.out, 'held.tum')
     with open(truth, 'w', encoding='utf-8') as f:
