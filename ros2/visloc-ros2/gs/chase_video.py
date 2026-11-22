@@ -18,6 +18,8 @@ splat's depth, and overlays:
   matched (`visloc_map_localize_node --dump_inliers`, the `--inliers` CSV);
   when no image has localized for 0.8 s, the last fix's rays turn grey and
   the caption says how long the robot has run on wheel odometry;
+- the people walking the route, when the run had `gs_sim.py --pedestrians`
+  (its PREFIX.sim.csv.people.csv), in the view and in the inset;
 - an inset with that localized camera image and its matched keypoints, a minimap
   and the goals.
 
@@ -25,7 +27,7 @@ Writes OUT/NNNNN.jpg; `ffmpeg -framerate 30 -i OUT/%05d.jpg` makes the video.
 """
 import argparse, bisect, csv, json, math, os, subprocess, sys
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import robot_model  # noqa: E402
 
@@ -43,6 +45,7 @@ p.add_argument('--limit', type=int, default=10 ** 9, help='at most this many fra
 p.add_argument('--back', type=float, default=3.2)
 p.add_argument('--up', type=float, default=2.75)
 p.add_argument('--pitch-deg', type=float, default=16.0)
+p.add_argument('--seed', type=int, default=0, help="gs_sim.py's --seed (the people's looks)")
 p.add_argument('--server', default=os.path.join(REPO, 'target', 'release', 'examples', 'gsplat_render_server'))
 args = p.parse_args()
 OUT = args.out; os.makedirs(OUT, exist_ok=True)
@@ -70,6 +73,24 @@ for row in csv.DictReader(open(args.inliers)):
     FIX.setdefault(int(row['timestamp_ns']), []).append((float(row['x']), float(row['y']), int(row['landmark_id'])))
 FT = sorted(FIX)
 ROBOT = robot_model.Model(scene['camera_height'])
+PEOPLE_CSV = f'{args.run}.sim.csv.people.csv'
+CROWD = None
+if os.path.exists(PEOPLE_CSV):
+    from people import Crowd  # noqa: E402
+    PEOPLE = {}
+    for row in csv.DictReader(open(PEOPLE_CSV)):
+        PEOPLE.setdefault(float(row['time_s']), []).append(
+            (float(row['x']), float(row['y']), float(row['yaw']), float(row['phase'])))
+    PT = sorted(PEOPLE)
+    class _Free:
+        def hits(self, x, y, r): return False
+    CROWD = Crowd([scene['start']] + scene.get('goals', []), len(PEOPLE[PT[0]]), _Free(), seed=args.seed)
+
+def people_at(t):
+    """Put the crowd where gs_sim.py recorded it at time t."""
+    rows = np.array(PEOPLE[PT[min(bisect.bisect_left(PT, t), len(PT) - 1)]])
+    CROWD.xy, CROWD.yaw, CROWD.phase = rows[:, :2].copy(), rows[:, 2].copy(), rows[:, 3].copy()
+
 CAM = scene['camera']
 CW, CH = CAM['width'], CAM['height']
 def gz(x, y):
@@ -80,7 +101,7 @@ def gz(x, y):
 
 srv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', f'PINHOLE {W} {H} {FX} {FX} {W / 2} {H / 2}', '--depth'],
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-fpv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', CAM['model']],
+fpv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', CAM['model']] + (['--depth'] if CROWD else []),
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
 def ask(p, R_cw, t, n):
@@ -140,7 +161,25 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     for (u, v), good, z in zip(pts, ok, zc):
         if good and 0 <= u < W and 0 <= v < H and (depth[int(v), int(u)] <= 0 or z < depth[int(v), int(u)] + 0.3):
             d.point((u, v), fill=(225, 225, 225))
-    rgb = robot_model.draw(ROBOT, np.asarray(img, float), depth, (x, y, yaw), z0, R_wc, c_w, FX)
+    rgb = np.asarray(img, float)
+    if CROWD:
+        people_at(t)
+        for px_, py_ in CROWD.xy:                 # soft contact shadows
+            ring = [(px_ + 0.28 * math.cos(a_), py_ + 0.28 * math.sin(a_), gz(px_, py_) + 0.01) for a_ in np.linspace(0, 2 * math.pi, 24)]
+            pts, ok = project(ring, R_wc, c_w)
+            if ok.all():
+                sm = Image.new('L', (W, H), 0); ImageDraw.Draw(sm).polygon([tuple(q) for q in pts], fill=120)
+                rgb = rgb * (1 - np.asarray(sm.filter(ImageFilter.GaussianBlur(5)), float)[..., None] / 255)
+        dist = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1])
+        far = dist > math.hypot(x - c_w[0], y - c_w[1])
+        all_xy, all_yaw, all_ph = CROWD.xy, CROWD.yaw, CROWD.phase
+        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[far], all_yaw[far], all_ph[far]
+        rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
+        rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[~far], all_yaw[~far], all_ph[~far]
+        rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
+    else:
+        rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
     img = Image.fromarray(rgb.astype(np.uint8)); d = ImageDraw.Draw(img)
     # the latest localization (its PnP inliers), if recent
     k = bisect.bisect_right(FT, int(round(t * 1e9))) - 1
@@ -166,7 +205,15 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     fc, fs = math.cos(fyaw), math.sin(fyaw)
     R_fw = np.array([[fs, 0, fc], [-fc, 0, fs], [0, -1, 0]], float).T  # camera <- world
     cf = np.array([fx_ + math.cos(fyaw) * scene.get('camera_forward', 0.0), fy_ + math.sin(fyaw) * scene.get('camera_forward', 0.0), gz(fx_, fy_) + scene['camera_height']])
-    inset = Image.frombytes('RGB', (CW, CH), ask(fpv, R_fw, -R_fw @ cf, CW * CH * 3)).convert('L').convert('RGB')
+    if CROWD:
+        fb = ask(fpv, R_fw, -R_fw @ cf, CW * CH * 7)
+        frgb = np.frombuffer(fb[:CW * CH * 3], np.uint8).reshape(CH, CW, 3).astype(float)
+        people_at(tf)
+        frgb = CROWD.draw(frgb, np.frombuffer(fb[CW * CH * 3:], '<f4').reshape(CH, CW), R_fw.T, cf,
+                          float(CAM['model'].split()[3]), gz)
+        inset = Image.fromarray(np.clip(frgb, 0, 255).astype(np.uint8)).convert('L').convert('RGB')
+    else:
+        inset = Image.frombytes('RGB', (CW, CH), ask(fpv, R_fw, -R_fw @ cf, CW * CH * 3)).convert('L').convert('RGB')
     sx = sy = 320 / CW
     inset = inset.resize((320, int(320 * CH / CW)))
     idr = ImageDraw.Draw(inset)

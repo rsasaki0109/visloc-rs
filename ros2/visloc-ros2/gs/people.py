@@ -16,6 +16,7 @@ varied colours) drawn over the splat by depth with `robot_model.draw`.
 import math
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 import robot_model as rm
 
@@ -31,10 +32,20 @@ class Figure:
     """One pedestrian's triangles at each of PHASES gait phases (x forward, z up, feet at z = 0)."""
 
     def __init__(self, rng):
-        skin, shirt = SKIN[rng.integers(len(SKIN))], SHIRT[rng.integers(len(SHIRT))]
-        trousers, hair = TROUSERS[rng.integers(len(TROUSERS))], HAIR[rng.integers(len(HAIR))]
-        s = rng.uniform(0.92, 1.08)                       # height scale (about 1.55 - 1.85 m)
-        self.frames = []
+        self.frames = self._build(rng, 1.0)
+        self.low = self._build(rng, 0.5, same_as=self)
+
+    def _build(self, rng, detail, same_as=None):
+        """Meshes at each gait phase; detail scales the tessellation (0.5 for people far away)."""
+        if same_as is not None:
+            skin, shirt, trousers, hair, s = same_as.look
+        else:
+            skin, shirt = SKIN[rng.integers(len(SKIN))], SHIRT[rng.integers(len(SHIRT))]
+            trousers, hair = TROUSERS[rng.integers(len(TROUSERS))], HAIR[rng.integers(len(HAIR))]
+            s = rng.uniform(0.92, 1.08)                   # height scale (about 1.55 - 1.85 m)
+            self.look = (skin, shirt, trousers, hair, s)
+        q = lambda k: max(4, int(round(k * detail)))  # noqa: E731
+        frames = []
         for ph in range(PHASES):
             a = math.sin(2 * math.pi * ph / PHASES)
             del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
@@ -44,31 +55,63 @@ class Figure:
                 knee = np.array([0.42 * s * math.sin(0.45 * sw), y, hip - 0.42 * s * math.cos(0.45 * sw)])
                 foot = knee + np.array([0.44 * s * math.sin(0.45 * sw - 0.15 * abs(sw)), 0,
                                         -0.44 * s * math.cos(0.45 * sw - 0.15 * abs(sw))])
-                rm.cylinder([0, y, hip], knee, 0.075, trousers, n=10)
-                rm.cylinder(knee, foot, 0.06, trousers, n=10)
+                rm.cylinder([0, y, hip], knee, 0.075, trousers, n=q(10))
+                rm.cylinder(knee, foot, 0.06, trousers, n=q(10))
                 rm.superellipsoid(foot + np.array([0.06, 0, 0.03]), (0.12, 0.05, 0.035), 0.5, col=(35, 35, 38),
-                                  nu=10, nv=6)
-            rm.superellipsoid(np.array([0, 0, hip + 0.02]), (0.11, 0.17, 0.11), 0.8, col=trousers, nu=14, nv=8)  # hips
+                                  nu=q(10), nv=q(6))
+            rm.superellipsoid(np.array([0, 0, hip + 0.02]), (0.11, 0.17, 0.11), 0.8, col=trousers, nu=q(14), nv=q(8))  # hips
             rm.superellipsoid(np.array([0, 0, hip + 0.17 * s]), (0.10, 0.16, 0.16 * s), 0.9, col=shirt,
-                              nu=14, nv=8)               # waist
+                              nu=q(14), nv=q(8))               # waist
             rm.superellipsoid(np.array([0, 0, sh - 0.14 * s]), (0.12, 0.19, 0.17 * s), 0.7, col=shirt,
-                              nu=16, nv=8)               # chest and shoulders
+                              nu=q(16), nv=q(8))               # chest and shoulders
             for side, sw in ((1, -a), (-1, a)):           # arms swing against the legs
                 y = 0.20 * side
                 hand = np.array([0.58 * s * math.sin(0.35 * sw), y * 1.05, sh - 0.03 - 0.58 * s * math.cos(0.35 * sw)])
                 elbow = (np.array([0, y, sh - 0.03]) + hand) / 2
-                rm.cylinder([0, y, sh - 0.03], elbow, 0.048, shirt, n=8)
-                rm.cylinder(elbow, hand, 0.04, skin, n=8)
-            rm.cylinder([0, 0, sh], [0, 0, sh + 0.08 * s], 0.05, skin, n=8)            # neck
+                rm.cylinder([0, y, sh - 0.03], elbow, 0.048, shirt, n=q(8))
+                rm.cylinder(elbow, hand, 0.04, skin, n=q(8))
+            rm.cylinder([0, 0, sh], [0, 0, sh + 0.08 * s], 0.05, skin, n=q(8))            # neck
             head = np.array([0.01, 0, sh + 0.19 * s])
-            rm.superellipsoid(head, (0.10 * s, 0.085 * s, 0.115 * s), 1.0, col=skin, nu=12, nv=8)
+            rm.superellipsoid(head, (0.10 * s, 0.085 * s, 0.115 * s), 1.0, col=skin, nu=q(12), nv=q(8))
             rm.superellipsoid(head + np.array([-0.015, 0, 0.03 * s]), (0.10 * s, 0.09 * s, 0.10 * s), 1.0, col=hair,
-                              zmin=0.0, nu=12, nv=6)
+                              zmin=0.0, nu=q(12), nv=q(6))
             m = type('Mesh', (), {})()
             m.tris, m.vn = np.array(rm._T), np.array(rm._N)
             m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
-            self.frames.append(m)
+            frames.append(m)
         del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+        return frames
+
+
+def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
+    """Flat-shaded polygons filled by PIL, back to front, hidden where the splat is nearer than the
+    person: a quick look for the simulator's camera (robot_model.draw is the smooth one for videos)."""
+    H, W = depth.shape
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    tw = fig.tris @ Rz.T + np.array([x, y, z0])
+    cam = (tw - c_w) @ R_wc
+    fn = np.cross(tw[:, 1] - tw[:, 0], tw[:, 2] - tw[:, 0])
+    keep = (np.einsum('ij,ij->i', fn, tw.mean(1) - c_w) < 0) & (cam[:, :, 2].min(1) > 0.25)
+    if not keep.any():
+        return rgb
+    cam, n = cam[keep], (fig.vn[keep].mean(1) @ Rz.T)
+    n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+    shade = 0.30 + 0.25 * (0.5 + 0.5 * n[:, 2]) + 0.55 * np.clip(n @ rm.SUN, 0, 1)
+    col = np.clip(fig.cols[keep] * shade[:, None], 0, 255).astype(int)
+    uv = np.stack([cam[:, :, 0] / cam[:, :, 2] * fx + W / 2, cam[:, :, 1] / cam[:, :, 2] * fx + H / 2], 2)
+    layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    for k in np.argsort(-cam[:, :, 2].mean(1)):
+        d.polygon([tuple(p) for p in uv[k]], fill=(*col[k], 255))
+    a = np.asarray(layer)
+    m = a[..., 3] > 0
+    dist = float(np.linalg.norm(np.array([x, y, z0 + 0.9]) - c_w))
+    m &= (depth <= 0) | (dist < depth + 0.4)
+    out = rgb.copy()
+    out[m] = a[..., :3][m]
+    return out
 
 
 class Crowd:
@@ -134,7 +177,7 @@ class Crowd:
             out = np.where(hit & (t < out), np.maximum(t, 0.0), out)
         return out
 
-    def draw(self, rgb, depth, R_wc, c_w, fx, ground_z, max_m=25.0):
+    def draw(self, rgb, depth, R_wc, c_w, fx, ground_z, max_m=25.0, fast=False):
         """rgb (H x W x 3 float) with the pedestrians in front of the splat drawn over it."""
         fwd = R_wc[:, 2]
         order = np.argsort(-np.hypot(self.xy[:, 0] - c_w[0], self.xy[:, 1] - c_w[1]))
@@ -144,7 +187,22 @@ class Crowd:
             dist = np.linalg.norm(rel)
             if dist > max_m or rel @ fwd < -0.5:
                 continue
-            fig = self.figures[i].frames[int(self.phase[i] * PHASES) % PHASES]
-            rgb = rm.draw(fig, rgb, depth, (self.xy[i, 0], self.xy[i, 1], self.yaw[i]),
-                          ground_z(*self.xy[i]), R_wc, c_w, fx)
+            z0 = ground_z(*self.xy[i])
+            box = np.array([[self.xy[i, 0] + dx, self.xy[i, 1] + dy, z0 + dz]
+                            for dx in (-0.4, 0.4) for dy in (-0.4, 0.4) for dz in (0, 1.9)])
+            cam = (box - c_w) @ R_wc
+            if (cam[:, 2] < 0.3).all():
+                continue
+            H, W = depth.shape
+            z = np.maximum(cam[:, 2], 0.3)
+            u, v = cam[:, 0] / z * fx + W / 2, cam[:, 1] / z * fx + H / 2
+            if u.max() < 0 or u.min() >= W or v.max() < 0 or v.min() >= H:
+                continue                          # outside the image
+            far = dist > 8.0
+            fig = (self.figures[i].low if far else self.figures[i].frames)[int(self.phase[i] * PHASES) % PHASES]
+            if fast:
+                rgb = draw_fast(fig, rgb, depth, (self.xy[i, 0], self.xy[i, 1], self.yaw[i]), z0, R_wc, c_w, fx)
+                continue
+            rgb = rm.draw(fig, rgb, depth, (self.xy[i, 0], self.xy[i, 1], self.yaw[i]), z0, R_wc, c_w, fx,
+                          ss=1 if far else 2)
         return rgb

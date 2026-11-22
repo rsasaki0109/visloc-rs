@@ -291,7 +291,7 @@ class Sim(Node):
             rgb = np.frombuffer(buf[:n * 3], np.uint8).reshape(cam['height'], cam['width'], 3).astype(float)
             depth = np.frombuffer(buf[n * 3:], '<f4').reshape(cam['height'], cam['width'])
             fx = float(cam['model'].split()[3])
-            rgb = self.crowd.draw(rgb, depth, R_wc, centre, fx, self.ground_z)
+            rgb = self.crowd.draw(rgb, depth, R_wc, centre, fx, self.ground_z, fast=True)
             buf = np.clip(rgb, 0, 255).astype(np.uint8).tobytes()
         img = Image()
         img.header.stamp, img.header.frame_id = t, 'camera_optical'
