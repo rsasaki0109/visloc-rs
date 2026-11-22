@@ -680,6 +680,20 @@ For a 1.2 m camera:
 | 2.26 m (the capture height), the third run | 4/4 | 0 | 4.1 / 1.7 / 34 cm | — |
 | **1.2 m** | **4/4** | 0 | **4.3 / 2.2 / 24 cm** | 663 of 850 |
 
+The video's frames come from two scripts. The run needs
+`visloc_map_localize_node --dump_inliers` (in `gs_nav.launch.py`'s
+`localize_args`) and `gs_sim.py --record`:
+
+```bash
+python3 ros2/visloc-ros2/gs/real_vs_sim_360.py --model runs/street/level/sparse/0 \
+  --names runs/street/sfm/image_names.txt --images runs/street/sfm/images \
+  --splat runs/street/scene.ply --out runs/street/real_vs_sim
+python3 ros2/visloc-ros2/gs/chase_video.py --splat runs/street/scene.ply \
+  --scene runs/street/sim/scene.json --run runs/street/sim/nav --map runs/street/map \
+  --inliers runs/street/sim/inliers.csv --out runs/street/chase
+ffmpeg -framerate 30 -i runs/street/chase/%05d.jpg -pix_fmt yuv420p runs/street/chase.mp4
+```
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every
