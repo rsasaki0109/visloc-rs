@@ -12,8 +12,13 @@
 //! past wgpu's 2 GiB buffer limit and most of a 6 GB GPU. The atomic version
 //! needs no per-intersection storage; the summation order (and so the last
 //! float bits) can vary between runs.
+//!
+//! On a CPU adapter (lavapipe) the pass runs on the host instead (see
+//! `cpu_raster.rs` and [`Renderer::set_cpu_raster`]): there the shader's
+//! subgroup reductions and CAS float adds cost ~1 s per 600 x 440 training
+//! step, the host loop ~0.1 s.
 
-use super::{build_stage, new_storage, read_bytes, Binding, Renderer, Stage, RO, RW};
+use super::{build_stage, new_storage, read_bytes, read_many, Binding, Renderer, Stage, RO, RW};
 use crate::gpu::GpuError;
 use crate::shaders;
 
@@ -192,6 +197,67 @@ impl Renderer {
             encoder.clear_buffer(&st.grad_transforms, 0, None);
             encoder.clear_buffer(&st.grad_opacity, 0, None);
             encoder.clear_buffer(&st.grad_sh, 0, None);
+        }
+        if frame.nv > 0 && geo_grads.is_none() && self.cpu_raster {
+            // Host rasterize_backward (see cpu_raster.rs): the clears first,
+            // then the forward's residuals and dL/dC back to the host.
+            queue.submit(Some(encoder.finish()));
+            let prof = std::env::var("GSPLAT_PROFILE").is_ok();
+            let t0 = std::time::Instant::now();
+            let npix = (self.image_w * self.image_h) as usize;
+            let bufs = read_many(
+                dev,
+                queue,
+                &[
+                    (&self.scratch.projected_splats, frame.nv * 9 * 4),
+                    (&self.scratch.compact_sorted, frame.ni * 4),
+                    (&self.tile_offsets, frame.num_tiles as usize * 2 * 4),
+                    (&self.residuals.final_t, npix * 4),
+                    (&self.residuals.last_idx, npix * 4),
+                    (&st.d_image, npix * 3 * 4),
+                ],
+            );
+            let t_read = t0.elapsed();
+            let f32s = |b: &[u8]| -> Vec<f32> { bytemuck::cast_slice(b).to_vec() };
+            let u32s = |b: &[u8]| -> Vec<u32> { bytemuck::cast_slice(b).to_vec() };
+            let (projected, sorted, offsets) = (f32s(&bufs[0]), u32s(&bufs[1]), u32s(&bufs[2]));
+            let (final_t, last_idx, d_image) = (f32s(&bufs[3]), u32s(&bufs[4]), f32s(&bufs[5]));
+            let grads = super::cpu_raster::raster_backward(
+                &super::cpu_raster::Frame {
+                    img_w: self.image_w,
+                    img_h: self.image_h,
+                    bg: self.last_bg,
+                    projected: &projected,
+                    sorted: &sorted,
+                    offsets: &offsets,
+                    final_t: &final_t,
+                    last_idx: &last_idx,
+                    d_image: &d_image,
+                },
+                frame.nv,
+            );
+            let t_cpu = t0.elapsed();
+            queue.write_buffer(&st.screen_grads, 0, bytemuck::cast_slice(&grads));
+            let mut enc2 = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("backward_project"),
+            });
+            {
+                let mut pass = enc2.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                super::dispatch_groups_2d(&mut pass, project_bwd, (frame.nv as u32).div_ceil(64));
+            }
+            queue.submit(Some(enc2.finish()));
+            if prof {
+                dev.poll(wgpu::PollType::wait_indefinitely()).ok();
+                eprintln!(
+                    "[profile] backward: rasterize_backward {:.2} ms, project_backward {:.2} ms (nv {}, ni {}; cpu: readback {:.2} ms)",
+                    t_cpu.as_secs_f64() * 1e3,
+                    (t0.elapsed() - t_cpu).as_secs_f64() * 1e3,
+                    frame.nv,
+                    frame.ni,
+                    t_read.as_secs_f64() * 1e3,
+                );
+            }
+            return Ok(());
         }
         if frame.nv > 0 {
             // rasterize_backward accumulates into these with atomics.

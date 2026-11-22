@@ -22,6 +22,9 @@ pub struct TrainConfig {
     pub seed: u64,
     /// Weight of the D-SSIM term (0 = pure L1).
     pub ssim_weight: f32,
+    /// Compute the D-SSIM term only every this many steps (1 = every step);
+    /// the other steps train on pure L1. A CPU-time knob (lavapipe).
+    pub ssim_every: usize,
     /// `None` keeps the initial gaussians fixed in number.
     pub densify: Option<DensifyConfig>,
     /// brush's refine strategy instead of the Inria rule (`densify` is then
@@ -73,6 +76,7 @@ impl Default for TrainConfig {
             background: [0.0; 3],
             seed: 42,
             ssim_weight: 0.2,
+            ssim_every: 1,
             densify: Some(DensifyConfig::default()),
             sh_degree_interval: 1000,
             brush_refine: None,

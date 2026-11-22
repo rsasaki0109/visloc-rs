@@ -554,26 +554,33 @@ mod gpu_tests {
             &d64,
         );
         let mut renderer = Renderer::new(ctx, scene, w, h).expect("renderer");
-        let _ = renderer.render(&view, bg);
-        let gpu = renderer.backward_screen(&d_image).expect("backward");
+        // Both rasterizers (forward and backward): the shaders and the host
+        // (rayon) ones.
+        for host in [false, true] {
+            renderer.set_cpu_raster(host);
+            let _ = renderer.render(&view, bg);
+            let gpu = renderer.backward_screen(&d_image).expect("backward");
 
-        // Scale tolerances per component by its largest magnitude, since
-        // f32 vs f64 and alpha-gate ties at footprint edges add absolute noise.
-        let mut worst = 0.0f64;
-        for k in 0..9 {
-            let scale = cpu.iter().map(|g| g[k].abs()).fold(0.0, f64::max).max(1e-9);
-            for (i, (c, g)) in cpu.iter().zip(&gpu).enumerate() {
-                let err = (c[k] - g[k] as f64).abs() / scale;
-                worst = worst.max(err);
-                assert!(
-                    err < 2e-3,
-                    "gaussian {i} component {k}: cpu {:.6e} gpu {:.6e} (rel to max {err:.2e})",
-                    c[k],
-                    g[k]
-                );
+            // Scale tolerances per component by its largest magnitude, since
+            // f32 vs f64 and alpha-gate ties at footprint edges add absolute noise.
+            let mut worst = 0.0f64;
+            for k in 0..9 {
+                let scale = cpu.iter().map(|g| g[k].abs()).fold(0.0, f64::max).max(1e-9);
+                for (i, (c, g)) in cpu.iter().zip(&gpu).enumerate() {
+                    let err = (c[k] - g[k] as f64).abs() / scale;
+                    worst = worst.max(err);
+                    assert!(
+                        err < 2e-3,
+                        "gaussian {i} component {k}: cpu {:.6e} gpu {:.6e} (rel to max {err:.2e})",
+                        c[k],
+                        g[k]
+                    );
+                }
             }
+            eprintln!(
+                "screen grads (host {host}): worst error {worst:.2e} of each component's max"
+            );
         }
-        eprintln!("screen grads: worst error {worst:.2e} of each component's max");
     }
 
     /// GPU parameter gradients (full backward) against the f64 CPU reference.
@@ -638,69 +645,73 @@ mod gpu_tests {
         }
         let mut renderer = Renderer::new(ctx, scene, w, h).expect("renderer");
         renderer.set_active_sh_degree(active);
-        let _ = renderer.render(&view, bg);
-        let gpu = renderer.backward(&d_image).expect("backward");
+        for host in [false, true] {
+            renderer.set_cpu_raster(host);
+            let _ = renderer.render(&view, bg);
+            let gpu = renderer.backward(&d_image).expect("backward");
+            eprintln!("param grads, host backward {host}:");
 
-        let n = scene.len();
-        let cpc2 = ((scene.sh_degree + 1) * (scene.sh_degree + 1)) as usize;
-        let rest_pc = cpc2 - 1;
-        // (name, cpu values, gpu values) per parameter group, gaussian-major.
-        let mut groups: Vec<(&str, Vec<f64>, Vec<f64>)> = Vec::new();
-        let gsh = &gpu.sh;
-        let gt = |i: usize, k: usize| gpu.transforms[i * 10 + k] as f64;
-        groups.push((
-            "mean",
-            (0..n).flat_map(|i| cpu.mean[i]).collect(),
-            (0..n).flat_map(|i| (0..3).map(move |k| gt(i, k))).collect(),
-        ));
-        groups.push((
-            "rotation",
-            (0..n).flat_map(|i| cpu.rotation[i]).collect(),
-            (0..n).flat_map(|i| (3..7).map(move |k| gt(i, k))).collect(),
-        ));
-        groups.push((
-            "scale_log",
-            (0..n).flat_map(|i| cpu.scale_log[i]).collect(),
-            (0..n)
-                .flat_map(|i| (7..10).map(move |k| gt(i, k)))
-                .collect(),
-        ));
-        groups.push((
-            "opacity_logit",
-            cpu.opacity_logit.clone(),
-            gpu.opacity.iter().map(|&x| x as f64).collect(),
-        ));
-        groups.push((
-            "sh_dc",
-            (0..n).flat_map(|i| cpu.sh_dc[i]).collect(),
-            (0..n)
-                .flat_map(|i| (0..3).map(move |c| gsh[i * 3 * cpc2 + c] as f64))
-                .collect(),
-        ));
-        groups.push((
-            "sh_rest",
-            (0..n).flat_map(|i| cpu.sh_rest[i].clone()).collect(),
-            (0..n)
-                .flat_map(|i| {
-                    let gs = gsh;
-                    (0..3 * rest_pc).map(move |k| gs[i * 3 * cpc2 + 3 + k] as f64)
-                })
-                .collect(),
-        ));
-        for (name, c, g) in &groups {
-            assert_eq!(c.len(), g.len(), "{name}: length");
-            let scale = c.iter().map(|x| x.abs()).fold(0.0, f64::max).max(1e-9);
-            let worst = c
-                .iter()
-                .zip(g)
-                .map(|(a, b)| (a - b).abs() / scale)
-                .fold(0.0, f64::max);
-            eprintln!("{name:<14} worst error {worst:.2e} of max {scale:.3e}");
-            for (k, (a, b)) in c.iter().zip(g).enumerate() {
-                assert!(
-                    (a - b).abs() / scale < 3e-3,
-                    "{name}[{k}]: cpu {a:.6e} gpu {b:.6e}"
-                );
+            let n = scene.len();
+            let cpc2 = ((scene.sh_degree + 1) * (scene.sh_degree + 1)) as usize;
+            let rest_pc = cpc2 - 1;
+            // (name, cpu values, gpu values) per parameter group, gaussian-major.
+            let mut groups: Vec<(&str, Vec<f64>, Vec<f64>)> = Vec::new();
+            let gsh = &gpu.sh;
+            let gt = |i: usize, k: usize| gpu.transforms[i * 10 + k] as f64;
+            groups.push((
+                "mean",
+                (0..n).flat_map(|i| cpu.mean[i]).collect(),
+                (0..n).flat_map(|i| (0..3).map(move |k| gt(i, k))).collect(),
+            ));
+            groups.push((
+                "rotation",
+                (0..n).flat_map(|i| cpu.rotation[i]).collect(),
+                (0..n).flat_map(|i| (3..7).map(move |k| gt(i, k))).collect(),
+            ));
+            groups.push((
+                "scale_log",
+                (0..n).flat_map(|i| cpu.scale_log[i]).collect(),
+                (0..n)
+                    .flat_map(|i| (7..10).map(move |k| gt(i, k)))
+                    .collect(),
+            ));
+            groups.push((
+                "opacity_logit",
+                cpu.opacity_logit.clone(),
+                gpu.opacity.iter().map(|&x| x as f64).collect(),
+            ));
+            groups.push((
+                "sh_dc",
+                (0..n).flat_map(|i| cpu.sh_dc[i]).collect(),
+                (0..n)
+                    .flat_map(|i| (0..3).map(move |c| gsh[i * 3 * cpc2 + c] as f64))
+                    .collect(),
+            ));
+            groups.push((
+                "sh_rest",
+                (0..n).flat_map(|i| cpu.sh_rest[i].clone()).collect(),
+                (0..n)
+                    .flat_map(|i| {
+                        let gs = gsh;
+                        (0..3 * rest_pc).map(move |k| gs[i * 3 * cpc2 + 3 + k] as f64)
+                    })
+                    .collect(),
+            ));
+            for (name, c, g) in &groups {
+                assert_eq!(c.len(), g.len(), "{name}: length");
+                let scale = c.iter().map(|x| x.abs()).fold(0.0, f64::max).max(1e-9);
+                let worst = c
+                    .iter()
+                    .zip(g)
+                    .map(|(a, b)| (a - b).abs() / scale)
+                    .fold(0.0, f64::max);
+                eprintln!("{name:<14} worst error {worst:.2e} of max {scale:.3e}");
+                for (k, (a, b)) in c.iter().zip(g).enumerate() {
+                    assert!(
+                        (a - b).abs() / scale < 3e-3,
+                        "{name}[{k}]: cpu {a:.6e} gpu {b:.6e}"
+                    );
+                }
             }
         }
     }
@@ -747,14 +758,18 @@ mod gpu_tests {
         let mut renderer = Renderer::new(ctx, &scene, 96, 80).expect("renderer");
         for (name, view) in lens_views(96, 80) {
             let cpu = visloc_gsplat_core::backward::render_f64(&scene, &view, bg.map(f64::from));
-            let gpu = renderer.render(&view, bg);
-            let worst = cpu
-                .iter()
-                .zip(&gpu.rgb)
-                .flat_map(|(c, g)| (0..3).map(move |k| (c[k] - g[k] as f64).abs()))
-                .fold(0.0, f64::max);
-            eprintln!("{name}: max abs error {worst:.2e}");
-            assert!(worst < 2e-3, "{name}: max abs error {worst} vs CPU");
+            // The shader rasterizer and the host (rayon) one.
+            for host in [false, true] {
+                renderer.set_cpu_raster(host);
+                let gpu = renderer.render(&view, bg);
+                let worst = cpu
+                    .iter()
+                    .zip(&gpu.rgb)
+                    .flat_map(|(c, g)| (0..3).map(move |k| (c[k] - g[k] as f64).abs()))
+                    .fold(0.0, f64::max);
+                eprintln!("{name} (host raster {host}): max abs error {worst:.2e}");
+                assert!(worst < 2e-3, "{name}: max abs error {worst} vs CPU");
+            }
         }
     }
 

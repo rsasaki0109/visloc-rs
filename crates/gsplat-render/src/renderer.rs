@@ -571,6 +571,11 @@ pub struct Renderer {
     /// Geometry channels (normal, depth), see `set_geometry`.
     geo: Option<geo::GeoState>,
     geo_enabled: bool,
+    /// Run `rasterize` and `rasterize_backward` on the host (rayon) instead
+    /// of the device; see `set_cpu_raster`.
+    cpu_raster: bool,
+    /// Background of the last render (the backward pass needs it).
+    last_bg: [f32; 3],
 }
 
 /// Visible gaussians, intersections and tiles of a rendered frame.
@@ -821,6 +826,7 @@ impl Renderer {
 
         let scanner = crate::scan::PrefixScanner::new(dev, n.max(1));
 
+        let cpu_raster = cpu_raster_default(&ctx.adapter_info);
         Ok(Self {
             ctx,
             scene: gpu_scene,
@@ -852,6 +858,8 @@ impl Renderer {
             depth_stage: None,
             geo: None,
             geo_enabled: false,
+            cpu_raster,
+            last_bg: [0.0; 3],
         })
     }
 
@@ -911,6 +919,22 @@ impl Renderer {
     /// the usual one-band-per-1000-steps schedule.
     pub fn set_active_sh_degree(&mut self, degree: Option<u32>) {
         self.active_sh_degree = degree;
+    }
+
+    /// Run the rasterizer and its backward pass on the host with rayon
+    /// (see `cpu_raster.rs`) instead of as compute shaders; projection,
+    /// sorting and everything else stay on the device. On by default when the
+    /// adapter is a CPU (lavapipe / llvmpipe), where the shaders' barriers,
+    /// subgroup reductions and atomics are slow; `GSPLAT_CPU_RASTER=0` / `=1`
+    /// overrides the default. Off by default in a browser (wasm32), where its
+    /// blocking readbacks cannot run. The geometry variant
+    /// (`set_geometry(true)`) always uses the shaders.
+    pub fn set_cpu_raster(&mut self, on: bool) {
+        self.cpu_raster = on;
+    }
+
+    pub fn cpu_raster(&self) -> bool {
+        self.cpu_raster
     }
 
     pub fn set_skip_readback(&mut self, skip: bool) {
@@ -1015,6 +1039,7 @@ impl Renderer {
             .map_or(self.sh_degree, |d| d.min(self.sh_degree));
         let num_tiles = u.num_tiles();
         let raster_u = RasterUniforms::new(&u, bg);
+        self.last_bg = bg;
         let n = self.num_gaussians() as u32;
 
         // ----- Upload uniforms + reset dynamic buffers. -----
@@ -1190,7 +1215,9 @@ impl Renderer {
             self.ctx.queue.submit(Some(encoder.finish()));
         }
         prof.mark(&self.ctx.device, "tile_offsets");
-        {
+        if self.cpu_raster && !self.geo_enabled {
+            self.host_rasterize(nv, ni, num_tiles);
+        } else {
             let mut encoder =
                 self.ctx
                     .device
@@ -1209,6 +1236,43 @@ impl Renderer {
             prof.report(nv, ni, num_tiles);
             eprintln!("[profile] {}", self.tile_list_stats(num_tiles));
         }
+    }
+
+    /// `rasterize` on the host (see [`Self::set_cpu_raster`]): read the
+    /// projected splats and tile lists back, composite, and upload the image
+    /// and the per-pixel residuals the backward pass reads.
+    fn host_rasterize(&mut self, nv: usize, ni: usize, num_tiles: u32) {
+        let (dev, queue) = (&self.ctx.device, &self.ctx.queue);
+        let bufs = read_many(
+            dev,
+            queue,
+            &[
+                (&self.scratch.projected_splats, nv * 9 * 4),
+                (&self.scratch.compact_sorted, ni * 4),
+                (&self.tile_offsets, num_tiles as usize * 2 * 4),
+            ],
+        );
+        let projected: Vec<f32> = bytemuck::cast_slice(&bufs[0]).to_vec();
+        let sorted: Vec<u32> = bytemuck::cast_slice(&bufs[1]).to_vec();
+        let offsets: Vec<u32> = bytemuck::cast_slice(&bufs[2]).to_vec();
+        let r = cpu_raster::raster_forward(&cpu_raster::Frame {
+            img_w: self.image_w,
+            img_h: self.image_h,
+            bg: self.last_bg,
+            projected: &projected,
+            sorted: &sorted,
+            offsets: &offsets,
+            final_t: &[],
+            last_idx: &[],
+            d_image: &[],
+        });
+        queue.write_buffer(&self.out_img, 0, bytemuck::cast_slice(&r.image));
+        queue.write_buffer(&self.residuals.final_t, 0, bytemuck::cast_slice(&r.final_t));
+        queue.write_buffer(
+            &self.residuals.last_idx,
+            0,
+            bytemuck::cast_slice(&r.last_idx),
+        );
     }
 
     /// Render `view` and also return, per pixel, the median depth (camera z
@@ -1357,6 +1421,68 @@ fn read_f32s(
     bytemuck::cast_slice(&raw).to_vec()
 }
 
+fn cpu_raster_default(info: &wgpu::AdapterInfo) -> bool {
+    // In a browser the host path's blocking readbacks cannot run (and a
+    // CPU WebGPU adapter such as SwiftShader would select it): off there.
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    match std::env::var("GSPLAT_CPU_RASTER").as_deref() {
+        Ok("0") => false,
+        Ok(_) => true,
+        Err(_) => info.device_type == wgpu::DeviceType::Cpu,
+    }
+}
+
+/// Read several buffer prefixes back with one copy submit and one map.
+fn read_many(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    parts: &[(&wgpu::Buffer, usize)],
+) -> Vec<Vec<u8>> {
+    let mut offsets = Vec::with_capacity(parts.len());
+    let mut size = 0u64;
+    for &(_, len) in parts {
+        offsets.push(size);
+        size = (size + len as u64).next_multiple_of(256);
+    }
+    if size == 0 {
+        return parts.iter().map(|_| Vec::new()).collect();
+    }
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("staging-many"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("staging-many-copy"),
+    });
+    for (&(buf, len), &off) in parts.iter().zip(&offsets) {
+        if len > 0 {
+            encoder.copy_buffer_to_buffer(buf, 0, &staging, off, len as u64);
+        }
+    }
+    queue.submit(Some(encoder.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    let _ = rx.recv();
+    let out = {
+        let view = slice.get_mapped_range().expect("map range");
+        parts
+            .iter()
+            .zip(&offsets)
+            .map(|(&(_, len), &off)| view[off as usize..off as usize + len].to_vec())
+            .collect()
+    };
+    staging.unmap();
+    out
+}
+
 fn read_bytes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1435,6 +1561,8 @@ impl StageTimer {
 
 #[path = "renderer_backward.rs"]
 mod backward;
+#[path = "cpu_raster.rs"]
+mod cpu_raster;
 #[path = "renderer_geo.rs"]
 mod geo;
 pub use backward::{DeviceParams, ParamGrads, SCREEN_GRAD_FLOATS};
