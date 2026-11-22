@@ -17,6 +17,11 @@ differential drive driven by `cmd_vel`. It publishes:
   mesh or from a ground-truth scan of the place);
 - `ground_truth` (`nav_msgs/Odometry`, the true pose in the map frame) and
   `collisions` (`std_msgs/Int32`, steps a wall stopped the robot);
+- with `--pedestrians N`, N people walk the scene's route (its start and
+  goals) back and forth (`people.py`): they show in the camera, drawn over
+  the splat by depth, and in the scan, so Nav2 has to steer round them;
+  they wait while the robot is just in front of them. `--record` also writes
+  their positions to `<record>.people.csv`;
 - `/clock`: the simulation owns time. Each step waits for the step's camera
   image, so a slow renderer slows the clock, not the robot: every node runs
   on simulation time, as in Gazebo.
@@ -99,16 +104,17 @@ class Grid:
 class Renderer:
     """`gsplat_render_server` behind a pipe: a pose in, an image out."""
 
-    def __init__(self, server, ply, cam):
+    def __init__(self, server, ply, cam, depth=False):
         self.w, self.h = cam['width'], cam['height']
-        self.p = subprocess.Popen([server, '--ply', ply, '--camera', cam['model']],
+        self.depth = depth
+        self.p = subprocess.Popen([server, '--ply', ply, '--camera', cam['model']] + (['--depth'] if depth else []),
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def render(self, R_cw, t_cw):
         line = ' '.join(f'{v:.7f}' for v in list(R_cw.reshape(-1)) + list(t_cw)) + '\n'
         self.p.stdin.write(line.encode())
         self.p.stdin.flush()
-        n = self.w * self.h * 3
+        n = self.w * self.h * (7 if self.depth else 3)
         buf = b''
         while len(buf) < n:
             chunk = self.p.stdout.read(n - len(buf))
@@ -126,9 +132,16 @@ class Sim(Node):
         self.cam = cam
         here = os.path.dirname(os.path.abspath(args.scene))
         sp = lambda p: p if os.path.isabs(p) else os.path.join(here, p)  # noqa: E731
-        self.renderer = Renderer(args.server, sp(scene['splat']), cam)
+        self.renderer = Renderer(args.server, sp(scene['splat']), cam, depth=args.pedestrians > 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
+        self.crowd = None
+        if args.pedestrians > 0:
+            from people import Crowd  # noqa: PLC0415
+            route = scene.get('route') or [scene['start']] + scene.get('goals', [])
+            if len(route) < 2:
+                raise SystemExit('--pedestrians needs a route: the scene has no goals')
+            self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed)
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
@@ -157,6 +170,9 @@ class Sim(Node):
         self.record = open(args.record, 'w') if args.record else None
         if self.record:
             self.record.write('time_s,true_x,true_y,true_yaw,odom_x,odom_y,odom_yaw,collisions\n')
+        self.people = open(args.record + '.people.csv', 'w') if args.record and self.crowd else None
+        if self.people:
+            self.people.write('time_s,id,x,y,yaw,phase\n')
 
     def on_cmd(self, msg):
         self.cmd = (msg.linear.x, msg.angular.z, self.t)
@@ -185,7 +201,11 @@ class Sim(Node):
         nyaw = yaw + self.w * DT
         nx = x + self.v * DT * math.cos(yaw + self.w * DT / 2)
         ny = y + self.v * DT * math.sin(yaw + self.w * DT / 2)
-        if self.v != 0 and self.grid.hits(nx, ny, self.radius) and not self.grid.hits(x, y, self.radius):
+        if self.crowd:
+            self.crowd.step(DT, (x, y))
+        blocked = lambda px, py: self.grid.hits(px, py, self.radius) or bool(  # noqa: E731
+            self.crowd and self.crowd.hits(px, py, self.radius))
+        if self.v != 0 and blocked(nx, ny) and not blocked(x, y):
             self.collisions += 1
             nx, ny, self.v = x, y, 0.0
         moved = math.hypot(nx - x, ny - y) * (1 if self.v >= 0 else -1)
@@ -231,6 +251,9 @@ class Sim(Node):
             if self.record:
                 self.record.write(f'{self.t:.3f},{self.pose[0]:.4f},{self.pose[1]:.4f},{self.pose[2]:.4f},'
                                   f'{self.odom[0]:.4f},{self.odom[1]:.4f},{self.odom[2]:.4f},{self.collisions}\n')
+            if self.people:
+                for i, (p, yw, ph) in enumerate(zip(self.crowd.xy, self.crowd.yaw, self.crowd.phase)):
+                    self.people.write(f'{self.t:.3f},{i},{p[0]:.4f},{p[1]:.4f},{yw:.4f},{ph:.3f}\n')
 
     def ground_z(self, x, y):
         if self.ground is None:
@@ -243,6 +266,8 @@ class Sim(Node):
     def publish_scan(self, t):
         n = self.args.scan_rays
         r = self.grid.scan(self.pose[0], self.pose[1], self.pose[2], n, self.args.scan_range)
+        if self.crowd:
+            r = self.crowd.scan(self.pose[0], self.pose[1], self.pose[2], n, r)
         msg = LaserScan()
         msg.header.stamp, msg.header.frame_id = t, 'base_link'
         msg.angle_min, msg.angle_increment = -math.pi, 2 * math.pi / n
@@ -261,6 +286,13 @@ class Sim(Node):
         R_wc = np.array([[s, 0, c], [-c, 0, s], [0, -1, 0]], dtype=float)
         R_cw = R_wc.T
         buf = self.renderer.render(R_cw, -R_cw @ centre)
+        if self.crowd:
+            n = cam['width'] * cam['height']
+            rgb = np.frombuffer(buf[:n * 3], np.uint8).reshape(cam['height'], cam['width'], 3).astype(float)
+            depth = np.frombuffer(buf[n * 3:], '<f4').reshape(cam['height'], cam['width'])
+            fx = float(cam['model'].split()[3])
+            rgb = self.crowd.draw(rgb, depth, R_wc, centre, fx, self.ground_z)
+            buf = np.clip(rgb, 0, 255).astype(np.uint8).tobytes()
         img = Image()
         img.header.stamp, img.header.frame_id = t, 'camera_optical'
         img.height, img.width = cam['height'], cam['width']
@@ -292,6 +324,8 @@ def main():
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--mono', action='store_true',
                    help='publish mono8 (a third of the bytes; large rgb8 images can stall some DDS stacks)')
+    p.add_argument('--pedestrians', type=int, default=0, help='people walking the route (people.py)')
+    p.add_argument('--pedestrian-speed', dest='pedestrian_speed', type=float, default=1.1, help='m/s, each +-20%%')
     p.add_argument('--duration', type=float, default=0.0, help='stop after this many simulated seconds (0: never)')
     args = p.parse_args()
     with open(args.scene, encoding='utf-8') as f:
