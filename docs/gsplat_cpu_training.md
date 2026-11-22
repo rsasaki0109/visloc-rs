@@ -88,6 +88,11 @@ from the 140k-gaussian scene of step 1,000, densification off, ±10 ms:
   7,000). Over 7,000 steps the 200k cap trains in 37 instead of 46 minutes
   and scores 0.23 dB lower (24.43 against 24.66 dB).
 
+  The trainer now skips densification and the opacity reset on the last
+  step, as Inria does (it saves before densifying). The default 2,000-step
+  run then scores 22.05 dB (21.60 and 21.71 dB before). Runs that end at
+  their cap do not change.
+
 ## The change
 
 `Renderer::set_cpu_raster` (on by default when the wgpu adapter is a CPU;
@@ -131,11 +136,17 @@ The backward went from 995 to 113 ms and the forward from 160 to 73 ms.
   | 2,000 | 21.49 dB, 2,079 s | 21.60, 21.71 dB, 600 s |
   | 7,000 | 24.61 dB, 7,858 s | 24.66 dB, 2,768 s |
 
-  Neither is bit-reproducible run to run: `project_forward` assigns
+  Neither was bit-reproducible run to run: `project_forward` assigns
   compact slots with an atomic counter, and a cloned gaussian has exactly
   its parent's depth, so the order of the two after the (stable) depth
-  sort varies. Within a run's spread, the two rasterizers give the same
+  sort varied. Within a run's spread, the two rasterizers give the same
   PSNR.
+
+  The renderer now sorts the visible gaussians by id before the depth
+  sort, so equal depths are ordered by id (+3 ms a step). With the host
+  rasterizer, whose sums do not depend on the thread count, a 700-step
+  run writes a byte-identical PLY twice, and again with 2 threads instead
+  of 4.
 
 ## 7,000 steps
 
