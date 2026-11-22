@@ -194,9 +194,40 @@ a run at its cap.
 Both are deterministic: a run repeats its PLY byte for byte. From the
 first measurement to here, 7,000 steps went from 2 h 11 min to 31.5 min.
 
+## Vectorization and the loss on the host
+
+Three more changes, none of which changes a bit of the result: a 7,000-step
+run writes the same PLY as before them.
+
+- **`exp`.** `fast_exp` built 2^n with `n as i32`, a saturating
+  float-to-int cast that LLVM does not vectorize, so the 16-lane rows ran
+  lane by lane (seen in the disassembly). The integer now comes out of the
+  mantissa of `n + 1.5 * 2^23`. Forward 57 -> 42 ms, backward 82 -> 76 ms.
+- **Half rows.** Per tile row, the splat's alpha >= 1/255 conic is solved
+  for x (one pixel wider), and only the 8-lane halves it reaches run, each
+  as a fixed 8-lane loop with a constant offset (one AVX2 vector; a loop
+  with a run-time bound was 4x slower). Forward 42 -> 37 ms, backward
+  76 -> 61 ms.
+- **Loss.** `SsimHost` keeps its scratch and runs four row-parallel
+  passes (~21 -> ~11 ms). The L1 kernel's gradient and fixed-point loss
+  log are computed on the host with its operations in its order, so
+  `d_image` is uploaded once and not read back (the readback was waiting
+  ~10 ms for the kernel). Loss stage 22 -> 13 ms.
+
+At 400k gaussians a step is now ~175 ms: forward ~56 (rasterizer 37),
+backward ~70 (rasterizer 61, projection ~10), Adam ~35, loss ~13.
+
+| 7,000 steps, same data | Time | PSNR |
+| --- | ---: | ---: |
+| Shaders (start of this page) | 7,858 s | 24.61 dB |
+| Host rasterizer | 2,768 s | 24.66 dB |
+| + host sorts and SSIM | 2,003 s | 24.58 dB |
+| + vectorized `exp`, half rows, host L1 | **1,540 s** | 24.58 dB (same PLY) |
+
 ## What is left
 
-At 400k gaussians a step is now ~230 ms: the host rasterizers ~145 ms,
-Adam ~35 ms and SSIM ~21 ms. Adam updates every parameter every step
-(24M floats, memory-bound); updating only the visible gaussians would cut
-most of it but changes the optimizer, so it is not done here.
+Adam (~35 ms) reads and writes all 24M parameters, moments and gradients
+every step, about 770 MB at ~22 GB/s: the memory bandwidth. Updating only
+the visible gaussians would cut most of it, but changes the optimizer.
+The rasterizers are vectorized and touch only reachable half rows; what
+remains of them is the per-pixel arithmetic.
