@@ -42,6 +42,11 @@
 //!   dropped, as the SLAM's map export drops single-view ones. A landmark's
 //!   descriptor is its observations' medoid.
 //!
+//! - **Smoothing.** With `--smoothing-sigma PX`, each keyframe is blurred
+//!   (Gaussian, PX pixels) before its corners and descriptors are taken, and
+//!   the map records it (`feature_smoothing_sigma`), so the localizers blur
+//!   their queries alike; against sensor noise.
+//!
 //! The camera is Freiburg 1's (FULL_OPENCV, `--fx` ... `--k3` to override;
 //! Freiburg 3's images are already undistorted, so pass zero coefficients).
 
@@ -59,6 +64,7 @@ use visloc_basalt::mapper::features::{
 };
 use visloc_basalt::mapper::localization_map::{localization_camera_id, orb_descriptor_to_f32};
 use visloc_basalt::pyramid::RawU16Image;
+use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{
     Camera, CameraModel, Frame, Keyframe, Landmark, LandmarkDescriptorStore, Observation, VisualMap,
@@ -79,6 +85,7 @@ struct Args {
     track_keyframes: usize,
     match_radius_px: f64,
     max_hamming: u32,
+    smoothing_sigma: f64,
     min_observations: usize,
     keep_world: bool,
 }
@@ -88,7 +95,7 @@ impl Args {
         "usage: tum_rgbd_save_map --seq-dir DIR --trajectory FILE --out DIR \
          [--keyframe-m M] [--keyframe-deg D] [--max-points N] [--min-depth M] \
          [--max-depth M] [--depth-scale S] [--track-keyframes N] [--match-radius-px P] \
-         [--max-hamming N] [--min-observations N] [--keep-world] [--fx F --fy F --cx C --cy C \
+         [--max-hamming N] [--min-observations N] [--smoothing-sigma PX] [--keep-world] [--fx F --fy F --cx C --cy C \
          --k1 K --k2 K --p1 P --p2 P --k3 K]"
             .into()
     }
@@ -115,6 +122,7 @@ impl Args {
             track_keyframes: 5,
             match_radius_px: 4.0,
             max_hamming: 60,
+            smoothing_sigma: 0.0,
             min_observations: 2,
             keep_world: false,
         };
@@ -151,6 +159,7 @@ impl Args {
                 "--track-keyframes" => args.track_keyframes = number(&option, value()?)?,
                 "--match-radius-px" => args.match_radius_px = number(&option, value()?)?,
                 "--max-hamming" => args.max_hamming = number(&option, value()?)?,
+                "--smoothing-sigma" => args.smoothing_sigma = number(&option, value()?)?,
                 "--min-observations" => args.min_observations = number(&option, value()?)?,
                 "--keep-world" => args.keep_world = true,
                 name if intrinsic(name).is_some() => {
@@ -384,6 +393,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
     let mut tracks: BTreeMap<u64, Track> = BTreeMap::new();
     let mut next_landmark = 1_u64;
+    let smoothing = GaussianSmoothing {
+        sigma: args.smoothing_sigma,
+    };
     let mut last_keyframe_pose: Option<SE3> = None;
     let mut keyframe_index = 0_usize;
 
@@ -404,7 +416,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if (depth_stamps[d] - t).abs() > 0.02 {
             continue;
         }
-        let grey = grey_image(&args.seq_dir.join(file))?;
+        let grey = smoothing.apply(&grey_image(&args.seq_dir.join(file))?);
         let (depth_width, depth_pixels) = depth_image(&args.seq_dir.join(&depth[d].1))?;
         let quality = map_files::Frontend::default().quality_level();
         let corners = detect_keypoints_mapping_with(&grey, args.max_points, quality);
@@ -606,6 +618,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             "levelling": map_files::se3_json(&aligned),
         },
     });
+    if args.smoothing_sigma > 0.0 {
+        summary["feature_smoothing_sigma"] = json!(args.smoothing_sigma);
+    }
     map_files::Frontend::default().write_json(&mut summary);
     let summary = map_files::write(&args.out, &map, &store, &images, summary)?;
     println!(
