@@ -657,7 +657,7 @@ The overlays show the localization itself:
   keypoints circled.
 - **The cyan ring** is where visloc puts the robot.
 
-The video is of the 1.2 m run below.
+The video is of the 1.2 m run with the tuned localization below.
 
 **A lower camera.** A delivery robot's camera is nearer 1 m than 2.26 m.
 Rendered 1.2 m over the ground, the street's buildings, trees and signs look
