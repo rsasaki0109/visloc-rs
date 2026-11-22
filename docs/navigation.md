@@ -743,6 +743,42 @@ python3 ros2/visloc-ros2/gs/chase_video.py --splat runs/street/scene.ply \
 ffmpeg -framerate 30 -i runs/street/chase/%05d.jpg -pix_fmt yuv420p runs/street/chase.mp4
 ```
 
+### With people walking the street
+
+`gs_sim.py --pedestrians 8` puts eight people on the street
+(`gs/people.py`). They walk the scene's route (its start and goals) back and
+forth, each at their own speed (1.1 m/s ± 20%) and side offset. A person
+waits while the robot is within 1.2 m in front of them, as people do on a
+sidewalk, but does not step out of its way.
+
+- **Camera**: each person is a low-poly figure whose legs and arms swing
+  with the gait. They wear varied clothes. The figure is drawn over the
+  splat by depth, so a person behind a tree or a car is hidden.
+- **Scan**: each person is a 0.25 m circle.
+- **Nav2**: the scan reaches both costmaps and the collision monitor, so
+  Nav2 has to steer round the people.
+- **Recording**: `--record` also writes where they were
+  (`<record>.people.csv`), and `chase_video.py` draws them from it.
+
+Same street, same 1.2 m camera, same tuned settings
+(`sim_args:="--mono --pedestrians 8"`):
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| empty street | 4/4 | 0 | 827 of 850 | 4.7 / 2.2 / 36 cm |
+| eight people | 4/4, all at the first try | 0 | 759 of 800 | 4.2 / 2.4 / 25 cm |
+
+A person was within 2 m of the robot in 148 of the 415 simulated seconds.
+The nearest one came 0.57 m from the robot's centre (they touch at 0.45 m).
+People hiding the buildings cost 4% of the localizations, but no accuracy.
+
+On this 4-core CPU the run shared the machine with a 3DGS job, and Nav2's
+behaviour tree aborted goals until `default_server_timeout` went from 20 ms
+to 200 ms (`gz/nav2_params.yaml`). Its servers had answered too late.
+
+Video: [media/gs_street_pedestrians.mp4](media/gs_street_pedestrians.mp4)
+(map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
+
 ## The occupancy grid of a visual map
 
 A sparse visual map says where there is something (a landmark). Along every
