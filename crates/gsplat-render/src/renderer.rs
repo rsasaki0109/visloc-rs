@@ -926,8 +926,9 @@ impl Renderer {
     /// sorting and everything else stay on the device. On by default when the
     /// adapter is a CPU (lavapipe / llvmpipe), where the shaders' barriers,
     /// subgroup reductions and atomics are slow; `GSPLAT_CPU_RASTER=0` / `=1`
-    /// overrides the default. The geometry variant (`set_geometry(true)`)
-    /// always uses the shaders.
+    /// overrides the default. Off by default in a browser (wasm32), where its
+    /// blocking readbacks cannot run. The geometry variant
+    /// (`set_geometry(true)`) always uses the shaders.
     pub fn set_cpu_raster(&mut self, on: bool) {
         self.cpu_raster = on;
     }
@@ -1421,6 +1422,11 @@ fn read_f32s(
 }
 
 fn cpu_raster_default(info: &wgpu::AdapterInfo) -> bool {
+    // In a browser the host path's blocking readbacks cannot run (and a
+    // CPU WebGPU adapter such as SwiftShader would select it): off there.
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
     match std::env::var("GSPLAT_CPU_RASTER").as_deref() {
         Ok("0") => false,
         Ok(_) => true,
