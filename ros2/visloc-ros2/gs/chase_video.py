@@ -46,6 +46,8 @@ p.add_argument('--back', type=float, default=3.2)
 p.add_argument('--up', type=float, default=2.75)
 p.add_argument('--pitch-deg', type=float, default=16.0)
 p.add_argument('--seed', type=int, default=0, help="gs_sim.py's --seed (the people's looks)")
+p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
+               help='splat: the people are gaussians rendered with the scene; mesh: drawn over it')
 p.add_argument('--server', default=os.path.join(REPO, 'target', 'release', 'examples', 'gsplat_render_server'))
 args = p.parse_args()
 OUT = args.out; os.makedirs(OUT, exist_ok=True)
@@ -77,14 +79,18 @@ PEOPLE_CSV = f'{args.run}.sim.csv.people.csv'
 CROWD = None
 if os.path.exists(PEOPLE_CSV):
     from people import Crowd  # noqa: E402
-    PEOPLE = {}
+    PEOPLE, KIND = {}, {}
     for row in csv.DictReader(open(PEOPLE_CSV)):
         PEOPLE.setdefault(float(row['time_s']), []).append(
             (float(row['x']), float(row['y']), float(row['yaw']), float(row['phase'])))
+        KIND[int(row['id'])] = int(row.get('kind') or 0)
     PT = sorted(PEOPLE)
     class _Free:
         def hits(self, x, y, r): return False
-    CROWD = Crowd([scene['start']] + scene.get('goals', []), len(PEOPLE[PT[0]]), _Free(), seed=args.seed)
+    n_bikes = sum(KIND.values())
+    CROWD = Crowd([scene['start']] + scene.get('goals', []), len(KIND) - n_bikes, _Free(), seed=args.seed,
+                  cyclists=n_bikes)
+    DYN = 2500 * (len(KIND) - n_bikes) + 6000 * n_bikes
 
 def people_at(t):
     """Put the crowd where gs_sim.py recorded it at time t."""
@@ -99,12 +105,16 @@ def gz(x, y):
     j = min(max(int((y - gr['y0']) / gr['resolution']), 0), ground.shape[0] - 1)
     return float(ground[j, i])
 
-srv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', f'PINHOLE {W} {H} {FX} {FX} {W / 2} {H / 2}', '--depth'],
-                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-fpv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', CAM['model']] + (['--depth'] if CROWD else []),
-                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+SPLAT = CROWD is not None and args.people_style == 'splat'
+DYN_ARGS = ['--dynamic', str(DYN)] if SPLAT else []
+srv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', f'PINHOLE {W} {H} {FX} {FX} {W / 2} {H / 2}', '--depth']
+                       + DYN_ARGS, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+fpv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', CAM['model']] + (['--depth'] if CROWD else [])
+                       + DYN_ARGS, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-def ask(p, R_cw, t, n):
+def ask(p, R_cw, t, n, splats=None):
+    if splats is not None:
+        p.stdin.write(f'dyn {len(splats)}\n'.encode() + np.ascontiguousarray(splats, '<f4').tobytes())
     p.stdin.write((' '.join(f'{v:.7f}' for v in [*R_cw.reshape(-1), *t]) + '\n').encode()); p.stdin.flush()
     return p.stdout.read(n)
 
@@ -139,7 +149,13 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     cam_yaw = yaw if cam_yaw is None else cam_yaw + 0.12 * math.atan2(math.sin(yaw - cam_yaw), math.cos(yaw - cam_yaw))
     c_w = np.array([x - BACK * math.cos(cam_yaw), y - BACK * math.sin(cam_yaw), gz(x, y) + UP])
     R_wc = cam_axes(cam_yaw, PITCH); R_cw = R_wc.T
-    buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7)
+    if SPLAT:
+        people_at(t)
+        # the people, except those brushing past the chase camera itself
+        clear = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1]) > 2.0
+        buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7, CROWD.splats(c_w, gz, max_m=40.0, only=clear))
+    else:
+        buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7)
     rgb = np.frombuffer(buf[:W * H * 3], np.uint8).reshape(H, W, 3).astype(float)
     depth = np.frombuffer(buf[W * H * 3:], '<f4').reshape(H, W)
     # shadow
@@ -169,16 +185,20 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
             pts, ok = project(ring, R_wc, c_w)
             if ok.all():
                 sm = Image.new('L', (W, H), 0); ImageDraw.Draw(sm).polygon([tuple(q) for q in pts], fill=120)
-                rgb = rgb * (1 - np.asarray(sm.filter(ImageFilter.GaussianBlur(5)), float)[..., None] / 255)
-        dist = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1])
-        far = dist > math.hypot(x - c_w[0], y - c_w[1])
-        near = ~far & (dist > 2.0)               # not those brushing past the chase camera itself
-        all_xy, all_yaw, all_ph = CROWD.xy, CROWD.yaw, CROWD.phase
-        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[far], all_yaw[far], all_ph[far]
-        rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
-        rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
-        CROWD.xy, CROWD.yaw, CROWD.phase = all_xy[near], all_yaw[near], all_ph[near]
-        rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz)
+                a = np.asarray(sm.filter(ImageFilter.GaussianBlur(5)), float) / 255
+                if SPLAT:   # the person is in the render already: shade only the ground behind their feet
+                    pz = ((np.array([px_, py_, gz(px_, py_)]) - c_w) @ R_wc)[2]
+                    a = a * ((depth <= 0) | (depth > pz - 0.35))
+                rgb = rgb * (1 - a[..., None])
+        if SPLAT:
+            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+        else:
+            dist = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1])
+            far = dist > math.hypot(x - c_w[0], y - c_w[1])
+            near = ~far & (dist > 2.0)               # not those brushing past the chase camera itself
+            rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz, only=far)
+            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+            rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz, only=near)
     else:
         rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
     img = Image.fromarray(rgb.astype(np.uint8)); d = ImageDraw.Draw(img)
@@ -206,7 +226,11 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     fc, fs = math.cos(fyaw), math.sin(fyaw)
     R_fw = np.array([[fs, 0, fc], [-fc, 0, fs], [0, -1, 0]], float).T  # camera <- world
     cf = np.array([fx_ + math.cos(fyaw) * scene.get('camera_forward', 0.0), fy_ + math.sin(fyaw) * scene.get('camera_forward', 0.0), gz(fx_, fy_) + scene['camera_height']])
-    if CROWD:
+    if SPLAT:
+        people_at(tf)
+        fb = ask(fpv, R_fw, -R_fw @ cf, CW * CH * 7, CROWD.splats(cf, gz))
+        inset = Image.fromarray(np.frombuffer(fb[:CW * CH * 3], np.uint8).reshape(CH, CW, 3)).convert('L').convert('RGB')
+    elif CROWD:
         fb = ask(fpv, R_fw, -R_fw @ cf, CW * CH * 7)
         frgb = np.frombuffer(fb[:CW * CH * 3], np.uint8).reshape(CH, CW, 3).astype(float)
         people_at(tf)

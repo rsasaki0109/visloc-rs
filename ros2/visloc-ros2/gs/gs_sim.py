@@ -17,11 +17,14 @@ differential drive driven by `cmd_vel`. It publishes:
   mesh or from a ground-truth scan of the place);
 - `ground_truth` (`nav_msgs/Odometry`, the true pose in the map frame) and
   `collisions` (`std_msgs/Int32`, steps a wall stopped the robot);
-- with `--pedestrians N`, N people walk the scene's route (its start and
-  goals) back and forth (`people.py`): they show in the camera, drawn over
-  the splat by depth, and in the scan, so Nav2 has to steer round them;
-  they wait while the robot is just in front of them. `--record` also writes
-  their positions to `<record>.people.csv`;
+- with `--pedestrians N` (and `--cyclists M`), N people walk (and M ride
+  bicycles along) the scene's route (its start and goals) back and forth
+  (`people.py`). They show in the camera and in the
+  scan, so Nav2 has to steer round them, and they wait while the robot is
+  just in front of them. In the camera they are gaussians rendered with the
+  scene by default (`--people-style splat`, `gsplat_render_server
+  --dynamic`), or meshes drawn over it by depth (`mesh`). `--record` also
+  writes their positions to `<record>.people.csv`;
 - `/clock`: the simulation owns time. Each step waits for the step's camera
   image, so a slow renderer slows the clock, not the robot: every node runs
   on simulation time, as in Gazebo.
@@ -104,14 +107,18 @@ class Grid:
 class Renderer:
     """`gsplat_render_server` behind a pipe: a pose in, an image out."""
 
-    def __init__(self, server, ply, cam, depth=False):
+    def __init__(self, server, ply, cam, depth=False, dynamic=0):
         self.w, self.h = cam['width'], cam['height']
         self.depth = depth
-        self.p = subprocess.Popen([server, '--ply', ply, '--camera', cam['model']] + (['--depth'] if depth else []),
+        self.p = subprocess.Popen([server, '--ply', ply, '--camera', cam['model']] + (['--depth'] if depth else [])
+                                  + (['--dynamic', str(dynamic)] if dynamic else []),
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
-    def render(self, R_cw, t_cw):
+    def render(self, R_cw, t_cw, splats=None):
+        """splats: moving objects' gaussians (K x 14 float32) for --dynamic."""
         line = ' '.join(f'{v:.7f}' for v in list(R_cw.reshape(-1)) + list(t_cw)) + '\n'
+        if splats is not None:
+            self.p.stdin.write(f'dyn {len(splats)}\n'.encode() + np.ascontiguousarray(splats, '<f4').tobytes())
         self.p.stdin.write(line.encode())
         self.p.stdin.flush()
         n = self.w * self.h * (7 if self.depth else 3)
@@ -132,16 +139,22 @@ class Sim(Node):
         self.cam = cam
         here = os.path.dirname(os.path.abspath(args.scene))
         sp = lambda p: p if os.path.isabs(p) else os.path.join(here, p)  # noqa: E731
-        self.renderer = Renderer(args.server, sp(scene['splat']), cam, depth=args.pedestrians > 0)
+        # Splat people are rendered with the scene; mesh people are drawn over it by depth.
+        movers = args.pedestrians + args.cyclists
+        self.splat_people = movers > 0 and args.people_style == 'splat'
+        self.renderer = Renderer(args.server, sp(scene['splat']), cam,
+                                 depth=movers > 0 and not self.splat_people,
+                                 dynamic=2500 * args.pedestrians + 6000 * args.cyclists if self.splat_people else 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
         self.crowd = None
-        if args.pedestrians > 0:
+        if args.pedestrians + args.cyclists > 0:
             from people import Crowd  # noqa: PLC0415
             route = scene.get('route') or [scene['start']] + scene.get('goals', [])
             if len(route) < 2:
                 raise SystemExit('--pedestrians needs a route: the scene has no goals')
-            self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed)
+            self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
+                               cyclists=args.cyclists, cyclist_speed=args.cyclist_speed)
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
@@ -172,7 +185,7 @@ class Sim(Node):
             self.record.write('time_s,true_x,true_y,true_yaw,odom_x,odom_y,odom_yaw,collisions\n')
         self.people = open(args.record + '.people.csv', 'w') if args.record and self.crowd else None
         if self.people:
-            self.people.write('time_s,id,x,y,yaw,phase\n')
+            self.people.write('time_s,id,x,y,yaw,phase,kind\n')
 
     def on_cmd(self, msg):
         self.cmd = (msg.linear.x, msg.angular.z, self.t)
@@ -252,8 +265,9 @@ class Sim(Node):
                 self.record.write(f'{self.t:.3f},{self.pose[0]:.4f},{self.pose[1]:.4f},{self.pose[2]:.4f},'
                                   f'{self.odom[0]:.4f},{self.odom[1]:.4f},{self.odom[2]:.4f},{self.collisions}\n')
             if self.people:
-                for i, (p, yw, ph) in enumerate(zip(self.crowd.xy, self.crowd.yaw, self.crowd.phase)):
-                    self.people.write(f'{self.t:.3f},{i},{p[0]:.4f},{p[1]:.4f},{yw:.4f},{ph:.3f}\n')
+                for i, (p, yw, ph, kd) in enumerate(zip(self.crowd.xy, self.crowd.yaw, self.crowd.phase,
+                                                        self.crowd.kind)):
+                    self.people.write(f'{self.t:.3f},{i},{p[0]:.4f},{p[1]:.4f},{yw:.4f},{ph:.3f},{kd}\n')
 
     def ground_z(self, x, y):
         if self.ground is None:
@@ -285,8 +299,9 @@ class Sim(Node):
         # camera axes in the map: x right = -left, y down, z forward
         R_wc = np.array([[s, 0, c], [-c, 0, s], [0, -1, 0]], dtype=float)
         R_cw = R_wc.T
-        buf = self.renderer.render(R_cw, -R_cw @ centre)
-        if self.crowd:
+        splats = self.crowd.splats(centre, self.ground_z) if self.splat_people else None
+        buf = self.renderer.render(R_cw, -R_cw @ centre, splats)
+        if self.crowd and not self.splat_people:
             n = cam['width'] * cam['height']
             rgb = np.frombuffer(buf[:n * 3], np.uint8).reshape(cam['height'], cam['width'], 3).astype(float)
             depth = np.frombuffer(buf[n * 3:], '<f4').reshape(cam['height'], cam['width'])
@@ -325,6 +340,10 @@ def main():
     p.add_argument('--mono', action='store_true',
                    help='publish mono8 (a third of the bytes; large rgb8 images can stall some DDS stacks)')
     p.add_argument('--pedestrians', type=int, default=0, help='people walking the route (people.py)')
+    p.add_argument('--cyclists', type=int, default=0, help='people riding bicycles along the route (people.py)')
+    p.add_argument('--cyclist-speed', dest='cyclist_speed', type=float, default=4.0, help='m/s, each +-20%%')
+    p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
+                   help='splat: the people are gaussians rendered with the scene; mesh: drawn over it')
     p.add_argument('--pedestrian-speed', dest='pedestrian_speed', type=float, default=1.1, help='m/s, each +-20%%')
     p.add_argument('--duration', type=float, default=0.0, help='stop after this many simulated seconds (0: never)')
     args = p.parse_args()
