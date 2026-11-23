@@ -18,16 +18,61 @@
 //! with `--depth`, followed by `width * height` little-endian f32 median
 //! depths (camera z in the splat's units, 0 where nothing is hit).
 //! Diagnostics go to stderr. The process ends at the end of stdin.
+//!
+//! Moving objects (people, bicycles) can be splats too: `--dynamic N`
+//! keeps `N` extra gaussian slots after the scene, empty at first. A line
+//! `dyn K` (K <= N) before a pose request is followed by `K * 14`
+//! little-endian f32s, per gaussian `x y z  log_sx log_sy log_sz  qw qx qy qz
+//! opacity_logit  r g b` (colour in 0..1, view-independent). They fill the
+//! first `K` slots, the rest are emptied, and they stay until the next
+//! `dyn` line. So the objects are sorted, blended and occluded with the
+//! scene by the same rasterizer, and show in the depth.
 //! `ros2/visloc-ros2/gs/gs_sim.py` drives it.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
+use nalgebra::Quaternion;
 use nalgebra::{Matrix3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
+use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian};
 use visloc_gsplat_core::lens::{Lens, Projection};
 use visloc_gsplat_core::ply::load_ply;
+use visloc_gsplat_core::sh::SH_C0;
+use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_render::{GpuContext, Renderer};
+
+/// Floats per dynamic gaussian in a `dyn` block.
+const DYN_FLOATS: usize = 14;
+
+/// A gaussian from a `dyn` record (empty: transparent and tiny).
+fn dynamic_gaussian(v: Option<&[f32]>, sh_degree: u32) -> Gaussian {
+    let rest = vec![0.0; 3 * sh_rest_coeffs_per_channel(sh_degree)];
+    match v {
+        Some(v) => Gaussian {
+            mean: Vector3::new(v[0], v[1], v[2]),
+            scale_log: Vector3::new(v[3], v[4], v[5]),
+            rotation: Quaternion::new(v[6], v[7], v[8], v[9]),
+            opacity_logit: v[10],
+            sh_dc: [
+                (v[11] - 0.5) / SH_C0,
+                (v[12] - 0.5) / SH_C0,
+                (v[13] - 0.5) / SH_C0,
+            ],
+            sh_rest: rest,
+            sh_degree,
+        },
+        None => Gaussian {
+            mean: Vector3::new(0.0, 0.0, -1.0e4),
+            scale_log: Vector3::new(-12.0, -12.0, -12.0),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            opacity_logit: -30.0,
+            sh_dc: [0.0; 3],
+            sh_rest: rest,
+            sh_degree,
+        },
+    }
+}
 
 fn parse_camera(spec: &str) -> Result<PinholeCamera, String> {
     let parts: Vec<&str> = spec.split_whitespace().collect();
@@ -69,12 +114,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut camera: Option<String> = None;
     let mut sh_degree: Option<u32> = None;
     let mut with_depth = false;
+    let mut dynamic = 0usize;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--ply" => ply = args.next().map(PathBuf::from),
             "--camera" => camera = args.next(),
             "--sh-degree" => sh_degree = args.next().and_then(|v| v.parse().ok()),
             "--depth" => with_depth = true,
+            "--dynamic" => {
+                dynamic = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--dynamic N: the number of moving-object gaussian slots")?
+            }
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -83,23 +135,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &camera
             .ok_or("--camera \"PINHOLE W H FX FY CX CY\" (or OPENCV, FULL_OPENCV) is required")?,
     )?;
-    let scene = load_ply(&ply)?;
+    let mut scene = load_ply(&ply)?;
+    let first_dynamic = scene.len();
+    let sh_degree_scene = scene.sh_degree;
+    scene
+        .gaussians
+        .extend((0..dynamic).map(|_| dynamic_gaussian(None, sh_degree_scene)));
     let mut renderer = Renderer::new(GpuContext::new()?, &scene, camera.width, camera.height)?;
     if let Some(d) = sh_degree {
         renderer.set_active_sh_degree(Some(d));
     }
     eprintln!(
-        "gsplat_render_server: {} gaussians, {}x{}",
-        scene.len(),
-        camera.width,
-        camera.height
+        "gsplat_render_server: {} gaussians (+{dynamic} dynamic slots), {}x{}",
+        first_dynamic, camera.width, camera.height
     );
 
-    let stdin = std::io::stdin();
+    let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let mut bytes = Vec::with_capacity((camera.width * camera.height * 3) as usize);
-    for line in stdin.lock().lines() {
-        let line = line?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+        if let Some(count) = line.trim().strip_prefix("dyn") {
+            let k: usize = count.trim().parse().map_err(|e| format!("dyn K: {e}"))?;
+            if k > dynamic {
+                return Err(format!("dyn {k}: only {dynamic} --dynamic slots").into());
+            }
+            let mut raw = vec![0u8; k * DYN_FLOATS * 4];
+            stdin.read_exact(&mut raw)?;
+            let floats: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            let gaussians = (0..dynamic)
+                .map(|i| {
+                    dynamic_gaussian(
+                        (i < k).then(|| &floats[i * DYN_FLOATS..(i + 1) * DYN_FLOATS]),
+                        sh_degree_scene,
+                    )
+                })
+                .collect();
+            let packed = PackedScene::from_scene(&visloc_gsplat_core::gaussian::Scene::new(
+                gaussians,
+                sh_degree_scene,
+            ));
+            renderer
+                .scene
+                .write_range(&renderer.ctx, first_dynamic, &packed);
+            continue;
+        }
         let v: Vec<f32> = line
             .split_whitespace()
             .map(|s| s.parse::<f32>())

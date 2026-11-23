@@ -114,6 +114,36 @@ impl GpuScene {
         self.packed.num_gaussians * 3 * self.packed.sh_coeffs_per_channel
     }
 
+    /// Overwrite gaussians `first..first + packed.num_gaussians` in place,
+    /// e.g. a simulator's moving objects kept in slots at the end of the
+    /// scene. `packed` must have this scene's SH degree.
+    pub fn write_range(&self, ctx: &GpuContext, first: usize, packed: &PackedScene) {
+        assert_eq!(
+            packed.sh_coeffs_per_channel, self.packed.sh_coeffs_per_channel,
+            "write_range: SH degree differs from the scene's"
+        );
+        assert!(
+            first + packed.num_gaussians <= self.packed.num_gaussians,
+            "write_range: past the end of the scene"
+        );
+        let sh_per = 3 * self.packed.sh_coeffs_per_channel;
+        ctx.queue.write_buffer(
+            &self.transforms,
+            (first * crate::packing::TRANSFORM_FLOATS * 4) as u64,
+            bytemuck::cast_slice(&packed.transforms),
+        );
+        ctx.queue.write_buffer(
+            &self.opacity,
+            (first * 4) as u64,
+            bytemuck::cast_slice(&packed.opacity),
+        );
+        ctx.queue.write_buffer(
+            &self.sh,
+            (first * sh_per * 4) as u64,
+            bytemuck::cast_slice(&packed.sh),
+        );
+    }
+
     /// Re-upload the packed arrays (used when the host mutates the scene).
     pub fn reupload(&self, ctx: &GpuContext, packed: &PackedScene) {
         ctx.queue.write_buffer(

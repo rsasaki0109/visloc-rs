@@ -281,7 +281,36 @@ above had no false alarm (the 9 resets all fell in the blackout) and needed
 no spin. In normal driving frames went down to 5 tracked observations,
 briefly. A gap longer than a few seconds still needs someone (or a behavior
 tree) to resend the goal, and the robot stays where it stopped until the
-cameras see again; wheel odometry would let it go on.
+cameras see again.
+
+**Driving on through it, on the wheels.** A wheeled robot does not have to
+stop. With `wheel_odom_topic` (`nav.launch.py wheel_odom:=/wheel_odom`, the
+diff drive's odometry), `visloc_vio_node` still resets the estimator when
+tracking is lost. It no longer goes silent, though: it carries the
+published pose on by the wheel odometry's motion since the last good VIO
+pose (`visloc_ros2::odom_bridge`). Once tracking holds again, it moves the
+new estimator's poses by a yaw and a translation so that they continue from
+where the wheels took the robot. The `odom` frame never jumps, so it
+publishes no `odom_reset`, and `map -> odom` stays as it was. The same
+blackout, with the monitor at `lost_min_observations 10` and
+`lost_max_speed 1.0`:
+
+| 5 s camera blackout in the hallway | goals reached | contacts | `/map_pose` error, RMSE / max | robot during the blackout | drive time |
+| --- | ---: | ---: | --- | --- | ---: |
+| monitor on, outputs stop | 5/5 (goal 2 on the 2nd try) | 0 | 1.5 cm / 4.4 cm | stops | 126 s |
+| monitor on, **wheel odometry through it** | **5/5, all at the first try** | 0 | 1.7 cm / 4.4 cm | **drives on, 1.62 m** | 118 s |
+
+The estimator was reset 9 times in the blackout, as before. The outputs
+followed the wheels at 0.3 m/s the whole way, with 2 cm of error against the
+truth, and VIO took over again 1 s after the cameras came back. Gazebo's
+wheel odometry has no slip. A real robot's drifts more, so how far it can
+go blind depends on its wheels. A few metres on an indoor floor should hold
+within the costmap's inflation.
+
+`wheel_odom_topic` needs the lost-tracking monitor. The wheel odometry's
+child frame (`base_link` here) is placed against the node's output frame by
+/tf_static. It does not work with the online mapper, whose map frame
+follows the VIO's.
 
 The second pair of runs as seen from a camera following the robot (Gazebo,
 rendered for the video only; it sees a plain floor through a visibility
@@ -742,6 +771,194 @@ python3 ros2/visloc-ros2/gs/chase_video.py --splat runs/street/scene.ply \
   --inliers runs/street/sim/inliers.csv --out runs/street/chase
 ffmpeg -framerate 30 -i runs/street/chase/%05d.jpg -pix_fmt yuv420p runs/street/chase.mp4
 ```
+
+### With people walking the street
+
+`gs_sim.py --pedestrians 8` puts eight people on the street
+(`gs/people.py`). They walk the scene's route (its start and goals) back and
+forth, each at their own speed (1.1 m/s ± 20%) and side offset. A person
+waits while the robot is within 1.2 m in front of them, as people do on a
+sidewalk, but does not step out of its way.
+
+- **Camera**: each person is a low-poly figure whose legs and arms swing
+  with the gait. They wear varied clothes. The figure is drawn over the
+  splat by depth, so a person behind a tree or a car is hidden.
+- **Scan**: each person is a 0.25 m circle.
+- **Nav2**: the scan reaches both costmaps and the collision monitor, so
+  Nav2 has to steer round the people.
+- **Recording**: `--record` also writes where they were
+  (`<record>.people.csv`), and `chase_video.py` draws them from it.
+
+Same street, same 1.2 m camera, same tuned settings
+(`sim_args:="--mono --pedestrians 8"`):
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| empty street | 4/4 | 0 | 827 of 850 | 4.7 / 2.2 / 36 cm |
+| eight people | 4/4, all at the first try | 0 | 759 of 800 | 4.2 / 2.4 / 25 cm |
+
+A person was within 2 m of the robot in 148 of the 415 simulated seconds.
+The nearest one came 0.57 m from the robot's centre (they touch at 0.45 m).
+People hiding the buildings cost 4% of the localizations, but no accuracy.
+
+On this 4-core CPU the run shared the machine with a 3DGS job, and Nav2's
+behaviour tree aborted goals until `default_server_timeout` went from 20 ms
+to 200 ms (`gz/nav2_params.yaml`). Its servers had answered too late.
+
+Video: [media/gs_street_pedestrians.mp4](media/gs_street_pedestrians.mp4)
+(map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
+
+**People and cyclists as gaussians.** In the video above, the people are
+meshes drawn over the render by depth. They can also be gaussians,
+rendered with the scene by the same rasterizer, so they blend, blur and
+occlude like everything else and show in the depth. This is now the
+default (`--people-style splat`).
+
+- **Renderer**: `gsplat_render_server --dynamic N` keeps N gaussian slots
+  after the scene. A `dyn K` block before each pose request fills them, and
+  only those slots are rewritten (`GpuScene::write_range`).
+- **People**: `people.py` turns each figure into flat gaussians, one per
+  triangle, with long thin ones split along their length. That is about
+  2,200 gaussians per walker.
+- **Cyclists**: `--cyclists M` adds cyclists (about 5,400 gaussians each):
+  a bicycle with turning wheels and a pedalling rider. They ride at 4 m/s
+  ± 20%, and in the scan they are three circles along the bicycle.
+
+Everyone keeps clear of the robot and of each other.
+
+- **Avoiding**: someone with another person or the robot just ahead steps
+  aside and slows down. Behind someone going the same way, they follow at
+  that one's speed. Facing someone, they stop just before touching.
+- **Hard limit**: no step is taken that would overlap a footprint by more
+  than 2 cm or come within 5 cm of the robot.
+- **No way through**: whoever cannot move for 8 s turns back.
+
+In a first try, people only waited for the robot and walked through each
+other. Four of them stood in a row in front of the robot in a narrow
+street, and Nav2 "failed to make progress" for 350 s.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| 6 walkers + 2 cyclists, gaussians | 4/4, all at the first try | 0 | 814 of 850 | 3.5 / 2.5 / 19 cm |
+
+The nearest person passed 0.80 m from the robot's centre. People came no
+closer than 0.49 m to each other's centres, so shoulders brushed but nobody
+walked through anyone. Video:
+[media/gs_street_people_bikes.mp4](media/gs_street_people_bikes.mp4)
+(map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
+
+### One command from a 360-degree video
+
+`gs/real2sim.py` runs the whole chain on an Insta360 `.insv` file:
+
+```bash
+python3 ros2/visloc-ros2/gs/real2sim.py --insv walk.insv --out runs/walk \
+  [--frames 300] [--imu-frame-period 0.333683] [--camera-height 1.2] [--goals 4] [--nav]
+```
+
+1. Frames.
+2. SfM, in metres from the camera's IMU.
+3. Levelling.
+4. Masks of the blurred faces.
+5. 3DGS.
+6. The simulator scene with goals along the walk.
+7. The localization map rendered at the robot's camera height, and its
+   occupancy grid.
+8. With `--nav`, Nav2 to the goals.
+
+Each step records its time in `timing.json` and is skipped when its output
+exists, so a stopped run resumes. On a second OverMaps360 walk (a temple
+plaza in Bangkok, 300 frames, 121 m), on 4 CPU cores with no GPU, it took:
+
+| Step | Time |
+| --- | ---: |
+| frames | 30 s |
+| SfM (3000 faces, all registered, 161k points) | 38 min |
+| levelling | 6 s |
+| masks | 7 min |
+| 3DGS (7000 steps, 609k Gaussians, eval PSNR 18.3) | 37 min |
+| scene | 2 s |
+| map (1799 keyframes) and occupancy | 23 min |
+
+That is about 1 h 45 min from the video to a simulator with its map.
+
+### Appearance change, and real photos as queries
+
+**In the simulator.** `gs/perturb_replay.py` copies the street replay of
+the 1.2 m camera with every image changed: darker, gamma, contrast, noise,
+blur, "night" (dark, gamma, noise and a little blur), or patches of other
+images over 40% of each image (changed signs, parked cars). Each replay was
+localized with the tuned settings against the map of the unchanged renders.
+The map (`tum_rgbd_save_map`) can also smooth every image
+(`--smoothing-sigma 1.5`) and equalize its local contrast
+(`--local-contrast`, CLAHE). The map's `map.json` records both, and the
+localizers apply them to the queries too.
+
+| Images (858) | Plain | Smoothed σ 1.5 | CLAHE + smoothed |
+| --- | ---: | ---: | ---: |
+| unchanged | 835 | 841 | 843 |
+| gamma 2.5 | 785 | 826 | 842 |
+| noise σ 10 | 218, wrong by metres | 838 | |
+| noise σ 25 | 0 | 621 | 553 |
+| blur σ 2 px | 0 | 829 | |
+| blur σ 3 px | 0 | 0 | 0 |
+| night, half strength | 726 | 835 | |
+| night, three quarters | 0 | 762 | 743 |
+| night, full | 0 | 0 | 0 |
+| 40% patched | 554 | 758 | 787 |
+
+Smoothing makes the corners robust to noise and to mild blur. CLAHE helps
+with gamma and with changed content. A full synthetic night (10–20% of the
+light, with noise) still fails: real cameras raise exposure and gain at
+night, which this test does not model, and real night also brings lamps and
+shadows that it cannot fake.
+
+**With real photos.** `gs/real_map_test.py` builds a map from real photos
+of a `real2sim.py` walk: the horizontal faces of every other frame, with
+depth rendered from the splat at each photo's SfM pose. It then localizes
+images one at a time, with no odometry, against that map:
+
+| Queries | Global search | Prior 10 m + retrieval | the same, smoothed + CLAHE map |
+| --- | ---: | ---: | ---: |
+| the held-out real photos (900) | 184 | 197 | **359**, median error 7 cm |
+| the splat rendered at the same poses (900) | 0 | 0 | 5 |
+| a second walk of the same plaza, 2.4 h later (1800) | 0 | 0 | 0 |
+
+On the held-out photos, the forward and backward faces localize about 40% of
+the time and the side faces about 10%. In this narrow street the side
+views change most between frames, and they blur.
+
+This plaza is a hard case. Its floor is a repeated tile pattern, and the
+buildings that would identify it stand beyond the map's 20 m depth limit.
+The splat (PSNR 18) also puts the depth of the real corners less precisely
+than the Riga street's splat (PSNR 22) does.
+
+**A second place, with structure close by.** Two other walks of the same
+day pass the same temple pavilion 12 minutes apart. The pavilion has
+pillars, railings, chairs and walls within a few metres. The map is built
+from the first walk's first 100 s, and the second walk is cut where it
+passes the same ground (its 80–180 s):
+
+| Queries | Prior 10 m + retrieval | the same, smoothed + CLAHE map |
+| --- | ---: | ---: |
+| the held-out real photos (898) | 286, median 2.4 cm | **524**, median 2.4 cm |
+| the splat rendered at the same poses (898) | 39, median 2.5 cm | **169**, median 2.7 cm |
+| the second walk, 12 min later (1800) | 48 | **163** |
+
+The second walk has its own SfM frame. Its localized camera centres were
+fitted to its SfM centres by a similarity. Every localized image fitted
+(no outliers), at a scale of 0.98. The residuals were 22 cm median and
+within 50 cm for 94%, against 10 cm median for the 48 fixes of the plain
+map. That is the first real cross-session localization here. It localized
+9% of the images, enough to correct wheel odometry every few metres, not to
+run on alone.
+
+Smoothing and CLAHE nearly double the real fixes. They raise the renders
+from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza
+they had not rescued the renders or the second walk, so nearby structure
+matters most. A real robot should still map with its own camera. The
+renders now localize often enough against a real-photo map to keep a
+simulated robot on its course, between fixes, on wheel odometry.
 
 ## The occupancy grid of a visual map
 

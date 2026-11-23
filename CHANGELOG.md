@@ -6,6 +6,35 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`visloc_vio_node` drives on through lost tracking on wheel odometry**
+  (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
+  no longer silences the outputs: the pose follows the wheel odometry until
+  tracking holds again, then the new estimator continues from there. The
+  `odom` frame never jumps, so no `odom_reset` is published. In Gazebo, a
+  5 s camera blackout no longer stops the robot: it reached 5/5 goals at
+  the first try (1.62 m driven blind) in 3 of 4 runs. The fourth run got
+  no goal through, because Nav2's controller never received `map -> odom`.
+  `nav.launch.py wheel_odom:=`.
+- **People in the 3DGS simulator** (`gs_sim.py --pedestrians N`,
+  `gs/people.py`): they walk the route in the camera, drawn over the splat
+  by depth, and in the scan. With eight people on the 360-degree street,
+  Nav2 reached 4/4 goals with no contacts, at 4.2 cm `/map_pose` RMSE.
+  `chase_video.py` draws them. They are gaussians rendered with the scene
+  by default (`gsplat_render_server --dynamic`, `GpuScene::write_range`).
+  `--cyclists` adds bicycles with pedalling riders. Everyone keeps clear of
+  the robot and of each other (no overlap over 2 cm). With 6 walkers and 2
+  cyclists, Nav2 reached 4/4 goals at the first try at 3.5 cm RMSE.
+- **`gs/real2sim.py`**: an Insta360 `.insv` walk to a simulator, its map
+  and, with `--nav`, Nav2 in one resumable command. It took about 1 h 45
+  min on 4 CPU cores for a 121 m walk.
+- **Appearance robustness for maps of rendered images**:
+  `tum_rgbd_save_map --smoothing-sigma` and `--local-contrast` (recorded in
+  `map.json`, so the localizers prepare queries alike).
+  `gs/perturb_replay.py` sweeps darkening, gamma, noise, blur, synthetic
+  night and patches over a replay. Smoothing keeps 838 of 858 images
+  localized under σ 10 noise, where the plain map gets 218 fixes, metres
+  wrong. `gs/real_map_test.py` localizes real held-out photos, splat
+  renders and a second walk against a map of real photos.
 - **Real to sim: a robot simulator made of a 3D Gaussian splat** (docs/navigation.md,
   `ros2/visloc-ros2/gs/`). From public photos (TUM RGB-D's Pioneer hall),
   visloc-rs's SfM (put in metres by a 7-number fit to the motion capture,

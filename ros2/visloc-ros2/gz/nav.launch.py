@@ -16,7 +16,10 @@ nodes (directory of the visloc ROS 2 binaries), calibration (Basalt
 calibration of the rig; default `calibration.json` next to the world),
 config (Basalt VIO config), params_file, log_level (Nav2's), camera_suffix
 (`image` to read through `camera_blackout.py`), lost_min_observations and
-lost_max_speed (`visloc_vio_node`'s lost-tracking monitor; 0 is off).
+lost_max_speed (`visloc_vio_node`'s lost-tracking monitor; 0 is off),
+wheel_odom (e.g. `/wheel_odom`, the diff drive's odometry: with the monitor
+on, the VIO's outputs carry on with it through lost tracking instead of
+stopping).
 """
 
 import os
@@ -39,6 +42,8 @@ def _setup(context):
     cam = get('camera_suffix')
     lost = ['--lost_min_observations', get('lost_min_observations'),
             '--lost_max_speed', get('lost_max_speed')]
+    if get('wheel_odom'):
+        lost += ['--wheel_odom_topic', get('wheel_odom')]
     calibration = get('calibration') or os.path.join(os.path.dirname(world), 'calibration.json')
     return [
         ExecuteProcess(cmd=['gz', 'sim', '-s', '-r', '--headless-rendering', world],
@@ -84,6 +89,8 @@ def generate_launch_description():
                               description="visloc_vio_node's lost-tracking monitor (0: off)"),
         DeclareLaunchArgument('lost_max_speed', default_value='0',
                               description="visloc_vio_node's lost-tracking speed check, m/s (0: off)"),
+        DeclareLaunchArgument('wheel_odom', default_value='',
+                              description="visloc_vio_node's wheel odometry through lost tracking (empty: off)"),
         DeclareLaunchArgument('log_level', default_value='info', description="Nav2's log level"),
         OpaqueFunction(function=_setup),
         IncludeLaunchDescription(
