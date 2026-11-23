@@ -2755,6 +2755,8 @@ on.
 
 ### SLAM Dunk's gyroscope matrix and time-varying calibration
 
+The paper's own numbers and settings, next to these results: [SLAM Dunk and visloc-rs, side by side](lamaria_slam_dunk_comparison.md).
+
 [SLAM Dunk](https://www.alphaxiv.org/abs/2611.slam-dunk.pdf) (Van Meter and
 Paul) estimates a full 3×3 gyroscope response matrix per recording
 (ω ← (I + M) ω, prior 0.2 %). It uses 5 s chunks for the relative stereo
