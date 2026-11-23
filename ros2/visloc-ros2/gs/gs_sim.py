@@ -17,9 +17,11 @@ differential drive driven by `cmd_vel`. It publishes:
   mesh or from a ground-truth scan of the place);
 - `ground_truth` (`nav_msgs/Odometry`, the true pose in the map frame) and
   `collisions` (`std_msgs/Int32`, steps a wall stopped the robot);
-- with `--pedestrians N` (and `--cyclists M`), N people walk (and M ride
-  bicycles along) the scene's route (its start and goals) back and forth
-  (`people.py`). They show in the camera and in the
+- with `--pedestrians N` (and `--cyclists`, `--dog-walkers`, `--strollers`),
+  people walk (ride bicycles, walk dogs, push pushchairs) along the scene's
+  route (its start and goals) back and forth (`people.py`). Walkers now and
+  then stand still a while, and people on foot drift across to the other
+  side. They show in the camera and in the
   scan, so Nav2 has to steer round them, and they wait while the robot is
   just in front of them. In the camera they are gaussians rendered with the
   scene by default (`--people-style splat`, `gsplat_render_server
@@ -140,21 +142,23 @@ class Sim(Node):
         here = os.path.dirname(os.path.abspath(args.scene))
         sp = lambda p: p if os.path.isabs(p) else os.path.join(here, p)  # noqa: E731
         # Splat people are rendered with the scene; mesh people are drawn over it by depth.
-        movers = args.pedestrians + args.cyclists
+        movers = args.pedestrians + args.cyclists + args.dog_walkers + args.strollers
         self.splat_people = movers > 0 and args.people_style == 'splat'
         self.renderer = Renderer(args.server, sp(scene['splat']), cam,
                                  depth=movers > 0 and not self.splat_people,
-                                 dynamic=2500 * args.pedestrians + 6000 * args.cyclists if self.splat_people else 0)
+                                 dynamic=(2500 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
+                                          + 5500 * args.strollers) if self.splat_people else 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
         self.crowd = None
-        if args.pedestrians + args.cyclists > 0:
+        if movers > 0:
             from people import Crowd  # noqa: PLC0415
             route = scene.get('route') or [scene['start']] + scene.get('goals', [])
             if len(route) < 2:
                 raise SystemExit('--pedestrians needs a route: the scene has no goals')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
-                               cyclists=args.cyclists, cyclist_speed=args.cyclist_speed)
+                               cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
+                               dog_walkers=args.dog_walkers, strollers=args.strollers)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
@@ -342,6 +346,8 @@ def main():
                    help='publish mono8 (a third of the bytes; large rgb8 images can stall some DDS stacks)')
     p.add_argument('--pedestrians', type=int, default=0, help='people walking the route (people.py)')
     p.add_argument('--cyclists', type=int, default=0, help='people riding bicycles along the route (people.py)')
+    p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
+    p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
     p.add_argument('--cyclist-speed', dest='cyclist_speed', type=float, default=4.0, help='m/s, each +-20%%')
     p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
                    help='splat: the people are gaussians rendered with the scene; mesh: drawn over it')

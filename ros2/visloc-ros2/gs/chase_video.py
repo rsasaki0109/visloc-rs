@@ -87,10 +87,10 @@ if os.path.exists(PEOPLE_CSV):
     PT = sorted(PEOPLE)
     class _Free:
         def hits(self, x, y, r): return False
-    n_bikes = sum(KIND.values())
-    CROWD = Crowd([scene['start']] + scene.get('goals', []), len(KIND) - n_bikes, _Free(), seed=args.seed,
-                  cyclists=n_bikes)
-    DYN = 2500 * (len(KIND) - n_bikes) + 6000 * n_bikes
+    counts = [sum(1 for k in KIND.values() if k == kind) for kind in range(4)]
+    CROWD = Crowd([scene['start']] + scene.get('goals', []), counts[0], _Free(), seed=args.seed,
+                  cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3])
+    DYN = 2500 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3]
 
 def people_at(t):
     """Put the crowd where gs_sim.py recorded it at time t."""
