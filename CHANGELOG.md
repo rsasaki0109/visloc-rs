@@ -6,6 +6,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Selectable PnP solver for wall-heavy scenes** (`LocalizationConfig::pnp_solver`,
+  `visloc_vision::pnp::PnpMinimalSolver`). The default localization
+  pipeline's RANSAC can now use P3P instead of the 6-point DLT, which is
+  degenerate when the matched landmarks are coplanar (a view of one wall).
+  `PnpMinimalSolver::Dlt` stays the default, so existing results do not
+  change. A built pipeline switches with `set_pnp_solver` /
+  `with_pnp_solver`. Also `--pnp-solver dlt|p3p` in
+  `localize_openloris_map` and `localize_rne_map_sequence`, and
+  `pnp_solver="p3p"` in the Python `localize` / `estimate_pose_pnp_ransac`.
+  On a synthetic 25-point wall, DLT fails and P3P recovers the camera centre
+  to under 0.1 mm. API change: the default pipeline type is now
+  `LocalizationPipeline<_, _, LocalizationRansac>`
+  (`PnPRansac<PnpMinimalSolver>`). Code that names
+  `LocalizationPipeline<_, _, PnPRansac>` and calls `default()`, `new` or
+  `with_candidate_selector` must switch to `LocalizationRansac`.
 - **`visloc_vio_node` drives on through lost tracking on wheel odometry**
   (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
   no longer silences the outputs: the pose follows the wheel odometry until
