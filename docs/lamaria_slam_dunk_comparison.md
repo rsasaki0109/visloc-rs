@@ -67,3 +67,40 @@ but loses on the control points, where the paper gains.
 The next experiment, by that reading: the focal walk on the fisheye model of the raw images (f_x and f_y
 apart, the paper's priors), then the clock offsets per recording, measured with the twelve-sequence
 workflow ([The twelve on Actions](lamaria_batch_ba.md#the-twelve-on-actions)).
+
+## The paper's recipe on the thirteen, as far as visloc-rs has it
+
+The training evaluation ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45155545321), commit
+`a2a26f6`) paired the default chain with an experimental pass that takes the paper's camera and IMU model
+as far as visloc-rs implements it: the factory fisheye model with the fisheye's focal lengths
+(`--ba-fisheye-model`), cam0 fixed and cam1's rotation and translation per 5 s chunk against it, both focal
+lengths per chunk with the paper's walks (1 mrad, 0.5 mm, 0.035 px; `--ba-stereo-reference 0
+--ba-stereo-paper-priors`), and the gyroscope and accelerometer matrices. The temperature terms and the
+rematch run in both. Not in it: the clock offsets per recording, the two accelerometers fused, f_x and f_y
+apart, the paper's bias model and robust passes.
+
+| Recording | Default | Paper's model | Change | Paper, both additions |
+|---|---:|---:|---:|---|
+| R_11_5cp | 87.90 | 86.00 | −1.90 | gains |
+| R_12_10cp | 63.74 | 57.23 | −6.51 | gains |
+| R_13_15cp | 78.10 | 75.59 | −2.51 | gains |
+| sequence_1_19 | 85.34 | 83.93 | −1.42 | gains |
+| sequence_1_20 | 86.38 | 81.47 | **−4.90** | **−4.8** |
+| sequence_2_11 | 88.47 | 84.21 | −4.26 | gains |
+| sequence_2_12 | 51.02 | 61.33 | +10.31 | gains |
+| sequence_3_17 | 80.38 | 73.93 | −6.45 | gains |
+| sequence_3_18 | 57.78 | 53.94 | −3.84 | gains |
+| sequence_4_10 | 68.18 | 67.66 | −0.52 | gains |
+| sequence_4_11 | 76.05 | 75.98 | −0.07 | gains |
+| sequence_5_11 | 66.10 | 68.04 | +1.94 | gains |
+| sequence_5_12 | 5.62 | 5.76 | +0.15 | unsolved (7 → 6) |
+| Mean of thirteen | 68.85 | 67.31 | −1.54 | 69.1 → 82.4 |
+
+Without sequence_2_12 (±5 between runs) the twelve lose 2.52 and two gain: not kept. The paper's one loss,
+sequence_1_20 (−4.8), comes out the same here (−4.90), but where the paper gains on the other eleven, this
+pass loses on nine of them, most on R_12_10cp and sequence_3_17. The fisheye model therefore does not
+explain the difference by itself. What remains between the two is the clock offsets per recording (the paper
+loses 2.3 CP without them), the fused accelerometers, f_x and f_y apart, the bias walk per 5 s chunk around the
+temperature trend, the robust passes, the keyframe spacing and the front end. The next measurement is the
+fisheye model alone, without the time-varying calibration, to see whether the camera model or the camera
+path costs these points.
