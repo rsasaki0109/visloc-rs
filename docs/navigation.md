@@ -808,6 +808,45 @@ to 200 ms (`gz/nav2_params.yaml`). Its servers had answered too late.
 Video: [media/gs_street_pedestrians.mp4](media/gs_street_pedestrians.mp4)
 (map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
 
+**People and cyclists as gaussians.** In the video above, the people are
+meshes drawn over the render by depth. They can also be gaussians,
+rendered with the scene by the same rasterizer, so they blend, blur and
+occlude like everything else and show in the depth. This is now the
+default (`--people-style splat`).
+
+- **Renderer**: `gsplat_render_server --dynamic N` keeps N gaussian slots
+  after the scene. A `dyn K` block before each pose request fills them, and
+  only those slots are rewritten (`GpuScene::write_range`).
+- **People**: `people.py` turns each figure into flat gaussians, one per
+  triangle, with long thin ones split along their length. That is about
+  2,200 gaussians per walker.
+- **Cyclists**: `--cyclists M` adds cyclists (about 5,400 gaussians each):
+  a bicycle with turning wheels and a pedalling rider. They ride at 4 m/s
+  ± 20%, and in the scan they are three circles along the bicycle.
+
+Everyone keeps clear of the robot and of each other.
+
+- **Avoiding**: someone with another person or the robot just ahead steps
+  aside and slows down. Behind someone going the same way, they follow at
+  that one's speed. Facing someone, they stop just before touching.
+- **Hard limit**: no step is taken that would overlap a footprint by more
+  than 2 cm or come within 5 cm of the robot.
+- **No way through**: whoever cannot move for 8 s turns back.
+
+In a first try, people only waited for the robot and walked through each
+other. Four of them stood in a row in front of the robot in a narrow
+street, and Nav2 "failed to make progress" for 350 s.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| 6 walkers + 2 cyclists, gaussians | 4/4, all at the first try | 0 | 814 of 850 | 3.5 / 2.5 / 19 cm |
+
+The nearest person passed 0.80 m from the robot's centre. People came no
+closer than 0.49 m to each other's centres, so shoulders brushed but nobody
+walked through anyone. Video:
+[media/gs_street_people_bikes.mp4](media/gs_street_people_bikes.mp4)
+(map data: OverMaps360 (OverTheReality), CC BY-NC 4.0).
+
 ### One command from a 360-degree video
 
 `gs/real2sim.py` runs the whole chain on an Insta360 `.insv` file:

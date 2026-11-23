@@ -19,7 +19,11 @@ All notable changes to `visloc-rs` will be documented here.
   `gs/people.py`): they walk the route in the camera, drawn over the splat
   by depth, and in the scan. With eight people on the 360-degree street,
   Nav2 reached 4/4 goals with no contacts, at 4.2 cm `/map_pose` RMSE.
-  `chase_video.py` draws them.
+  `chase_video.py` draws them. They are gaussians rendered with the scene
+  by default (`gsplat_render_server --dynamic`, `GpuScene::write_range`).
+  `--cyclists` adds bicycles with pedalling riders. Everyone keeps clear of
+  the robot and of each other (no overlap over 2 cm). With 6 walkers and 2
+  cyclists, Nav2 reached 4/4 goals at the first try at 3.5 cm RMSE.
 - **`gs/real2sim.py`**: an Insta360 `.insv` walk to a simulator, its map
   and, with `--nav`, Nav2 in one resumable command. It took about 1 h 45
   min on 4 CPU cores for a 121 m walk.
