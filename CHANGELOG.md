@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Faster search of dense maps** (`basalt_euroc_localize_demo`):
+  `--fast-radius` (the radius search through the packed index;
+  `BinaryLandmarkIndex::landmarks_within`, `match_among_threaded`),
+  `--prior-hold N`, `--threads N` and `--no-global-with-prior`. On a
+  681k-landmark map, 300 images of a second walk took 150 s instead of
+  564 s, with 169 of the 175 fixes kept. A failed image no longer reports
+  the previous image's pose.
+- `scripts/openloris_to_tum_rgbd.py`: OpenLORIS-Scene's D435i colour and
+  aligned depth as a TUM RGB-D sequence with motion-capture camera poses.
+  A map of office1-1 localizes office1-6 (2.8 days later, furniture moved)
+  63% of the time at 2.4 cm median.
+
 - **Selectable PnP solver for wall-heavy scenes** (`LocalizationConfig::pnp_solver`,
   `visloc_vision::pnp::PnpMinimalSolver`). The default localization
   pipeline's RANSAC can now use P3P instead of the 6-point DLT, which is
@@ -39,6 +51,8 @@ All notable changes to `visloc-rs` will be documented here.
   `--cyclists` adds bicycles with pedalling riders. Everyone keeps clear of
   the robot and of each other (no overlap over 2 cm). With 6 walkers and 2
   cyclists, Nav2 reached 4/4 goals at the first try at 3.5 cm RMSE.
+  `--dog-walkers`, `--strollers` and `--cars` (on a road estimated from
+  the splat's grey ground, or given with `--road FILE`) add more traffic.
 - **`gs/real2sim.py`**: an Insta360 `.insv` walk to a simulator, its map
   and, with `--nav`, Nav2 in one resumable command. It took about 1 h 45
   min on 4 CPU cores for a 121 m walk.
