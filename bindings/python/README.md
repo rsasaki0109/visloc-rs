@@ -22,7 +22,17 @@ Conventions match the Rust library and COLMAP: a camera pose is the
 `(w, x, y, z)` unless `scalar_first=False`, and pixel coordinates follow the
 camera model's principal point.
 
-## Build and install
+## Install
+
+```sh
+pip install visloc
+```
+
+Prebuilt wheels on [PyPI](https://pypi.org/project/visloc/) cover CPython
+3.10–3.14 on Linux (x86_64, aarch64 manylinux), Windows x64 and macOS arm64.
+Other platforms build from the sdist, which needs a Rust toolchain.
+
+## Build from source
 
 Requirements: a Rust toolchain (the repository pins it in `rust-toolchain.toml`),
 Python >= 3.9, and NumPy.
