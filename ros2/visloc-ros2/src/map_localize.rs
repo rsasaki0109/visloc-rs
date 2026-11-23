@@ -76,6 +76,9 @@ pub struct MapLocalizeOptions {
     /// measurement so far used; Lambda Twist is the more accurate one when
     /// most landmarks in view lie on walls (see `P3PSolver`).
     pub p3p_solver: P3PSolver,
+    /// Rounds of re-collecting the inliers of the refined pose and refining
+    /// again (`PnPRansac::inlier_refits`); 0 refines once.
+    pub inlier_refits: usize,
     pub reprojection_px: f64,
     /// Once the odometry has a map pose: search radius around each landmark's predicted
     /// projection; `None` always matches map-wide.
@@ -129,6 +132,7 @@ impl Default for MapLocalizeOptions {
             weak_min_inliers: 15,
             ransac_iterations: 1000,
             p3p_solver: P3PSolver::Grunert,
+            inlier_refits: 0,
             reprojection_px: 3.0,
             projection_radius_px: Some(20.0),
             projection_fresh_s: 5.0,
@@ -394,6 +398,7 @@ impl MapLocalizer {
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
             confidence: Some(0.999),
+            inlier_refits: options.inlier_refits,
         };
         // The pipeline only estimates and gates poses; matching goes through
         // the packed index with the same gates.

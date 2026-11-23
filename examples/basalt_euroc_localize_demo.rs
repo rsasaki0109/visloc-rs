@@ -143,6 +143,8 @@ struct Args {
     ransac_iterations: usize,
     /// P3P solver inside RANSAC; Lambda Twist suits views of walls.
     p3p_solver: P3PSolver,
+    /// `PnPRansac::inlier_refits`.
+    inlier_refits: usize,
     prior_radius_m: Option<f64>,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
@@ -195,7 +197,7 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--p3p-solver grunert|lambda-twist] \
+         [--p3p-solver grunert|lambda-twist] [--inlier-refits N] \
          [--prior-radius-m M] [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
@@ -234,6 +236,7 @@ impl Args {
             reprojection_px: 3.0,
             ransac_iterations: 1000,
             p3p_solver: P3PSolver::Grunert,
+            inlier_refits: 0,
             prior_radius_m: None,
             duplicate_radius_m: None,
             extra_descriptors: 0,
@@ -288,6 +291,7 @@ impl Args {
                 "--min-inliers" => args.min_inliers = number(&option, value()?)?,
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
+                "--inlier-refits" => args.inlier_refits = number(&option, value()?)?,
                 "--p3p-solver" => {
                     args.p3p_solver = value()?
                         .parse()
@@ -431,6 +435,7 @@ fn pipeline(args: &Args) -> Pipeline {
         early_stop_min_iterations: 0,
         early_stop_inlier_ratio: None,
         confidence: Some(0.999),
+        inlier_refits: args.inlier_refits,
     };
     let matcher = HammingMatcher {
         max_distance: args.max_hamming,

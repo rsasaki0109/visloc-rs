@@ -479,6 +479,7 @@ pub(super) fn grow_from_seed_with_sequence_overrides(
                 seed: 7,
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
+                inlier_refits: 0,
             }
             .estimate(&corrs, &cam),
             PnpSolver::Dlt => PnPRansac {
@@ -953,6 +954,7 @@ pub(crate) fn post_refinement_registration_pass(
                 seed: 7,
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
+                inlier_refits: 0,
             }
             .estimate(&corrs, camera),
             PnpSolver::Dlt => PnPRansac {

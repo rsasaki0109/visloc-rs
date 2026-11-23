@@ -22,9 +22,21 @@ All notable changes to `visloc-rs` will be documented here.
   `visloc_map_localize_node`, `--p3p-solver` on
   `basalt_euroc_localize_demo` and `nav_sim_drive`, and
   `SimRobotConfig::p3p_solver`. In `nav_sim_drive --laps 2` (the
-  apartment) both reach 34/34 waypoints: RMSE / max 2.4 / 17 cm with
-  Grunert, 2.9 / 10.5 cm with Lambda Twist, and 616 vs 623 fixes. With
-  0.7 px pixel noise the solver's own error is lost in the noise there.
+  apartment) both reach 34/34 waypoints at 2.4-3.1 cm RMSE, but the drive
+  is not deterministic: the same settings twice gave 2.3 and 3.0 cm, so no
+  difference between the solvers shows there.
+- **`PnPRansac::inlier_refits`**: after the final refinement, re-collect
+  the refined pose's inliers and refine again (until the set stops
+  changing, a round stops improving the score, or N rounds). The RANSAC
+  winner comes from a three-point sample, and the outliers that happen to
+  sit within the threshold of that noisy pose were fitted too. On
+  synthetic scenes with 1 px noise and 30% outliers (`inlier_refit_scan`,
+  an ignored test), 3 rounds cut the camera-centre error by about 20% at
+  the median and 25% at p90, on walls and on 3D scenes alike, which brings
+  it to that of a refinement from the true pose on the true inliers. 0,
+  the default, keeps the single refinement, so earlier results do not
+  change. `inlier_refits` on `visloc_map_localize_node`, `--inlier-refits`
+  on `basalt_euroc_localize_demo` and `nav_sim_drive`.
 - **`visloc_vio_node` drives on through lost tracking on wheel odometry**
   (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
   no longer silences the outputs: the pose follows the wheel odometry until

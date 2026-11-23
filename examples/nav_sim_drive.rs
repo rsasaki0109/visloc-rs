@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! cargo run --release --example nav_sim_drive -- [--laps 2] [--out runs/nav_sim/drive] \
-//!     [--p3p-solver grunert|lambda-twist]
+//!     [--p3p-solver grunert|lambda-twist] [--inlier-refits N]
 //! ```
 //!
 //! Prints per mode: waypoints reached (true pose within 0.3 m when the robot
@@ -70,7 +70,12 @@ struct ModeResult {
     latency_ms: f64,
 }
 
-fn drive(mode: LocalizationMode, laps: usize, p3p_solver: P3PSolver) -> ModeResult {
+fn drive(
+    mode: LocalizationMode,
+    laps: usize,
+    p3p_solver: P3PSolver,
+    inlier_refits: usize,
+) -> ModeResult {
     let world = World::apartment(1);
     let rig = CameraRig::forward(0.5);
     let run = build_map(
@@ -84,6 +89,7 @@ fn drive(mode: LocalizationMode, laps: usize, p3p_solver: P3PSolver) -> ModeResu
     let config = SimRobotConfig {
         mode,
         p3p_solver,
+        inlier_refits,
         ..SimRobotConfig::default()
     };
     let mut robot = SimRobot::new(world, rig, run.map, descriptors, start, config);
@@ -144,12 +150,18 @@ fn run() -> Result<(), String> {
     let mut laps = 1;
     let mut out: Option<PathBuf> = None;
     let mut p3p_solver = P3PSolver::default();
+    let mut inlier_refits = 0;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--laps" => laps = value.parse().map_err(|_| format!("bad --laps {value}"))?,
             "--out" => out = Some(PathBuf::from(value)),
+            "--inlier-refits" => {
+                inlier_refits = value
+                    .parse()
+                    .map_err(|_| format!("bad --inlier-refits {value}"))?;
+            }
             "--p3p-solver" => {
                 p3p_solver = value
                     .parse()
@@ -158,7 +170,7 @@ fn run() -> Result<(), String> {
             other => {
                 return Err(format!(
                     "unknown argument {other}; usage: [--laps N] [--out DIR] \
-                     [--p3p-solver grunert|lambda-twist]"
+                     [--p3p-solver grunert|lambda-twist] [--inlier-refits N]"
                 ))
             }
         }
@@ -179,7 +191,7 @@ fn run() -> Result<(), String> {
         ("odometry", LocalizationMode::Odometry),
         ("visloc", LocalizationMode::Visloc),
     ] {
-        let r = drive(mode, laps, p3p_solver);
+        let r = drive(mode, laps, p3p_solver, inlier_refits);
         let fixes = if mode == LocalizationMode::Visloc {
             format!("{}/{}", r.accepted, r.attempts)
         } else {

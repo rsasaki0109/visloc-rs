@@ -84,6 +84,8 @@ pub struct SimRobotConfig {
     /// The P3P solver inside RANSAC (Lambda Twist is the more accurate one
     /// on views of walls; Grunert is the historical default).
     pub p3p_solver: P3PSolver,
+    /// `PnPRansac::inlier_refits`.
+    pub inlier_refits: usize,
     pub correction: OdomCorrectionConfig,
     /// In [`LocalizationMode::Visloc`], turn in place (ignoring commands)
     /// until the first `map -> odom`: a robot that wakes up facing a bare
@@ -105,6 +107,7 @@ impl Default for SimRobotConfig {
             weak_fix_inliers: 8,
             search_radius_m: 8.0,
             p3p_solver: P3PSolver::Grunert,
+            inlier_refits: 0,
             correction: OdomCorrectionConfig {
                 // Wheel odometry drifts faster in heading than a VIO.
                 gate_yaw_deg: 5.0,
@@ -208,6 +211,7 @@ impl SimRobot {
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
             confidence: Some(0.999),
+            inlier_refits: config.inlier_refits,
         };
         let pipeline = LocalizationPipeline::with_pose_estimator(
             BruteForceMatcher {

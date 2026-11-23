@@ -469,6 +469,7 @@ measurements behind the defaults.
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
 | `p3p_solver` | `grunert` | the P3P solver in RANSAC: `grunert`, or `lambda-twist` (Persson & Nordberg), which is more accurate when most landmarks in view are on walls (a room, a corridor, a building front) |
+| `inlier_refits` | `0` | after RANSAC, re-collect the refined pose's inliers and refine again, up to this many times; the RANSAC winner's inliers can hold outliers that sit within the threshold of its three-point pose (in simulation, 3 rounds cut the position error by about 20%) |
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
 | `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the correction's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
