@@ -878,6 +878,30 @@ spread at that corner, not the cars. One run, though. The nearest car came
 1.9 m from the robot. Video:
 [media/gs_street_cars.mp4](media/gs_street_cars.mp4).
 
+**Finding the broken stretch, and a crossing.** The estimate now drops
+stretches where the splat is blurred (`people.check_road`). From three
+points along each stretch, it renders the view towards the road with the
+robot's camera. It keeps the stretch only when the lower half of those
+views is sharp: its median Laplacian variance must reach 40% of the
+sharpest stretch's. On this street the stretches scored 12, 12 and 2, so
+the broken last 40 m now goes by itself, as it had been removed by hand.
+
+`--crossing` adds a zebra crossing in the middle of the road's stretch,
+with a traffic light. The stripes are flat gaussians. The light runs green
+15 s, amber 3 s, red 12 s. Cars wait at the line unless it is green.
+Walkers who reach the crossing on red mostly cross, wait a few seconds on
+the far side, and come back on the next red. Offline, over 600 s, five
+walkers crossed, cars stopped on every red, and no footprints overlapped.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| everything, the road estimated, a crossing | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
+
+That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. The
+corner before goal 3 gave no trouble this time, which also points to the
+run-to-run spread there. Video:
+[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
 walked through anyone. Video:
