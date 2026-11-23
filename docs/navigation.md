@@ -849,6 +849,35 @@ for 8–20 s (a chat, a phone), and people on foot now and then drift across
 to the other side. Video:
 [media/gs_street_busy.mp4](media/gs_street_busy.mp4).
 
+**Cars.** `--cars N` drives cars both ways along a road beside the route,
+keeping right.
+
+- **Finding the road**: the splat has no idea where the road is, so
+  `people.estimate_road` looks, per route segment, for the band of grey
+  ground near ground height beside the route that is densest.
+- **This street**: it found the road 10.5 m and 7.5 m to the left of the
+  middle stretches. Along the last 40 m it found a band too, but rendering
+  there showed the splat itself broken up, not a road. So that stretch
+  was set to no road by hand in a `--road FILE`, the format the estimate
+  is logged in.
+- **Driving**: the cars drive the longest stretch of road and U-turn at
+  its ends, moving across to the other lane at 1 m/s.
+- **Lanes**: the lanes are polylines mitred at the route's corners, so no
+  car jumps.
+- **Traffic**: cars never swerve; they follow, or stop for, whoever is in
+  their lane.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| + 3 cars | 4/4, all at the first try | 0 | 812 of 850 | 9.4 / 2.2 / 55 cm |
+
+The error exceeded 20 cm for 12 s of the 424 s, at the corner before goal
+3. There a run of fixes was rejected, then a reset. No car or person was
+within 12 m in front of the robot then, so it is localization's own
+spread at that corner, not the cars. One run, though. The nearest car came
+1.9 m from the robot. Video:
+[media/gs_street_cars.mp4](media/gs_street_cars.mp4).
+
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
 walked through anyone. Video:
