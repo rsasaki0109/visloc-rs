@@ -11,7 +11,8 @@ map's `occupancy.yaml`, and Nav2's navigation servers (the Gazebo setup's
 `nav2_params.yaml`). No AMCL: the robot's localization is visloc's.
 
 Arguments: scene, map, nodes, params_file, record (CSV of the true and
-odometry poses), rtf (largest real-time factor), log_level, sim_args (extra
+odometry poses), occupancy (Nav2's map yaml instead of the map's
+`occupancy.yaml`, e.g. `lane_map.py`'s, which keeps the robot to the walk), rtf (largest real-time factor), log_level, sim_args (extra
 `gs_sim.py` arguments, e.g. `--mono`), and
 localize_args (extra `visloc_map_localize_node` arguments, space-separated).
 """
@@ -44,7 +45,7 @@ def _setup(context):
                             '--publish_map_cloud', 'false', *get('localize_args').split()],
                        output='screen', name='visloc_map_localize_node'),
         Node(package='nav2_map_server', executable='map_server', name='map_server', output='log',
-             parameters=[{'yaml_filename': os.path.join(get('map'), 'occupancy.yaml')}, SIM]),
+             parameters=[{'yaml_filename': get('occupancy') or os.path.join(get('map'), 'occupancy.yaml')}, SIM]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
              name='lifecycle_manager_map', output='log',
              parameters=[{'autostart': True, 'node_names': ['map_server']}, SIM]),
@@ -61,6 +62,9 @@ def generate_launch_description():
                                                                   'target', 'release')),
         DeclareLaunchArgument('params_file', default_value=os.path.join(HERE, '..', 'gz', 'nav2_params.yaml')),
         DeclareLaunchArgument('record', default_value=''),
+        DeclareLaunchArgument('occupancy', default_value='',
+                              description="Nav2's map yaml (default: the map's occupancy.yaml; lane_map.py's "
+                                          'keeps the robot to the walk)'),
         DeclareLaunchArgument('rtf', default_value='1.0'),
         DeclareLaunchArgument('localize_args', default_value=''),
         DeclareLaunchArgument('sim_args', default_value='', description='extra gs_sim.py arguments'),

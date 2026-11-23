@@ -20,7 +20,9 @@ directory):
    `--camera-height` over the ground, start and goals along the walk.
 6. `map/`: the 6 horizontal faces of every frame rendered at the robot's
    camera height (`render_tum_seq.py`), `tum_rgbd_save_map` on them and
-   `visual_map_to_occupancy`.
+   `visual_map_to_occupancy`; `lane_map.py` then writes Nav2's map free only
+   within `--lane-half-width` (1 m) of the walk, so the robot keeps to the
+   pavement the video was walked on.
 7. With `--nav`: `gs_nav.launch.py` and `nav_goals.py` (the tuned
    localization settings, `--dump_inliers`), results in `sim/nav.json`.
    `--pedestrians`, `--cyclists`, `--dog-walkers` and `--strollers` put
@@ -116,6 +118,9 @@ def main():
     p.add_argument('--gpu', action='store_true',
                    help="run SfM's matching on the GPU (wgpu) too; 3DGS training uses a GPU whenever wgpu finds one")
     p.add_argument('--nav', action='store_true', help='also drive the goals with Nav2')
+    p.add_argument('--lane-half-width', dest='lane_half_width', type=float, default=1.0,
+                   help="Nav2's map is free only this far either side of the walk (lane_map.py), so the robot "
+                        'keeps to the pavement; 0: the whole occupancy map')
     p.add_argument('--pedestrians', type=int, default=0, help='with --nav: people walking the street')
     p.add_argument('--cyclists', type=int, default=0, help='with --nav: people riding bicycles')
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='with --nav: people with a dog')
@@ -237,6 +242,9 @@ def main():
              '--max-hamming', 70, '--keep-world'], log=os.path.join(out, 'map.log'))
         run([os.path.join(EX, 'visual_map_to_occupancy'), '--map-dir', mapd, '--camera-height', args.camera_height,
              '--max-range', 20, '--min-height', 0.3, '--out', os.path.join(mapd, 'occupancy')])
+        if args.lane_half_width > 0:            # keep the robot to the pavement the video was walked on
+            run([sys.executable, os.path.join(HERE, 'lane_map.py'), '--occupancy', os.path.join(mapd, 'occupancy.yaml'),
+                 '--walk', traj, '--out', os.path.join(mapd, 'occupancy_lane'), '--half-width', args.lane_half_width])
     step('map', build_map)
 
     if args.nav:
@@ -245,6 +253,8 @@ def main():
             json.dump({'x': 0.0, 'y': 0.0, 'yaw': 0.0}, open(ident, 'w'))
             ros2 = os.path.join(REPO, 'ros2', 'visloc-ros2')
             loc = ' '.join(TUNED + ['--dump_inliers', os.path.join(sim, 'inliers.csv')])
+            lane = os.path.join(mapd, 'occupancy_lane.yaml')
+            occ = f'occupancy:={lane} ' if args.lane_half_width > 0 and os.path.exists(lane) else ''
             sim_args = ' '.join(['--mono', '--pedestrians', str(args.pedestrians), '--cyclists', str(args.cyclists),
                                  '--dog-walkers', str(args.dog_walkers), '--strollers', str(args.strollers)])
             # only this scene's processes (other splats may be rendering on the machine)
@@ -254,7 +264,7 @@ def main():
 source /opt/ros/jazzy/setup.bash
 export RCUTILS_COLORIZED_OUTPUT=0
 for attempt in 1 2 3; do
-  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} record:={sim}/nav.sim.csv \\
+  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}record:={sim}/nav.sim.csv \\
     "sim_args:={sim_args}" "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
   LP=$!; ok=0
   for t in $(seq 1 60); do sleep 5; grep -q "lifecycle_manager_navigation\\]: .*Managed nodes are active" {sim}/nav.launch.log && {{ ok=1; break; }}; done
