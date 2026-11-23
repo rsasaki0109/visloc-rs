@@ -164,13 +164,16 @@ class Sim(Node):
             road_offset = args.road_offset
             if args.road:
                 road_offset = [tuple(r) for r in json.load(open(args.road))]
-            if args.cars and road_offset is None:
+            road_lines = None
+            if args.cars:
                 from make_gs_scene import read_ply  # noqa: PLC0415
-                from people import estimate_road  # noqa: PLC0415
                 ply = read_ply(sp(scene['splat']))
                 xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
+                opacity = 1 / (1 + np.exp(-ply['opacity']))
+            if args.cars and road_offset is None:
+                from people import estimate_road  # noqa: PLC0415
                 rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
-                road_offset = estimate_road(xyz, rgb, 1 / (1 + np.exp(-ply['opacity'])), route, self.ground_z)
+                road_offset = estimate_road(xyz, rgb, opacity, route, self.ground_z)
                 from people import check_road  # noqa: PLC0415
 
                 def grey(R_cw, t_cw):
@@ -184,10 +187,17 @@ class Sim(Node):
                     raise SystemExit('--cars: no road found beside the route; pass --road-offset')
                 self.get_logger().info('cars: road beside the route (estimated, s from-to: offset m): ' + ', '.join(
                     f'{a:.0f}-{b:.0f}: {"-" if o is None else f"{o:+.1f}"}' for a, b, o in road_offset))
+            if args.cars and not np.isscalar(road_offset) and not args.no_road_fit:
+                from people import fit_road_lines  # noqa: PLC0415
+                road_lines = fit_road_lines(xyz, opacity, route, self.ground_z, road_offset)
+                for s0, s1, px, py, ux, uy in road_lines:
+                    self.get_logger().info(f'cars: road centre line {s0:.0f}-{s1:.0f}: through ({px:.1f}, {py:.1f}), '
+                                           f'heading {math.degrees(math.atan2(uy, ux)):.1f} deg')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
                                cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
+                               road_lines=road_lines,
                                crossing=args.crossing)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.radius = scene.get('robot_radius', 0.2)
@@ -221,6 +231,7 @@ class Sim(Node):
         if self.people:
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
             json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
+                       'road_lines': getattr(self.crowd, 'road_lines', None),
                        'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 
@@ -386,6 +397,9 @@ def main():
     p.add_argument('--road', default='',
                    help='JSON [[s_start, s_end, offset or null], ...]: the road beside the route per stretch '
                         '(as estimated and logged, edited where the splat misleads the estimate)')
+    p.add_argument('--no-road-fit', dest='no_road_fit', action='store_true',
+                   help='lanes at the offsets from the route instead of along the road centre line fitted '
+                        'to the splat (people.fit_road_lines)')
     p.add_argument('--crossing', action='store_true',
                    help='with --cars: a zebra crossing and a traffic light in the middle of the road')
     p.add_argument('--car-speed', dest='car_speed', type=float, default=6.0, help='m/s, each +-20%%')

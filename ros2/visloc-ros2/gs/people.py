@@ -366,6 +366,90 @@ def estimate_road(xyz, rgb, opacity, route, ground_z, search=(2.5, 12.0), min_sc
     return out
 
 
+def fit_road_lines(xyz, opacity, route, ground_z, road, max_turn_deg=30.0):
+    """The road's own straight centre line per run of road stretches (from estimate_road):
+    the route need not run parallel to it. The direction is the one along which the ground
+    gaussians beside the stretch (kerbs, building lines, markings) line up best (the
+    sharpest histogram across it), within max_turn_deg of the route's chord. Across that
+    direction, the pavements on either side are dense with ground gaussians and the
+    asphalt between them is sparse (it has little texture): the line runs down the middle
+    of the sparse band nearest the centre the stretches' offsets give (that centre, if no
+    band 4 to 14 m wide is found). Returns [[s0, s1, px, py, ux, uy]]."""
+    route = np.asarray(route, float)[:, :2]
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+
+    def at(s):
+        k = int(np.clip(np.searchsorted(cum, s) - 1, 0, len(route) - 2))
+        t = (s - cum[k]) / max(cum[k + 1] - cum[k], 1e-9)
+        d = route[k + 1] - route[k]
+        return route[k] + t * d, d / max(np.linalg.norm(d), 1e-9)
+
+    runs, cur = [], None
+    for a, b, o in road:
+        if o is None:
+            cur = None
+            continue
+        if cur is None:
+            cur = [a, b, []]
+            runs.append(cur)
+        cur[1] = b
+        cur[2].append((a, b, o))
+    gz = np.array([ground_z(x, y) for x, y in xyz[:, :2]])
+    P = xyz[(np.abs(xyz[:, 2] - gz) < 0.3) & (opacity > 0.2), :2]
+    out = []
+    for s0, s1, parts in runs:
+        A, _ = at(s0)
+        B, _ = at(s1)
+        L = float(np.linalg.norm(B - A))
+        chord = (B - A) / max(L, 1e-9)
+        side = 1.0 if np.mean([o for _, _, o in parts]) > 0 else -1.0
+        n0 = np.array([-chord[1], chord[0]])
+        rel = P - A
+        Q = P[(rel @ chord > -2) & (rel @ chord < L + 2) & (side * (rel @ n0) > -6) & (side * (rel @ n0) < 18)]
+        base = math.atan2(chord[1], chord[0])
+        best = (-1.0, base)
+        if len(Q) > 200:
+            for deg in np.arange(-max_turn_deg, max_turn_deg + 0.01, 0.5):
+                th = base + math.radians(deg)
+                h = np.histogram(Q @ np.array([-math.sin(th), math.cos(th)]), bins=np.arange(-60, 60, 0.2))[0]
+                score = float((h.astype(float) ** 2).sum())
+                if score > best[0]:
+                    best = (score, th)
+        u = np.array([math.cos(best[1]), math.sin(best[1])])
+        # Through the centre points the offsets give, weighted by stretch length.
+        cs = []
+        for a, b, o in parts:
+            p, d = at((a + b) / 2)
+            cs.append((p + o * np.array([-d[1], d[0]]), b - a))
+        c = sum(w * q for q, w in cs) / sum(w for _, w in cs)
+        nl = np.array([-u[1], u[0]])
+        al = (P - A) @ u
+        Lu = float((B - A) @ u)
+        lat = side * ((P[(al > 0) & (al < Lu)] - A) @ nl)
+        edges = np.arange(-4.0, 20.01, 0.5)
+        h = np.histogram(lat, edges)[0].astype(float)
+        mids = (edges[:-1] + edges[1:]) / 2
+        sparse = h < 0.1 * np.percentile(h, 90)          # a tenth of the pavement's density
+        prior = side * float((c - A) @ nl)
+        bands, k = [], 0
+        while k < len(h):
+            if sparse[k] and mids[k] > 0.5:
+                j = k
+                while j + 1 < len(h) and sparse[j + 1]:
+                    j += 1
+                lo_, hi_ = edges[k], edges[j + 1]
+                if 4.0 <= hi_ - lo_ <= 14.0 and hi_ < edges[-1]:
+                    bands.append((lo_, hi_))
+                k = j + 1
+            else:
+                k += 1
+        if bands:
+            lo_, hi_ = min(bands, key=lambda b: 0.0 if b[0] <= prior <= b[1] else min(abs(prior - b[0]), abs(prior - b[1])))
+            c = c + side * ((lo_ + hi_) / 2 - prior) * nl
+        out.append([float(s0), float(s1), float(c[0]), float(c[1]), float(u[0]), float(u[1])])
+    return out
+
+
 def check_road(road, route, ground_z, render, min_sharpness=4.0, relative=0.4, samples=3):
     """Drops the stretches of an estimated road where the splat is broken up: from points
     along each stretch, it looks towards the road (camera 1.6 m up) with render(R_cw, t_cw)
@@ -616,7 +700,7 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 
 class Crowd:
     def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
-                 dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0,
+                 dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0, road_lines=None,
                  crossing=False):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
@@ -683,10 +767,16 @@ class Crowd:
             dirs = np.diff(self.path, axis=0)
             dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12
             normals = np.stack([-dirs[:, 1], dirs[:, 0]], 1)
+            self.road_lines = [list(map(float, r)) for r in road_lines] if road_lines else None
             self.lanes = {}
             for d_ in (1.0, -1.0):
                 verts = []
                 for k in range(len(self.path)):
+                    if self.road_lines:                  # on the road's own straight centre line
+                        q, u = self._road_line(self.cum[k])
+                        foot = q + ((self.path[k] - q) @ u) * u
+                        verts.append(foot - LANE_HALF * d_ * np.array([-u[1], u[0]]))
+                        continue
                     na = normals[max(k - 1, 0)]
                     nb = normals[min(k, len(normals) - 1)]
                     oa = seg_off[max(k - 1, 0)] - LANE_HALF * d_
@@ -759,18 +849,22 @@ class Crowd:
             p, d = p[0], d[0]
             n = np.array([-d[1], d[0]])
             mid = self.lane(self.crossing_s, 1.0) + LANE_HALF      # the road's centre line offset
+            c = p + mid * n                                        # on the centre line
+            if getattr(self, 'road_lines', None):                 # square to the road itself
+                d = self._road_line(self.crossing_s)[1]
+                n = np.array([-d[1], d[0]])
             rows = []
             for k in range(-5, 6):                                 # bars across the road, 0.5 m on, 0.5 off
                 if k % 2:
                     continue
                 for a in np.arange(-1.4, 1.41, 0.14):            # along the road, 3 m wide crossing
                     for b in np.arange(-0.2, 0.21, 0.14):
-                        q = p + (mid + k * 0.5 + b) * n + a * d
+                        q = c + (k * 0.5 + b) * n + a * d
                         rows.append([q[0], q[1], ground_z(*q) + 0.02, math.log(0.09), math.log(0.09),
                                      math.log(0.004), 1, 0, 0, 0, 4.0, 0.93, 0.93, 0.9])
             del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
             side = self._road_side()
-            base = p + (mid - side * (LANE_HALF + 1.4)) * n - 2.0 * d
+            base = c - side * (LANE_HALF + 1.4) * n - 2.0 * d
             z0 = ground_z(*base)
             rm.cylinder([0, 0, 0], [0, 0, 2.6], 0.06, (60, 62, 66), n=10)
             rm.superellipsoid(np.array([0.0, 0, 2.95]), (0.16, 0.16, 0.42), 0.35, col=(30, 30, 32), nu=10, nv=6)
@@ -787,9 +881,22 @@ class Crowd:
             self._decor[state] = np.concatenate([np.array(rows, np.float32), pole])
         return self._decor[state]
 
+    def _road_line(self, s):
+        """(a point, unit direction along the route) of the road centre line covering s."""
+        best = min(self.road_lines, key=lambda r: 0.0 if r[0] <= s <= r[1] else min(abs(s - r[0]), abs(s - r[1])))
+        return np.array(best[2:4]), np.array(best[4:6])
+
     def lane(self, s, direction):
         """A car's side offset at arc position s going this way: the road's offset there,
         keeping right."""
+        if getattr(self, 'road_lines', None):
+            q, u = self._road_line(s)
+            p, d = self._at(np.array([s]))
+            p, d = p[0], d[0]
+            n = np.array([-d[1], d[0]])
+            den = n[0] * u[1] - n[1] * u[0]                 # where the route's normal meets the line
+            off = ((q - p)[0] * u[1] - (q - p)[1] * u[0]) / (den if abs(den) > 1e-6 else 1e-6)
+            return off - LANE_HALF * direction
         road = self.road
         k = next((n for n, (a, b, _) in enumerate(road) if a <= s <= b), 0 if s < road[0][0] else len(road) - 1)
         off = road[k][2]
