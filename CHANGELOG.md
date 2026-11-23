@@ -354,6 +354,11 @@ All notable changes to `visloc-rs` will be documented here.
   no longer turns back mid-road and drives on the wrong side while it
   crosses over. Cars wait, keep right, and U-turn only at the road's
   ends, in a half circle.
+- 3DGS sim cars look and move like cars: sedans, hatchbacks and SUVs
+  lofted from side profiles (wheel arches, glass and pillars, lights,
+  plates, mirrors) in street colours, with a shadow. They no longer start
+  and stop at once: 2 m/s² up, at most 6 m/s² down, braking for the car
+  ahead and for the line, and slowing for the U-turn.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.

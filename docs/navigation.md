@@ -868,6 +868,15 @@ keeping right.
   car jumps.
 - **Traffic**: cars never swerve; they follow, or stop for, whoever is in
   their lane.
+- **Bodies**: a sedan, a hatchback or an SUV, about 4.1 to 4.6 m long.
+  Each is lofted from its side profile and cross-sections: wheel arches,
+  a cabin that leans in, glass with pillars, lights, number plates,
+  mirrors and five-spoke wheels. Most are white, black, grey or silver.
+  Each car is about 4,500 flat gaussians, plus a soft shadow on the road.
+- **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
+  smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
+  on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They
+  slow to 2.5 m/s for the U-turn.
 
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |

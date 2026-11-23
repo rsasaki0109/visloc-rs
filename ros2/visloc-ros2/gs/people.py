@@ -137,40 +137,198 @@ def _stroller(base, th, col, q):
     del th
 
 
+# Car body styles: (length, width, roof height, wheelbase, side profile of the top surface as
+# (x from the rear bumper as a share of the length, z) points, the beltline height).
+CAR_STYLES = {
+    'sedan': (4.6, 1.80, 1.44, 2.70,
+              ((0.0, 0.62), (0.02, 0.88), (0.06, 0.96), (0.20, 1.00), (0.33, 1.40), (0.40, 1.44), (0.58, 1.44),
+               (0.70, 1.02), (0.90, 0.92), (0.98, 0.80), (1.0, 0.58)), 0.98),
+    'hatch': (4.1, 1.75, 1.47, 2.55,
+              ((0.0, 0.62), (0.02, 0.92), (0.04, 1.10), (0.10, 1.42), (0.15, 1.47), (0.56, 1.47),
+               (0.70, 1.02), (0.90, 0.92), (0.98, 0.80), (1.0, 0.58)), 0.98),
+    'suv': (4.6, 1.86, 1.70, 2.75,
+            ((0.0, 0.70), (0.02, 1.00), (0.04, 1.20), (0.08, 1.66), (0.13, 1.70), (0.62, 1.70),
+             (0.73, 1.18), (0.90, 1.10), (0.98, 0.96), (1.0, 0.66)), 1.12),
+}
+# Paint as on a street: mostly white, black, greys and silver; a few colours, none loud.
+CAR_PAINTS = ((232, 233, 230), 0.22), ((26, 27, 30), 0.18), ((150, 153, 157), 0.17), ((92, 95, 100), 0.13), \
+    ((30, 48, 82), 0.09), ((120, 22, 28), 0.08), ((52, 64, 52), 0.04), ((168, 150, 120), 0.04), ((60, 90, 140), 0.05)
+
+
 class Car:
-    """A small car (frame: x forward, z up, wheels on z = 0), its wheels turned by PHASES steps."""
+    """A car (frame: x forward, z up, wheels on z = 0): a sedan, hatchback or SUV lofted from its
+    side profile and cross-sections, with wheel arches, glass and pillars, lights, number plates
+    and mirrors; its wheels turned by PHASES steps."""
 
     def __init__(self, rng):
-        paint = [(200, 30, 35), (235, 235, 232), (30, 32, 36), (60, 90, 150), (150, 155, 160), (40, 90, 60),
-                 (220, 180, 50)][rng.integers(7)]
-        glass, tyre, rim = (35, 45, 55), (22, 22, 24), (175, 178, 182)
+        style = ('sedan', 'hatch', 'suv')[rng.choice(3, p=(0.45, 0.30, 0.25))]
+        L, W, H, wb, prof, belt = CAR_STYLES[style]
+        k = rng.uniform(0.96, 1.04)
+        L, W, wb = L * k, W * rng.uniform(0.98, 1.02), wb * k
+        cols, p = zip(*CAR_PAINTS)
+        paint = np.array(cols[rng.choice(len(cols), p=np.array(p) / sum(p))], float)
+        self.style, self.length, self.width = style, L, W
+        body = self._body(L, W, prof, belt, wb, paint)
         self.frames = []
         for ph in range(PHASES):
-            th = 2 * math.pi * ph / PHASES
             del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
-            rm.superellipsoid(np.array([0.0, 0, 0.62]), (2.2, 0.88, 0.33), 0.35, col=paint, nu=24, nv=10)   # body
-            rm.superellipsoid(np.array([-0.25, 0, 1.06]), (1.25, 0.8, 0.3), 0.45, col=paint, zmin=0.0,
-                              nu=20, nv=8)                                                               # roof
-            rm.superellipsoid(np.array([-0.25, 0, 1.08]), (1.18, 0.82, 0.22), 0.5, col=glass, zmin=-0.2,
-                              zmax=0.6, nu=20, nv=8)                                                     # windows
-            for x in (-1.35, 1.35):
-                for y in (-0.8, 0.8):
-                    s_ = 1 if y > 0 else -1
-                    rm.cylinder([x, y - s_ * 0.12, 0.33], [x, y + s_ * 0.1, 0.33], 0.33, tyre, n=16)
-                    hub = np.array([x, y + s_ * 0.105, 0.33])
-                    for k in range(3):                                        # spokes turn with the phase
-                        a = th + k * math.pi / 3
-                        rm.cylinder(hub - [0.2 * math.cos(a), 0, 0.2 * math.sin(a)],
-                                    hub + [0.2 * math.cos(a), 0, 0.2 * math.sin(a)], 0.03, rim, n=4)
-            for y in (-0.6, 0.6):
-                rm.cylinder([2.18, y, 0.7], [2.22, y, 0.7], 0.11, (255, 250, 225), emissive=True)   # headlights
-                rm.cylinder([-2.22, y, 0.75], [-2.18, y, 0.75], 0.09, (220, 25, 25), emissive=True)  # tail lights
+            rm._T.extend(body[0]); rm._N.extend(body[1]); rm._C.extend(body[2]); rm._E.extend(body[3])
+            self._wheels(wb, W, 2 * math.pi * ph / PHASES)
             m = type('Mesh', (), {})()
             m.tris, m.vn = np.array(rm._T), np.array(rm._N)
             m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
             self.frames.append(m)
         del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
         self.low = self.frames
+        self.shadow = self._shadow(L, W)
+
+    @staticmethod
+    def _shadow(L, W):
+        """A soft dark patch on the road under the car, as flat gaussians (rows as mesh_splats)."""
+        xs, ys = np.linspace(-L / 2 + 0.5, L / 2 - 0.5, 7), np.linspace(-W / 2 + 0.35, W / 2 - 0.35, 3)
+        g = np.array([(x, y) for x in xs for y in ys])
+        out = np.zeros((len(g), 14), np.float32)
+        out[:, 0:2], out[:, 2] = g, 0.012
+        out[:, 3:6] = np.log([L / 9, W / 4.5, 0.002])
+        out[:, 6] = 1.0                                   # identity rotation: flat on the ground
+        out[:, 10] = -1.2                                 # opacity about 0.23 each, overlapping
+        out[:, 11:14] = 0.04
+        return out
+
+    @staticmethod
+    def _body(L, W, prof, belt, wb, paint):
+        del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+        glass, trim, plastic = (24, 30, 38), (20, 20, 22), (38, 39, 42)
+        px = np.array([a for a, _ in prof]) * L - L / 2
+        pz = np.array([b for _, b in prof])
+        xs = np.concatenate([np.linspace(-L / 2, L / 2, 46)])
+        arch_x = (-wb / 2, wb / 2)
+        R_ARCH = 0.43
+
+        def top(x):
+            return float(np.interp(x, px, pz))
+
+        def bottom(x):
+            z = 0.30
+            for ax in arch_x:
+                d = abs(x - ax)
+                if d < R_ARCH:
+                    z = max(z, 0.33 + math.sqrt(R_ARCH ** 2 - d * d))
+            return z
+
+        roof = pz.max()
+        # The greenhouse: where the top rises above the beltline.
+        cab = [x for x in xs if top(x) > belt + 0.03]
+        cab_lo, cab_hi = (min(cab), max(cab)) if cab else (0, 0)
+        hw = W / 2
+
+        def section(x):
+            """The right half of the cross-section, bottom centre to top centre, as (y, z) points."""
+            zt, zb = top(x), bottom(x)
+            end = min(1.0, (L / 2 - abs(x)) / 0.35)           # rounded in plan at the bumpers
+            w = hw * (0.86 + 0.14 * math.sqrt(max(end, 0)))
+            zb_c = 0.24                                     # the floor under the middle
+            pts = [(0.0, zb_c), (w - 0.30, zb_c), (w - 0.08, zb), (w, zb + 0.08)]
+            zbelt = min(belt, zt - 0.02)
+            if zt > belt + 0.03:
+                rise = (zt - belt) / max(roof - belt, 1e-6)
+                wr = w - 0.07 - 0.22 * rise                     # tumblehome: the cabin leans in
+                pts += [(w, zbelt - 0.06), (w - 0.03, zbelt), (wr, zt - 0.05), (wr - 0.10, zt), (0.0, zt)]
+            else:
+                pts += [(w, zt - 0.10), (w - 0.06, zt - 0.015), (w - 0.25, zt), (0.0, zt)]
+            return pts
+
+        secs = [section(x) for x in xs]
+        n = max(len(s) for s in secs)
+        # Same number of points per section: pad the shorter ones at their shoulder.
+        for i, s in enumerate(secs):
+            while len(s) < n:
+                s.insert(4, s[4])
+        P = np.array([[[x, y, z] for y, z in s] for x, s in zip(xs, secs)])      # (stations, points, 3)
+        full = np.concatenate([P, P[:, ::-1][:, 1:] * [1, -1, 1]], 1)          # right half, then left
+        m = full.shape[1]
+        # Normals by central differences over the grid.
+        du = np.gradient(full, axis=0)
+        dv = np.gradient(full, axis=1)
+        nn = np.cross(du, dv)
+        nn /= np.linalg.norm(nn, axis=2, keepdims=True) + 1e-12
+        # Point outwards (away from the centre line at mid height).
+        out = full - np.array([0, 0, 0.8])
+        out[..., 0] *= 0.3
+        flip = np.sign((nn * out).sum(2, keepdims=True))
+        nn *= np.where(flip == 0, 1, flip)
+        # Pillars: A at the windscreen's foot, B in the middle, C at the rear window.
+        b_pillar = cab_lo + 0.52 * (cab_hi - cab_lo)
+
+        def colour(x, z, y):
+            if z < 0.33 and abs(y) < hw - 0.15:
+                return trim                                      # underside
+            if z > belt + 0.02 and cab:
+                in_side = abs(y) > 0.15 * hw and z < roof - 0.06
+                on_glass_slope = top(x) < roof - 0.05            # windscreen and rear window
+                if (in_side or on_glass_slope) and not (abs(x - b_pillar) < 0.06 and in_side) \
+                        and cab_lo + 0.10 < x < cab_hi - 0.08:
+                    return glass
+            if z < 0.42 and (x > L / 2 - 0.25 or x < -L / 2 + 0.25):
+                return plastic                                   # bumper lips
+            return tuple(paint)
+
+        for i in range(len(xs) - 1):
+            for j in range(m - 1):
+                a, b, c, d = full[i, j], full[i + 1, j], full[i + 1, j + 1], full[i, j + 1]
+                na, nb, nc, nd = nn[i, j], nn[i + 1, j], nn[i + 1, j + 1], nn[i, j + 1]
+                cm = (a + b + c + d) / 4
+                col = colour(cm[0], cm[2], cm[1])
+                rm._add((a, b, c), (na, nb, nc), col)
+                rm._add((a, c, d), (na, nc, nd), col)
+        # End caps (front and back faces).
+        for i, sgn in ((0, -1.0), (len(xs) - 1, 1.0)):
+            ring = full[i]
+            cen = ring.mean(0)
+            nrm = np.array([sgn, 0, 0])
+            for j in range(m - 1):
+                rm._add((cen, ring[j], ring[j + 1]), (nrm, nrm, nrm), tuple(paint))
+
+        def quad(cx, y0, y1, z0, z1, col, emissive=False, face=1.0):
+            """A flat panel facing +x (face 1) or -x (-1), just proud of the body at x = cx."""
+            nrm = np.array([face, 0, 0])
+            a, b, c, d = (np.array([cx, y0, z0]), np.array([cx, y1, z0]), np.array([cx, y1, z1]),
+                          np.array([cx, y0, z1]))
+            rm._add((a, b, c), (nrm,) * 3, col, emissive)
+            rm._add((a, c, d), (nrm,) * 3, col, emissive)
+
+        xf, xr = L / 2 + 0.012, -L / 2 - 0.012
+        zf, zr = top(L / 2 - 0.05), top(-L / 2 + 0.05)
+        quad(xf, -0.26, 0.26, 0.36, 0.47, (235, 235, 228))                    # front plate
+        quad(xf + 0.002, -0.24, 0.24, 0.38, 0.45, (40, 40, 60))               # its letters (a band)
+        quad(xf, -0.42, 0.42, 0.50, min(0.66, zf - 0.04), (18, 19, 21))       # grille
+        for s_ in (-1, 1):
+            quad(xf, s_ * (hw - 0.52), s_ * (hw - 0.16), min(0.68, zf - 0.10), min(0.80, zf - 0.02),
+                 (250, 248, 235), True)                                      # headlights
+            quad(xr, s_ * (hw - 0.45), s_ * (hw - 0.14), max(0.78, zr - 0.20), max(0.92, zr - 0.06),
+                 (175, 18, 22), True, -1.0)                                  # tail lights
+        quad(xr, -0.26, 0.26, 0.55, 0.66, (235, 235, 228), face=-1.0)         # rear plate
+        quad(xr - 0.002, -0.24, 0.24, 0.57, 0.64, (40, 40, 60), face=-1.0)
+        # Door mirrors at the windscreen's foot.
+        for s_ in (-1, 1):
+            rm.superellipsoid(np.array([cab_hi - 0.25, s_ * (hw + 0.07), belt + 0.08]), (0.08, 0.07, 0.06),
+                              0.6, col=tuple(paint), nu=8, nv=4)
+        return list(rm._T), list(rm._N), list(rm._C), list(rm._E)
+
+    @staticmethod
+    def _wheels(wb, W, th):
+        tyre, rim = (20, 20, 22), (168, 170, 174)
+        for x in (-wb / 2, wb / 2):
+            for s_ in (-1, 1):
+                y = s_ * (W / 2 - 0.13)
+                rm.cylinder([x, y - 0.11, 0.33], [x, y + 0.11, 0.33], 0.33, tyre, n=18)
+                hub = np.array([x, y + s_ * 0.115, 0.33])
+                rm.cylinder(hub - [0, s_ * 0.004, 0], hub + [0, s_ * 0.004, 0], 0.21, rim, n=14,
+                            capcol=rim)
+                for k in range(5):                                    # spokes turn with the phase
+                    a = th + k * 2 * math.pi / 5
+                    d = np.array([0.19 * math.cos(a), 0, 0.19 * math.sin(a)])
+                    rm.cylinder(hub + [0, s_ * 0.006, 0], hub + [0, s_ * 0.006, 0] + d, 0.025, (90, 92, 96), n=4)
 
 
 def estimate_road(xyz, rgb, opacity, route, ground_z, search=(2.5, 12.0), min_score=0.25):
@@ -360,10 +518,11 @@ def _rot_to_quat(R):
     return q / np.linalg.norm(q, axis=1, keepdims=True)
 
 
-def mesh_splats(fig):
+def mesh_splats(fig, fill=0.36):
     """One flat gaussian per triangle of a mesh (its own frame): N x 14 rows of
     x y z, log scales, quaternion (w x y z), opacity logit, r g b in 0..1. The
-    colour carries the same sky-and-sun shading as the drawn figures."""
+    colour carries the same sky-and-sun shading as the drawn figures. fill: each
+    gaussian's sigma as a share of its piece (larger closes the gaps on big panels)."""
     t = fig.tris
     c = t.mean(1)
     e1 = t[:, 1] - t[:, 0]
@@ -398,8 +557,8 @@ def mesh_splats(fig):
     mid_a = (proj.max(1) + proj.min(1)) / 2
     out = np.zeros((len(idx), 14), np.float32)
     out[:, 0:3] = c[idx] + (mid_a[idx] + frac * span_a[idx])[:, None] * a[idx]
-    sa = np.maximum(span_a[idx] / pieces[idx] * 0.36, 0.004)
-    sb = np.maximum(span_b[idx] * 0.36, 0.004)
+    sa = np.maximum(span_a[idx] / pieces[idx] * fill, 0.004)
+    sb = np.maximum(span_b[idx] * fill, 0.004)
     out[:, 3:6] = np.log(np.stack([sa, sb, np.full(len(idx), 0.003)], 1))
     out[:, 6:10] = q[idx]
     out[:, 10] = 4.0
@@ -549,6 +708,7 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.full(cars, 4)])
             n += cars
         self.lane_mix = self.dir.copy()
+        self.cv = self.v.copy()          # a car's speed now: it speeds up and brakes gradually
         self.uturn = np.zeros(n)        # a car's progress (0 .. 1) through a U-turn at the road's end; 0: none
         # A zebra crossing with a traffic light in the middle of the road's stretch: cars stop
         # at its line while their light is not green, walkers cross while it is red.
@@ -667,6 +827,13 @@ class Crowd:
         yaw = math.atan2(seg[1] * self.dir[i], seg[0] * self.dir[i])
         return xy, yaw, np.array([-seg[1], seg[0]])
 
+    def _lane_scale(self, i):
+        """Route arc length per metre of car i's lane, on the segment it is on."""
+        k = int(np.clip(np.searchsorted(self.cum, self.s[i]) - 1, 0, len(self.path) - 2))
+        w = (self.lane_mix[i] + 1) / 2
+        seg = w * (self.lanes[1.0][k + 1] - self.lanes[1.0][k]) + (1 - w) * (self.lanes[-1.0][k + 1] - self.lanes[-1.0][k])
+        return float((self.cum[k + 1] - self.cum[k]) / max(np.linalg.norm(seg), 1e-6))
+
     def _pose(self, i, s, dodge, direction):
         """Where agent i would stand at arc position s with this dodge: (xy, yaw, normal)."""
         if self.kind[i] == 4:
@@ -779,21 +946,27 @@ class Crowd:
                     best = (a, lat, need, follow, False)
             speed = self.v[i]
             hold = False                                         # a light or a crossing holds them
+            cap = math.inf                                       # a car braking for the light
             old_dodge, old_side = self.dodge[i], self.side[i]
             if car and self.uturn[i] > 0:                       # in a U-turn: on round the half circle
                 u_old, mix_old = self.uturn[i], self.lane_mix[i]
                 turn_v = min(self.v[i], 2.5)
-                self.uturn[i] = min(1.0, u_old + turn_v * dt / (math.pi * LANE_HALF))
-                self.lane_mix[i] = -self.dir[i] * math.cos(math.pi * self.uturn[i])
+                u_new = u_old + turn_v * dt / (math.pi * LANE_HALF)
+                s_old = self.s[i]
+                if u_new >= 1.0:                                 # out of the turn: on along the lane
+                    self.uturn[i], self.lane_mix[i] = 0.0, self.dir[i]
+                    self.s[i] = s_old + self.dir[i] * (u_new - 1.0) * math.pi * LANE_HALF
+                else:
+                    self.uturn[i] = u_new
+                    self.lane_mix[i] = -self.dir[i] * math.cos(math.pi * u_new)
                 xy, yaw, normal = self._car_pose(i, self.s[i])
                 if self._clear(i, xy, yaw, robot):
                     self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
+                    self.cv[i] = turn_v
                     self.phase[i] = (self.phase[i] + turn_v * dt / 2.1) % 1.0
                     moving[i] = turn_v / max(self.v[i], 1e-6)
-                    if self.uturn[i] >= 1.0:
-                        self.uturn[i], self.lane_mix[i] = 0.0, self.dir[i]
                 else:                                            # someone in the way: wait
-                    self.uturn[i], self.lane_mix[i] = u_old, mix_old
+                    self.uturn[i], self.lane_mix[i], self.s[i] = u_old, mix_old, s_old
                     moving[i] = 0.0
                 continue
             if self.cross[i]:                                  # crossing the road and back
@@ -827,10 +1000,13 @@ class Crowd:
                         self.cross[i], self.cross_home[i] = 1, self.side[i]
                 elif not near:
                     self.cross_tried[i] = False
-            if car and light in ('amber', 'red'):                # wait at the line
+            if car and light in ('amber', 'red'):                # brake for the line and wait there
                 to_line = self.dir[i] * (self.crossing_s - self.s[i]) - 2.3 - 3.0
-                if 0.0 <= to_line < 2.0:
-                    hold = True
+                # On amber, a car too close to stop at 4.5 m/s^2 drives on.
+                if 0.0 <= to_line < 30.0 and (light == 'red' or self.cv[i] ** 2 / (2 * max(to_line, 1e-3)) < 4.5):
+                    cap = math.sqrt(2 * 3.0 * to_line)
+                    if to_line < 0.3:
+                        hold = True
             pausing = False
             if self.pauses and self.kind[i] == 0:                # a walker stands still a while now and then
                 if self.pause[i] > 0:
@@ -857,12 +1033,26 @@ class Crowd:
                     speed = (0.35 if is_robot else 0.6) * self.v[i]
             if pausing or hold:
                 speed = 0.0
+            if car:                                              # 2 m/s^2 up, at most 6 m/s^2 down
+                lo_, hi_ = self.road_s
+                to_end = (hi_ - self.s[i]) if self.dir[i] > 0 else (self.s[i] - lo_)
+                cap = min(cap, math.sqrt(2.5 ** 2 + 2 * 3.0 * max(to_end, 0.0)))   # slow for the U-turn
+                speed = min(speed, cap)
+                if best is not None and abs(best[1]) < best[2] + 0.05:
+                    gap = best[0] - best[2]                      # brake to stop 1 m short of them
+                    speed = min(speed, (best[3] or 0.0) + math.sqrt(2 * 4.0 * max(gap - 1.0, 0.0)))
+                cur = self.cv[i]
+                speed = min(speed, cur + 2.0 * dt) if speed > cur else max(speed, cur - 6.0 * dt)
+                self.cv[i] = speed
             if best is None:
                 self.waited[i] = 0.0
                 self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
             # Never step into someone: try the move with the new dodge, then without moving
             # on, then without the new dodge; else stay put.
-            s_new = min(max(self.s[i] + self.dir[i] * speed * dt, 0.0), self.length)
+            # A car goes its speed along its lane, which is longer or shorter than the route
+            # round a corner.
+            s_new = min(max(self.s[i] + self.dir[i] * speed * dt * (self._lane_scale(i) if car else 1.0), 0.0),
+                        self.length)
             moved = False
             # Already inside someone (placed there, or the robot drove up): any step that
             # gets less deep is allowed, so nobody stays stuck inside another.
@@ -884,6 +1074,7 @@ class Crowd:
             else:
                 self.stuck[i] += dt
                 speed = 0.0
+                self.cv[i] = 0.0
             moving[i] = speed / max(self.v[i], 1e-6)
             lo, hi = self.road_s if car else (0.0, self.length)
             # The end of the route, or (on foot) no way through: turn back. Cars only turn at the
@@ -948,7 +1139,10 @@ class Crowd:
             fig = self.figures[i]
             k = int(self.phase[i] * PHASES) % PHASES
             if not hasattr(fig, 'splat_frames'):
-                fig.splat_frames = [mesh_splats(m) for m in fig.frames]
+                if isinstance(fig, Car):
+                    fig.splat_frames = [np.concatenate([mesh_splats(m, fill=0.5), fig.shadow]) for m in fig.frames]
+                else:
+                    fig.splat_frames = [mesh_splats(m) for m in fig.frames]
             rows.append(place_splats(fig.splat_frames[k], self.xy[i, 0], self.xy[i, 1], self.yaw[i],
                                      ground_z(*self.xy[i])))
         rows.append(self.decor(ground_z))
