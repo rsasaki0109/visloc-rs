@@ -1,0 +1,233 @@
+# The twelve LaMAria training sequences through the submission driver, each scored with the official
+# control-point evaluator, and one table over all of them.
+#
+# PASS_ARGS empty: the chain as the driver runs it. PASS_ARGS set: each job also runs the default chain from
+# the same VIO, online windows and first matching (--ba-compare) and the table pairs the two per sequence.
+# The decision follows docs/lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds: the mean of the
+# eleven sequences other than sequence_2_12 (which moves by ±5 for nothing) and how many of them gain.
+# A push that changes this file starts a run; edit PASS_ARGS / DRIVER_ARGS below to test a change.
+name: LaMAria training evaluation
+
+on:
+  push:
+    branches: [claude/determined-lovelace-pwgdae]
+    paths: [.github/workflows/lamaria_training_eval.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SPLIT: training
+  # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
+  PASS_ARGS: ""
+  # further driver options for both chains, e.g. "--no-ba-temperature"
+  DRIVER_ARGS: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lamaria-release-rt
+
+      - name: Build the VIO
+        run: cargo build --locked --profile release-rt --example basalt_euroc_vio_demo
+
+      - name: Upload the VIO
+        uses: actions/upload-artifact@v7
+        with:
+          name: basalt-euroc-vio-demo
+          path: target/release-rt/examples/basalt_euroc_vio_demo
+          if-no-files-found: error
+          retention-days: 7
+
+  sequence:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        sequence: [R_11_5cp, R_12_10cp, sequence_1_19, sequence_1_20, sequence_2_11, sequence_2_12,
+                   sequence_3_17, sequence_3_18, sequence_4_10, sequence_4_11, sequence_5_11, sequence_5_12]
+    env:
+      SEQUENCE: ${{ matrix.sequence }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          if [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
+            sudo mkdir -p /mnt/lamaria && sudo chown "$USER" /mnt/lamaria && echo "WORK=/mnt/lamaria" >> "$GITHUB_ENV"
+          else
+            echo "WORK=$RUNNER_TEMP/lamaria" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the BA's dependencies
+        run: |
+          python -m pip install --quiet --disable-pip-version-check \
+            numpy==2.5.3 scipy==1.18.1 opencv-python-headless==5.0.0.93 gtsam==4.3.0 numba==0.68.0 \
+            projectaria-tools==2.4.0 zstandard==0.25.0
+
+      - name: Download the VIO
+        uses: actions/download-artifact@v8
+        with:
+          name: basalt-euroc-vio-demo
+          path: bin
+
+      - name: Run the chain
+        run: |
+          chmod +x bin/basalt_euroc_vio_demo
+          compare=()
+          if [ -n "$PASS_ARGS" ]; then compare=(--ba-compare --ba-pass-args="$PASS_ARGS"); fi
+          python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
+            --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
+            --threads 4 --ba-jobs 4 --ba-threads 2 \
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs "${compare[@]}" $DRIVER_ARGS
+          test -s "out/slam/$SEQUENCE.txt"
+
+      - name: Score control points
+        shell: bash
+        run: |
+          evaluator="$RUNNER_TEMP/lamaria-eval"
+          git init -q "$evaluator"
+          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          python -m pip install --quiet --disable-pip-version-check \
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
+
+          results="out/logs/$SEQUENCE"
+          refs="$RUNNER_TEMP/lamaria-reference"
+          mkdir -p "$results" "$refs" out/score
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          curl -fsSL --retry 3 "$data/ground_truth/sparse/$SEQUENCE.json" -o "$refs/control_points.json"
+          curl -fsSL --retry 3 "$data/aria_calibrations/training/$SEQUENCE.json" -o "$refs/calibration.json"
+
+          labels=(main)
+          cp "out/slam/$SEQUENCE.txt" "$results/main_estimate.txt"
+          if [ -n "$PASS_ARGS" ]; then labels+=(baseline); fi
+          for label in "${labels[@]}"; do
+            log="$results/cp_$label.log"
+            python "$evaluator/evaluate_wrt_control_points.py" --estimate "$results/${label}_estimate.txt" \
+              --cp_json_file "$refs/control_points.json" --device_calibration_json "$refs/calibration.json" \
+              --corresponding_sensor imu --output_path "$results/cp_$label" 2>&1 | tee "$log"
+            test -n "$(sed -n 's/.*CP Score: //p' "$log")"
+          done
+          python - "$results" "${labels[@]}" <<'PY' > "out/score/$SEQUENCE.json"
+          import json, os, re, sys
+          from pathlib import Path
+          results, labels = Path(sys.argv[1]), sys.argv[2:]
+          out = {"sequence": os.environ["SEQUENCE"], "pass_args": os.environ["PASS_ARGS"],
+                 "driver_args": os.environ["DRIVER_ARGS"]}
+          for label in labels:
+              log = (results / f"cp_{label}.log").read_text()
+              out[label] = {"cp_score": float(re.search(r"CP Score: ([\d.]+)", log).group(1)),
+                            "cp_recall_1m": float(re.search(r"CP Recall @ 1m: ([\d.]+)", log).group(1))}
+          print(json.dumps(out))
+          PY
+          cat "out/score/$SEQUENCE.json"
+
+      - name: Upload the estimate and the score
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: training-${{ matrix.sequence }}
+          path: |
+            out/slam/*.txt
+            out/score
+            out/logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  table:
+    needs: sequence
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the scores
+        uses: actions/download-artifact@v8
+        with:
+          pattern: training-*
+          path: scores
+
+      - name: Table
+        shell: bash
+        run: |
+          python - <<'PY' | tee table.md
+          import json
+          from pathlib import Path
+
+          rows = {json.loads(p.read_text())["sequence"]: json.loads(p.read_text())
+                  for p in Path("scores").rglob("score/*.json")}
+          order = ["R_11_5cp", "R_12_10cp", "sequence_1_19", "sequence_1_20", "sequence_2_11", "sequence_2_12",
+                   "sequence_3_17", "sequence_3_18", "sequence_4_10", "sequence_4_11", "sequence_5_11",
+                   "sequence_5_12"]
+          track = lambda s: 1 if s.startswith("R_") else int(s.split("_")[1])
+          paired = any("baseline" in r for r in rows.values())
+          some = next(iter(rows.values()), {})
+          print("### LaMAria training evaluation\n")
+          print(f"PASS_ARGS `{some.get('pass_args', '')}`, DRIVER_ARGS `{some.get('driver_args', '')}`\n")
+          if paired:
+              print("| Sequence | Default CP | With PASS_ARGS | Change | Recall at 1 m, default → with (%) |")
+              print("|---|---:|---:|---:|---:|")
+          else:
+              print("| Sequence | CP score | Recall at 1 m (%) |")
+              print("|---|---:|---:|")
+          for s in order:
+              r = rows.get(s)
+              if r is None:
+                  print(f"| {s} | missing |" + (" | | |" if paired else " |"))
+                  continue
+              m = r["main"]
+              if paired:
+                  b = r["baseline"]
+                  print(f"| {s} | {b['cp_score']:.2f} | {m['cp_score']:.2f} | {m['cp_score'] - b['cp_score']:+.2f} "
+                        f"| {b['cp_recall_1m']:.1f} → {m['cp_recall_1m']:.1f} |")
+              else:
+                  print(f"| {s} | {m['cp_score']:.2f} | {m['cp_recall_1m']:.1f} |")
+
+          def mean(xs):
+              return sum(xs) / len(xs) if xs else float("nan")
+
+          done = [s for s in order if s in rows]
+          eleven = [s for s in done if s != "sequence_2_12"]
+          for label in (["baseline", "main"] if paired else ["main"]):
+              name = {"baseline": "Default", "main": "With PASS_ARGS" if paired else "Chain"}[label]
+              tracks = {t: mean([rows[s][label]["cp_score"] for s in done if track(s) == t]) for t in range(1, 6)}
+              print(f"\n**{name}**: mean of {len(done)} {mean([rows[s][label]['cp_score'] for s in done]):.2f}, "
+                    f"mean of {len(eleven)} without sequence_2_12 "
+                    f"{mean([rows[s][label]['cp_score'] for s in eleven]):.2f}; per track "
+                    + ", ".join(f"{t}: {v:.2f}" for t, v in tracks.items()))
+          if paired and eleven:
+              d = [rows[s]["main"]["cp_score"] - rows[s]["baseline"]["cp_score"] for s in eleven]
+              gain, up = mean(d), sum(x > 0 for x in d)
+              keep = gain >= 0.4 and up > len(d) / 2
+              print(f"\nChange over the {len(d)}: {gain:+.2f}, {up} of {len(d)} gain. "
+                    f"{'Keep' if keep else 'Do not keep'} (rule: +0.4 or more and most gain).")
+          PY
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the table
+        uses: actions/upload-artifact@v7
+        with:
+          name: training-table
+          path: table.md
+          retention-days: 30

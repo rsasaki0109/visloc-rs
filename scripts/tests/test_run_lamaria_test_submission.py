@@ -63,6 +63,8 @@ class TrackTests(unittest.TestCase):
     def test_sequence_track(self):
         self.assertEqual(submission.sequence_track("sequence_4_10"), 4)
         self.assertEqual(submission.sequence_track("sequence_1_19"), 1)
+        self.assertEqual(submission.sequence_track("R_11_5cp"), 1)
+        self.assertEqual(submission.sequence_track("R_12_10cp"), 1)
 
     def test_low_light_config_ships_with_the_repo(self):
         repo = Path(__file__).resolve().parents[2]
