@@ -104,3 +104,37 @@ loses 2.3 CP without them), the fused accelerometers, f_x and f_y apart, the bia
 temperature trend, the robust passes, the keyframe spacing and the front end. The next measurement is the
 fisheye model alone, without the time-varying calibration, to see whether the camera model or the camera
 path costs these points.
+
+## The fisheye model alone
+
+The same evaluation with only `--ba-fisheye-model` in the experimental pass, the default calibration
+otherwise (both cameras' rotations and focal lengths in 8 segments; [run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45228319544),
+commit `7ea111b`). R_12_10cp's scoring step failed on a timeout fetching the evaluator's pycolmap from the ETH
+server; its two estimates were scored locally with the same evaluator.
+
+| Recording | Default | Fisheye model | Change | Paper's model (above) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 87.90 | 85.93 | −1.97 | −1.90 |
+| R_12_10cp | 63.74 | 60.28 | −3.46 | −6.51 |
+| R_13_15cp | 78.14 | 78.28 | +0.14 | −2.51 |
+| sequence_1_19 | 85.34 | 84.64 | −0.70 | −1.42 |
+| sequence_1_20 | 86.70 | 85.86 | −0.84 | −4.90 |
+| sequence_2_11 | 88.56 | 80.05 | −8.50 | −4.26 |
+| sequence_2_12 | 51.02 | 61.45 | +10.43 | +10.31 |
+| sequence_3_17 | 80.35 | 78.98 | −1.37 | −6.45 |
+| sequence_3_18 | 38.86 | 39.14 | +0.28 | −3.84 |
+| sequence_4_10 | 68.18 | 65.68 | −2.50 | −0.52 |
+| sequence_4_11 | 76.05 | 74.75 | −1.30 | −0.07 |
+| sequence_5_11 | 66.92 | 66.92 | 0.00 | +1.94 |
+| sequence_5_12 | 6.33 | 6.49 | +0.17 | +0.15 |
+| Mean of the twelve without 2_12 | | | **−1.67** | **−2.52** |
+
+The fisheye model alone costs 1.67 on the twelve, four of them gaining; the paper's time-varying path on top
+of it costs another 0.85. In this pipeline the camera model the paper uses is itself the larger loss, so the
+gap to the paper is not in how the calibration varies over time. Both runs put sequence_2_12 at about +10,
+the same pass both times: its default chain is the one that varies (51 here and in every run so far against
+61 with either model).
+
+The default chain also moved on sequence_3_18 between the two runs, from 57.78 to 38.86 with the same commit
+of the chain: like sequence_2_12, it is not stable from one run to the next on Actions, and a single paired run
+cannot weigh a change there.
