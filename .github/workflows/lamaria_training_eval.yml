@@ -20,7 +20,7 @@ permissions:
 env:
   SPLIT: training
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
-  PASS_ARGS: ""
+  PASS_ARGS: "--gyro-rw-scale 3"
   # further driver options for both chains, e.g. "--no-ba-temperature"
   DRIVER_ARGS: ""
 
