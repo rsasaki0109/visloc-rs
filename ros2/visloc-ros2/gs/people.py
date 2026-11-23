@@ -312,7 +312,16 @@ class Crowd:
         self.normal = np.zeros((n, 2))
         self.dodge = np.zeros(n)        # extra side offset while stepping round the robot (m)
         self.waited = np.zeros(n)       # seconds blocked by the robot
+        self.stuck = np.zeros(n)        # seconds without moving at all
+        self.robot_radius = 0.2
         self._place()
+        for _ in range(50):             # start nobody inside anybody: move them along until clear
+            bad = [i for i in range(n) if not self._clear(i, self.xy[i], self.yaw[i], (1e9, 1e9))]
+            if not bad:
+                break
+            for i in bad[1:] or bad:
+                self.s[i] = (self.s[i] + 1.0) % self.length
+            self._place()
 
     def _at(self, s):
         k = np.clip(np.searchsorted(self.cum, s) - 1, 0, len(self.path) - 2)
@@ -320,6 +329,38 @@ class Crowd:
         d = self.path[k + 1] - self.path[k]
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
         return self.path[k] + t[:, None] * (self.path[k + 1] - self.path[k]), d
+
+    def _pose(self, i, s, dodge, direction):
+        """Where agent i would stand at arc position s with this dodge: (xy, yaw, normal)."""
+        p, d = self._at(np.array([s]))
+        p, d = p[0], d[0]
+        normal = np.array([-d[1], d[0]])
+        off = self.side[i] + dodge
+        while abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
+            off *= 0.7
+        return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
+
+    def _footprint(self, i, xy, yaw):
+        if self.kind[i]:
+            h = np.array([math.cos(yaw), math.sin(yaw)])
+            return np.array([xy - 0.6 * h, xy, xy + 0.6 * h]), np.full(3, 0.3)
+        return np.array([xy]), np.array([RADIUS])
+
+    def _clear(self, i, xy, yaw, robot, slack=0.02):
+        """Whether agent i standing at (xy, yaw) overlaps nobody by more than slack, and
+        stays 5 cm clear of the robot."""
+        c, r = self._footprint(i, xy, yaw)
+        # the robot is kept 5 cm clear, so it is never inside anyone when it next moves
+        if (np.hypot(c[:, 0] - robot[0], c[:, 1] - robot[1]) < r + self.robot_radius + 0.05).any():
+            return False
+        for j in range(len(self.s)):
+            if j == i:
+                continue
+            cj, rj = self._footprint(j, self.xy[j], self.yaw[j])
+            d = np.hypot(c[:, None, 0] - cj[None, :, 0], c[:, None, 1] - cj[None, :, 1])
+            if (d < r[:, None] + rj[None, :] - slack).any():
+                return False
+        return True
 
     def _place(self):
         p, d = self._at(self.s)
@@ -333,38 +374,109 @@ class Crowd:
             self.yaw[i] = math.atan2(d[i, 1] * self.dir[i], d[i, 0] * self.dir[i])
 
     def step(self, dt, robot_xy):
-        """Walk on. Someone with the robot just ahead steps aside, away from it, slowing
-        down; they stop only while still in its way (a wall on that side: after 3 s they
-        try the other side). Once past, they drift back to their own line."""
-        for i in range(len(self.s)):
-            rel = np.asarray(robot_xy) - self.xy[i]
-            ahead = rel @ [math.cos(self.yaw[i]), math.sin(self.yaw[i])]
-            lateral = rel @ self.normal[i]                       # robot's side offset from this person
-            gap = self.yield_m * (2.5 if self.kind[i] else 1.0)
-            clear = 0.9 if self.kind[i] else 0.75
+        """Walk (or ride) on, keeping clear of the robot and of each other.
+
+        Whoever has someone just ahead (the robot, or another person or cyclist
+        within their look-ahead and overlapping their lane) steps aside, away
+        from them, and slows down (a wall on that side: after 3 s they try the
+        other side). Behind someone going the same way who is still in the
+        lane, they follow at that one's speed. Facing the robot or someone
+        coming the other way, they stop only just before touching. No move
+        ever makes two footprints (or one and the robot's) overlap by more
+        than 2 cm: a step that would is not taken. Whoever cannot move at all
+        for 8 s turns back, as people do in a lane too narrow to pass. Once
+        past, they drift back to their own line. Cyclists look further ahead
+        (3 m) and so overtake walkers."""
+        robot = np.asarray(robot_xy, float)
+        n = len(self.s)
+        rad = np.where(self.kind == 1, 0.3, RADIUS)          # footprint half-width
+        half = np.where(self.kind == 1, 0.6, 0.0)            # a bicycle's half-length beyond that
+        heading = np.stack([np.cos(self.yaw), np.sin(self.yaw)], 1)
+        vel = heading * (self.v * self.moving)[:, None] if hasattr(self, 'moving') else heading * self.v[:, None]
+        moving = np.ones(n)
+        for i in range(n):
+            look = self.yield_m * (2.5 if self.kind[i] else 1.0)
+            # (ahead, lateral, needed clearance, same-direction speed or None for "wait")
+            best = None
+            rel = robot - self.xy[i]
+            a, lat = rel @ heading[i] - half[i], rel @ self.normal[i]    # gap from my front
+            need = rad[i] + 0.45
+            if 0 < a < look + 0.45 and abs(lat) < need + 0.25:
+                best = (a, lat, need, None, True)
+            for j in range(n):
+                if j == i:
+                    continue
+                rel = self.xy[j] - self.xy[i]
+                a = rel @ heading[i] - half[i] - half[j] * abs(heading[j] @ heading[i])
+                need = rad[i] + rad[j]
+                if not -rad[j] < a < look + rad[j]:
+                    continue
+                lat = rel @ self.normal[i]
+                if abs(lat) >= need + 0.25:
+                    continue
+                along = vel[j] @ heading[i]                 # their speed along my way
+                follow = along if along > 0.2 else None     # same way: follow
+                if best is None or a < best[0]:
+                    best = (a, lat, need, follow, False)
             speed = self.v[i]
-            if 0 < ahead < gap and abs(lateral) < clear:
-                away = -1.0 if lateral > 0 else 1.0
+            old_dodge = self.dodge[i]
+            if best is not None:
+                a, lat, need, follow, is_robot = best
+                away = -1.0 if lat > 0 else 1.0
                 if self.waited[i] > 3.0:
                     away = -away                                 # that side is blocked: try the other
                 if self.waited[i] > 6.0:
                     self.waited[i] = 0.0
-                self.dodge[i] = float(np.clip(self.dodge[i] + away * 0.8 * dt, -2.0, 2.0))
-                self.waited[i] += dt
-                speed = 0.0 if abs(lateral) < 0.5 else 0.35 * self.v[i]
+                self.dodge[i] = float(np.clip(self.dodge[i] + away * (1.2 if self.kind[i] else 0.8) * dt,
+                                              -2.0, 2.0))
+                self.waited[i] += dt if a < need + 0.3 else 0.0
+                in_way = abs(lat) < need + 0.05
+                if in_way and follow is not None:
+                    speed = min(self.v[i], follow)               # behind someone: follow
+                elif in_way and a < need + 0.3:                  # about to touch: stop
+                    speed = 0.0
+                else:
+                    speed = (0.35 if is_robot else 0.6) * self.v[i]
             else:
                 self.waited[i] = 0.0
-                if ahead < -0.5 or abs(lateral) > clear + 0.3:   # past or well clear: back to their line
-                    self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
-            if speed == 0.0:
-                continue
-            self.s[i] += self.dir[i] * speed * dt
-            # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
-            self.phase[i] = (self.phase[i] + speed * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
-            if self.s[i] < 0 or self.s[i] > self.length:
-                self.s[i] = min(max(self.s[i], 0), self.length)
-                self.dir[i] *= -1
-        self._place()
+                self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
+            # Never step into someone: try the move with the new dodge, then without moving
+            # on, then without the new dodge; else stay put.
+            s_new = min(max(self.s[i] + self.dir[i] * speed * dt, 0.0), self.length)
+            moved = False
+            for s_try, dodge_try in ((s_new, self.dodge[i]), (self.s[i], self.dodge[i]), (s_new, old_dodge)):
+                xy, yaw, normal = self._pose(i, s_try, dodge_try, self.dir[i])
+                if self._clear(i, xy, yaw, robot):
+                    moved = s_try != self.s[i]
+                    self.s[i], self.dodge[i] = s_try, dodge_try
+                    self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
+                    break
+            else:
+                self.dodge[i] = old_dodge
+            if moved:
+                self.stuck[i] = 0.0
+                # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
+                self.phase[i] = (self.phase[i] + speed * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
+            else:
+                self.stuck[i] += dt
+                speed = 0.0
+            moving[i] = speed / max(self.v[i], 1e-6)
+            if self.s[i] <= 0.0 or self.s[i] >= self.length or self.stuck[i] > 8.0:
+                self.dir[i] *= -1                            # the end of the route, or no way through: turn back
+                self.stuck[i] = 0.0
+                self.waited[i] = 0.0
+        self.moving = moving
+
+    def overlaps(self, robot_xy, robot_radius):
+        """(person-person, person-robot) pairs whose footprints overlap now."""
+        c, r = self.circles()
+        owner = np.concatenate([[i] * (3 if k else 1) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
+        d = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
+        hit = (d < r[:, None] + r[None, :]) & (owner[:, None] < owner[None, :])
+        pp = len({(owner[a], owner[b]) for a, b in zip(*np.nonzero(hit))})
+        dr = np.hypot(c[:, 0] - robot_xy[0], c[:, 1] - robot_xy[1])
+        pr = len(set(owner[dr < r + robot_radius]))
+        return pp, pr
 
     def circles(self):
         """Footprints as circles: (centres M x 2, radii M). A person is one circle, a

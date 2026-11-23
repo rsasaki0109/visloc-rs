@@ -155,6 +155,7 @@ class Sim(Node):
                 raise SystemExit('--pedestrians needs a route: the scene has no goals')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed)
+            self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
