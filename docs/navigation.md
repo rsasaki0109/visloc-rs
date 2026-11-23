@@ -840,6 +840,14 @@ street, and Nav2 "failed to make progress" for 350 s.
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |
 | 6 walkers + 2 cyclists, gaussians | 4/4, all at the first try | 0 | 814 of 850 | 3.5 / 2.5 / 19 cm |
+| 4 walkers, 2 cyclists, a dog walker, a pushchair | 4/4, all at the first try | 0 | 821 of 850 | 4.0 / 2.4 / 22 cm |
+
+`--dog-walkers` adds a dog trotting on a lead at the walker's right.
+`--strollers` adds a pushchair, held with both hands, whose wheels turn.
+Footprints are per kind (`people.FOOT`). Walkers now and then stand still
+for 8–20 s (a chat, a phone), and people on foot now and then drift across
+to the other side. Video:
+[media/gs_street_busy.mp4](media/gs_street_busy.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
@@ -881,6 +889,20 @@ plaza in Bangkok, 300 frames, 121 m), on 4 CPU cores with no GPU, it took:
 | map (1799 keyframes) and occupancy | 23 min |
 
 That is about 1 h 45 min from the video to a simulator with its map.
+
+More options:
+
+- `--nav --pedestrians 4 --cyclists 2 --dog-walkers 1 --strollers 1` drives
+  the goals with people on the street.
+- `--video` then renders `chase.mp4` behind the robot.
+- **On a machine with a GPU**, build the examples with `--features gpu`
+  (`cargo build --release -p visloc-gsplat-train --features gpu --examples`,
+  and `cargo build --release --examples` for the rest), then pass `--gpu`.
+  - `--gpu` moves SfM's matching to wgpu.
+  - `gsplat_train` and `gsplat_render_server` use a GPU whenever wgpu finds
+    one, and fall back to the CPU rasterizer on a software adapter.
+  - Not timed here (no GPU in this environment). The 3DGS step, the longest
+    here, is the one a GPU shortens most.
 
 ### Appearance change, and real photos as queries
 
@@ -952,6 +974,26 @@ within 50 cm for 94%, against 10 cm median for the 48 fixes of the plain
 map. That is the first real cross-session localization here. It localized
 9% of the images, enough to correct wheel odometry every few metres, not to
 run on alone.
+
+**Keep every landmark.** `tum_rgbd_save_map` keeps a landmark only when two
+keyframes saw it (`--min-observations 2`). With real photos and the
+splat's depth, tracks between keyframes break easily, so this map kept
+about 20 landmarks per keyframe. With `--min-observations 1`, every
+keypoint with a depth becomes a landmark. The table uses smoothing +
+CLAHE, a 10 m prior and retrieval. The second walk was queried at every
+6th image (300).
+
+| Map | Held-out real photos (898) | Renders (898) | Second walk, 12 min later (300) | Fit residual, median / p90 | Time per image | Map size |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| 2 observations (19k landmarks) | 524 | 169 | 35 (12%) | 21 / 59 cm | 0.2 s | 34 MB |
+| 1 observation, 400 points per keyframe (290k) | | | 111 (37%) | 17 / 45 cm | 0.4 s | 169 MB |
+| **1 observation, 1000 points (681k)** | **870** | **401** | **175 (58%)** | **19 / 46 cm** | 1.3 s | 397 MB |
+
+All the second walk's fixes fit its SfM by one similarity, every time. So
+the denser map localizes 58% of another walk's images, 12 minutes later.
+It costs 6 times the search time and 12 times the size. For a robot that
+localizes every few images, 1.3 s is enough. On a long route, the map
+should be split by area.
 
 Smoothing and CLAHE nearly double the real fixes. They raise the renders
 from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza

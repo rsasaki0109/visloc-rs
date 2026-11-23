@@ -49,7 +49,10 @@ All notable changes to `visloc-rs` will be documented here.
   night and patches over a replay. Smoothing keeps 838 of 858 images
   localized under σ 10 noise, where the plain map gets 218 fixes, metres
   wrong. `gs/real_map_test.py` localizes real held-out photos, splat
-  renders and a second walk against a map of real photos.
+  renders and a second walk against a map of real photos. With
+  `tum_rgbd_save_map --min-observations 1`, a real-photo map localizes
+  58% of a second walk's images 12 minutes later (from 12%), all
+  consistent with that walk's SfM, at 6x the search time.
 - **Real to sim: a robot simulator made of a 3D Gaussian splat** (docs/navigation.md,
   `ros2/visloc-ros2/gs/`). From public photos (TUM RGB-D's Pioneer hall),
   visloc-rs's SfM (put in metres by a 7-number fit to the motion capture,

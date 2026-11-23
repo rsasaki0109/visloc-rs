@@ -31,8 +31,16 @@ RADIUS = 0.25
 class Figure:
     """One pedestrian's triangles at each of PHASES gait phases (x forward, z up, feet at z = 0)."""
 
-    def __init__(self, rng):
+    def __init__(self, rng, extra=None):
+        """extra: None, 'dog' (a dog on a lead at their right) or 'stroller' (pushed ahead)."""
+        self.extra = extra
         self.frames = self._build(rng, 1.0)
+        if extra == 'dog':
+            self.dog_col = [(150, 100, 55), (30, 28, 26), (235, 225, 205), (120, 120, 125)][rng.integers(4)]
+        elif extra == 'stroller':
+            self.stroller_col = [(40, 60, 110), (150, 30, 40), (60, 60, 64), (70, 110, 80)][rng.integers(4)]
+        if extra:
+            self.frames = self._build(rng, 1.0, same_as=self)
         self.low = self._build(rng, 0.5, same_as=self)
 
     def _build(self, rng, detail, same_as=None):
@@ -64,9 +72,15 @@ class Figure:
                               nu=q(14), nv=q(8))               # waist
             rm.superellipsoid(np.array([0, 0, sh - 0.14 * s]), (0.12, 0.19, 0.17 * s), 0.7, col=shirt,
                               nu=q(16), nv=q(8))               # chest and shoulders
+            hands = []
             for side, sw in ((1, -a), (-1, a)):           # arms swing against the legs
                 y = 0.20 * side
                 hand = np.array([0.58 * s * math.sin(0.35 * sw), y * 1.05, sh - 0.03 - 0.58 * s * math.cos(0.35 * sw)])
+                if self.extra == 'stroller' and same_as is not None:      # both hands on the handle
+                    hand = np.array([0.42, 0.19 * side, 0.98 * s])
+                elif self.extra == 'dog' and same_as is not None and side < 0:   # the lead in the right hand
+                    hand = np.array([0.22, -0.26, 0.92 * s])
+                hands.append(hand)
                 elbow = (np.array([0, y, sh - 0.03]) + hand) / 2
                 rm.cylinder([0, y, sh - 0.03], elbow, 0.048, shirt, n=q(8))
                 rm.cylinder(elbow, hand, 0.04, skin, n=q(8))
@@ -75,12 +89,59 @@ class Figure:
             rm.superellipsoid(head, (0.10 * s, 0.085 * s, 0.115 * s), 1.0, col=skin, nu=q(12), nv=q(8))
             rm.superellipsoid(head + np.array([-0.015, 0, 0.03 * s]), (0.10 * s, 0.09 * s, 0.10 * s), 1.0, col=hair,
                               zmin=0.0, nu=q(12), nv=q(6))
+            if self.extra == 'dog' and same_as is not None:
+                _dog(np.array([0.85, -0.35, 0.0]), 2 * math.pi * ph / PHASES, self.dog_col, hands[1], q)
+            elif self.extra == 'stroller' and same_as is not None:
+                _stroller(np.array([0.75, 0.0, 0.0]), 2 * math.pi * ph / PHASES, self.stroller_col, q)
             m = type('Mesh', (), {})()
             m.tris, m.vn = np.array(rm._T), np.array(rm._N)
             m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
             frames.append(m)
         del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
         return frames
+
+
+def _dog(base, th, col, hand, q):
+    """A medium dog trotting at base (its frame: x forward), legs by gait angle th, on a lead."""
+    body = base + np.array([0, 0, 0.42])
+    rm.superellipsoid(body, (0.32, 0.11, 0.12), 0.8, col=col, nu=q(14), nv=q(8))
+    head = base + np.array([0.36, 0, 0.58])
+    rm.superellipsoid(head, (0.11, 0.08, 0.09), 0.9, col=col, nu=q(10), nv=q(6))
+    rm.superellipsoid(head + np.array([0.1, 0, -0.03]), (0.06, 0.045, 0.045), 0.9, col=col, nu=q(8), nv=q(4))  # muzzle
+    for y in (-0.05, 0.05):                                    # ears
+        rm.superellipsoid(head + np.array([-0.02, y, 0.09]), (0.03, 0.02, 0.05), 0.9, col=col, nu=6, nv=4)
+    for x, y, ph in ((0.22, 0.07, 0.0), (0.22, -0.07, math.pi), (-0.22, 0.07, math.pi), (-0.22, -0.07, 0.0)):
+        top = base + np.array([x, y, 0.38])
+        foot = base + np.array([x + 0.09 * math.sin(th + ph), y, 0.02])
+        rm.cylinder(top, foot, 0.035, col, n=q(6))
+    rm.cylinder(base + np.array([-0.3, 0, 0.47]), base + np.array([-0.42, 0, 0.62 + 0.03 * math.sin(2 * th)]),
+                0.025, col, n=q(6))                            # tail
+    collar = head + np.array([-0.08, 0, -0.06])
+    rm.cylinder(hand, collar, 0.006, (200, 40, 40), n=4, caps=False)   # the lead
+
+
+def _stroller(base, th, col, q):
+    """A pushchair ahead of its pusher (frame: x forward): bassinet, hood, frame, turning wheels."""
+    rm.superellipsoid(base + np.array([0.05, 0, 0.62]), (0.34, 0.22, 0.14), 0.6, col=col, nu=q(14), nv=q(8))
+    rm.superellipsoid(base + np.array([-0.12, 0, 0.78]), (0.2, 0.23, 0.2), 0.9, col=col, zmin=0.0,
+                      nu=q(12), nv=q(6))                       # hood
+    grey = (60, 60, 64)
+    for y in (-0.19, 0.19):
+        rm.cylinder(base + np.array([-0.33, y, 0.98]), base + np.array([-0.05, y, 0.48]), 0.012, grey, n=q(6))
+        rm.cylinder(base + np.array([-0.05, y, 0.48]), base + np.array([0.28, y, 0.12]), 0.012, grey, n=q(6))
+        rm.cylinder(base + np.array([-0.05, y, 0.48]), base + np.array([-0.25, y, 0.12]), 0.012, grey, n=q(6))
+        for x in (0.28, -0.25):                               # wheels
+            rm.cylinder(base + np.array([x, y - 0.02, 0.12]), base + np.array([x, y + 0.02, 0.12]), 0.11,
+                        (25, 25, 28), n=q(12))
+    rm.cylinder(base + np.array([-0.33, -0.22, 0.98]), base + np.array([-0.33, 0.22, 0.98]), 0.016, grey, n=q(6))
+    del th
+
+
+# Footprints (along, left, radius) in each kind's frame: walker, cyclist, dog walker, stroller.
+FOOT = {0: ((0.0, 0.0, RADIUS),),
+        1: ((-0.6, 0.0, 0.3), (0.0, 0.0, 0.3), (0.6, 0.0, 0.3)),
+        2: ((0.0, 0.0, RADIUS), (0.85, -0.35, 0.22)),
+        3: ((0.0, 0.0, RADIUS), (0.75, 0.0, 0.32))}
 
 
 def _two_link(hip, foot, l1, l2, forward):
@@ -285,7 +346,8 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 
 
 class Crowd:
-    def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0):
+    def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
+                 dog_walkers=0, strollers=0, pauses=True):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
@@ -308,6 +370,22 @@ class Crowd:
             self.figures += [Bike(rng) for _ in range(cyclists)]
             self.kind = np.concatenate([self.kind, np.ones(cyclists, int)])
             n += cyclists
+        for kind, count, extra, v in ((2, dog_walkers, 'dog', 0.9 * speed), (3, strollers, 'stroller', 0.8 * speed)):
+            if count:                                               # after the cyclists, likewise
+                self.s = np.concatenate([self.s, rng.uniform(0, self.length, count)])
+                self.dir = np.concatenate([self.dir, rng.choice([-1.0, 1.0], count)])
+                self.v = np.concatenate([self.v, v * rng.uniform(0.8, 1.2, count)])
+                self.side = np.concatenate([self.side, rng.uniform(-1.0, 1.0, count)])
+                self.phase = np.concatenate([self.phase, rng.uniform(0, 1, count)])
+                self.figures += [Figure(rng, extra) for _ in range(count)]
+                self.kind = np.concatenate([self.kind, np.full(count, kind)])
+                n += count
+        # Behaviour: walkers now and then stand still a while (a chat, a phone); anyone on foot
+        # now and then drifts across to the other side.
+        self.brng = np.random.default_rng(seed + 2000)
+        self.pauses = pauses
+        self.pause = np.zeros(n)
+        self.side_goal = self.side.copy()
         self.xy, self.yaw = np.zeros((n, 2)), np.zeros(n)
         self.normal = np.zeros((n, 2))
         self.dodge = np.zeros(n)        # extra side offset while stepping round the robot (m)
@@ -341,10 +419,22 @@ class Crowd:
         return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
 
     def _footprint(self, i, xy, yaw):
-        if self.kind[i]:
-            h = np.array([math.cos(yaw), math.sin(yaw)])
-            return np.array([xy - 0.6 * h, xy, xy + 0.6 * h]), np.full(3, 0.3)
-        return np.array([xy]), np.array([RADIUS])
+        h = np.array([math.cos(yaw), math.sin(yaw)])
+        left = np.array([-h[1], h[0]])
+        f = FOOT[int(self.kind[i])]
+        return np.array([xy + a * h + b * left for a, b, _ in f]), np.array([r for _, _, r in f])
+
+    def _overlap(self, i, xy, yaw, robot):
+        """How deep agent i standing at (xy, yaw) is in anyone (or within 5 cm of the robot), m."""
+        c, r = self._footprint(i, xy, yaw)
+        worst = float((r + self.robot_radius + 0.05 - np.hypot(c[:, 0] - robot[0], c[:, 1] - robot[1])).max())
+        for j in range(len(self.s)):
+            if j == i:
+                continue
+            cj, rj = self._footprint(j, self.xy[j], self.yaw[j])
+            d = np.hypot(c[:, None, 0] - cj[None, :, 0], c[:, None, 1] - cj[None, :, 1])
+            worst = max(worst, float((r[:, None] + rj[None, :] - d).max()))
+        return worst
 
     def _clear(self, i, xy, yaw, robot, slack=0.02):
         """Whether agent i standing at (xy, yaw) overlaps nobody by more than slack, and
@@ -389,13 +479,14 @@ class Crowd:
         (3 m) and so overtake walkers."""
         robot = np.asarray(robot_xy, float)
         n = len(self.s)
-        rad = np.where(self.kind == 1, 0.3, RADIUS)          # footprint half-width
-        half = np.where(self.kind == 1, 0.6, 0.0)            # a bicycle's half-length beyond that
+        rad = np.array([max(abs(b) + r for _, b, r in FOOT[int(k)]) for k in self.kind])    # half-width
+        half = np.array([max(abs(a) + r for a, _, r in FOOT[int(k)]) for k in self.kind]) - rad  # length beyond
         heading = np.stack([np.cos(self.yaw), np.sin(self.yaw)], 1)
         vel = heading * (self.v * self.moving)[:, None] if hasattr(self, 'moving') else heading * self.v[:, None]
         moving = np.ones(n)
         for i in range(n):
-            look = self.yield_m * (2.5 if self.kind[i] else 1.0)
+            bike = self.kind[i] == 1
+            look = self.yield_m * (2.5 if bike else 1.0)
             # (ahead, lateral, needed clearance, same-direction speed or None for "wait")
             best = None
             rel = robot - self.xy[i]
@@ -419,7 +510,21 @@ class Crowd:
                 if best is None or a < best[0]:
                     best = (a, lat, need, follow, False)
             speed = self.v[i]
-            old_dodge = self.dodge[i]
+            old_dodge, old_side = self.dodge[i], self.side[i]
+            if not bike:                                         # drift across now and then
+                if self.brng.random() < dt / 90.0:
+                    self.side_goal[i] = self.brng.uniform(-1.6, 1.6)
+                step = float(np.clip(self.side_goal[i] - self.side[i], -0.5 * dt, 0.5 * dt))
+                self.side[i] += step
+                if step:
+                    speed *= 0.8
+            pausing = False
+            if self.pauses and self.kind[i] == 0:                # a walker stands still a while now and then
+                if self.pause[i] > 0:
+                    self.pause[i] -= dt
+                    pausing = True
+                elif self.brng.random() < dt / 60.0:
+                    self.pause[i] = self.brng.uniform(8.0, 20.0)
             if best is not None:
                 a, lat, need, follow, is_robot = best
                 away = -1.0 if lat > 0 else 1.0
@@ -427,7 +532,7 @@ class Crowd:
                     away = -away                                 # that side is blocked: try the other
                 if self.waited[i] > 6.0:
                     self.waited[i] = 0.0
-                self.dodge[i] = float(np.clip(self.dodge[i] + away * (1.2 if self.kind[i] else 0.8) * dt,
+                self.dodge[i] = float(np.clip(self.dodge[i] + away * (1.2 if bike else 0.8) * dt,
                                               -2.0, 2.0))
                 self.waited[i] += dt if a < need + 0.3 else 0.0
                 in_way = abs(lat) < need + 0.05
@@ -437,26 +542,32 @@ class Crowd:
                     speed = 0.0
                 else:
                     speed = (0.35 if is_robot else 0.6) * self.v[i]
-            else:
+            if pausing:
+                speed = 0.0
+            if best is None:
                 self.waited[i] = 0.0
                 self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
             # Never step into someone: try the move with the new dodge, then without moving
             # on, then without the new dodge; else stay put.
             s_new = min(max(self.s[i] + self.dir[i] * speed * dt, 0.0), self.length)
             moved = False
+            # Already inside someone (placed there, or the robot drove up): any step that
+            # gets less deep is allowed, so nobody stays stuck inside another.
+            now = self._overlap(i, self.xy[i], self.yaw[i], robot)
             for s_try, dodge_try in ((s_new, self.dodge[i]), (self.s[i], self.dodge[i]), (s_new, old_dodge)):
                 xy, yaw, normal = self._pose(i, s_try, dodge_try, self.dir[i])
-                if self._clear(i, xy, yaw, robot):
+                if self._clear(i, xy, yaw, robot) or (now > 0.02 and self._overlap(i, xy, yaw, robot) < now - 1e-4):
                     moved = s_try != self.s[i]
                     self.s[i], self.dodge[i] = s_try, dodge_try
                     self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
                     break
             else:
-                self.dodge[i] = old_dodge
-            if moved:
+                self.dodge[i], self.side[i] = old_dodge, old_side
+                self.side_goal[i] = old_side                     # that way is taken: stay on this line
+            if moved or pausing:
                 self.stuck[i] = 0.0
                 # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
-                self.phase[i] = (self.phase[i] + speed * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
+                self.phase[i] = (self.phase[i] + speed * dt / (4.5 if bike else 1.3)) % 1.0
             else:
                 self.stuck[i] += dt
                 speed = 0.0
@@ -470,7 +581,7 @@ class Crowd:
     def overlaps(self, robot_xy, robot_radius):
         """(person-person, person-robot) pairs whose footprints overlap now."""
         c, r = self.circles()
-        owner = np.concatenate([[i] * (3 if k else 1) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
+        owner = np.concatenate([[i] * len(FOOT[int(k)]) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
         d = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
         hit = (d < r[:, None] + r[None, :]) & (owner[:, None] < owner[None, :])
         pp = len({(owner[a], owner[b]) for a, b in zip(*np.nonzero(hit))})
@@ -482,14 +593,10 @@ class Crowd:
         """Footprints as circles: (centres M x 2, radii M). A person is one circle, a
         bicycle three along its length."""
         cs, rs = [], []
-        for p, yw, k in zip(self.xy, self.yaw, self.kind):
-            if k:
-                for o in (-0.6, 0.0, 0.6):
-                    cs.append(p + o * np.array([math.cos(yw), math.sin(yw)]))
-                    rs.append(0.3)
-            else:
-                cs.append(p)
-                rs.append(RADIUS)
+        for i in range(len(self.xy)):
+            c, r = self._footprint(i, self.xy[i], self.yaw[i])
+            cs += list(c)
+            rs += list(r)
         return np.array(cs).reshape(-1, 2), np.array(rs)
 
     def hits(self, x, y, r):
