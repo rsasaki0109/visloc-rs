@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use visloc_core::types::{LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_localization::{AllLandmarksSelector, LocalizationConfig, LocalizationPipeline};
 use visloc_vision::matching::BruteForceMatcher;
-use visloc_vision::pnp::{Correspondence2D3D, DltPnP, GaussNewtonPoseRefiner};
+use visloc_vision::pnp::{Correspondence2D3D, GaussNewtonPoseRefiner, PnpMinimalSolver};
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 
 use crate::arrays::{require_finite, rows, vec_to_py};
@@ -33,13 +33,18 @@ fn failure_reason_name(reason: &LocalizationFailureReason) -> String {
     .to_owned()
 }
 
+fn pnp_solver(name: &str) -> PyResult<PnpMinimalSolver> {
+    name.parse().map_err(PyValueError::new_err)
+}
+
 fn ransac(
+    solver: PnpMinimalSolver,
     iterations: usize,
     reprojection_threshold: f64,
     seed: u64,
     refine: bool,
     confidence: Option<f64>,
-) -> PyResult<PnPRansac<DltPnP, GaussNewtonPoseRefiner>> {
+) -> PyResult<PnPRansac<PnpMinimalSolver, GaussNewtonPoseRefiner>> {
     if iterations == 0 {
         return Err(PyValueError::new_err("ransac_iterations must be positive"));
     }
@@ -54,11 +59,14 @@ fn ransac(
         }
     }
     let mut estimator = PnPRansac {
+        pose_estimator: solver,
+        pose_refiner: Some(GaussNewtonPoseRefiner::default()),
         iterations,
         reprojection_threshold,
         seed,
         confidence,
-        ..PnPRansac::default()
+        early_stop_min_iterations: 0,
+        early_stop_inlier_ratio: None,
     };
     if !refine {
         estimator.pose_refiner = None;
@@ -199,8 +207,10 @@ impl PyLocalizationResult {
 ///
 /// The query is a camera plus `keypoints` `(N, 2)` and `descriptors` `(N, D)`.
 /// Descriptors are matched to the map with a brute-force L2 matcher and Lowe's
-/// ratio test, then the pose is estimated with DLT PnP inside RANSAC and
-/// refined with Gauss-Newton. The GIL is released while localizing.
+/// ratio test, then the pose is estimated with PnP inside RANSAC and refined
+/// with Gauss-Newton. `pnp_solver` picks the minimal solver: `"dlt"` (the
+/// default) or `"p3p"`, which stays well-posed when the matched points are
+/// coplanar (maps dominated by walls). The GIL is released while localizing.
 #[pyfunction]
 #[pyo3(signature = (
     camera,
@@ -217,6 +227,7 @@ impl PyLocalizationResult {
     max_median_reprojection_error = None,
     max_reprojection_error = None,
     seed = 7,
+    pnp_solver = "dlt",
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn localize(
@@ -234,7 +245,9 @@ pub fn localize(
     max_median_reprojection_error: Option<f64>,
     max_reprojection_error: Option<f64>,
     seed: u64,
+    pnp_solver: &str,
 ) -> PyResult<PyLocalizationResult> {
+    let solver = self::pnp_solver(pnp_solver)?;
     let keypoint_rows = rows(keypoints.as_array(), 2, "keypoints")?;
     if keypoint_rows.single {
         return Err(PyValueError::new_err("keypoints must have shape (N, 2)"));
@@ -273,11 +286,19 @@ pub fn localize(
         max_mean_reprojection_error,
         max_median_reprojection_error,
         max_reprojection_error,
+        pnp_solver: solver,
     };
     let pipeline = LocalizationPipeline::with_pose_estimator(
         BruteForceMatcher { ratio },
         AllLandmarksSelector,
-        ransac(ransac_iterations, reprojection_threshold, seed, true, None)?,
+        ransac(
+            solver,
+            ransac_iterations,
+            reprojection_threshold,
+            seed,
+            true,
+            None,
+        )?,
         config,
     );
     let map = &reconstruction.map;
@@ -358,7 +379,8 @@ impl PyPnPRansacResult {
 /// Estimate a world-to-camera pose from 2D-3D correspondences.
 ///
 /// `points2d` `(N, 2)` are pixels in `camera`; `points3d` `(N, 3)` are world
-/// points. Runs DLT PnP in RANSAC (deterministic for a given `seed`) and, when
+/// points. Runs PnP in RANSAC (deterministic for a given `seed`; `pnp_solver`
+/// is `"dlt"`, the default, or `"p3p"` for coplanar points) and, when
 /// `refine` is true, Gauss-Newton refinement on the inliers. `confidence`
 /// enables COLMAP-style adaptive termination with `ransac_iterations` as the
 /// cap. Returns `None` when no pose is found.
@@ -373,6 +395,7 @@ impl PyPnPRansacResult {
     seed = 7,
     refine = true,
     confidence = None,
+    pnp_solver = "dlt",
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn estimate_pose_pnp_ransac(
@@ -385,7 +408,9 @@ pub fn estimate_pose_pnp_ransac(
     seed: u64,
     refine: bool,
     confidence: Option<f64>,
+    pnp_solver: &str,
 ) -> PyResult<Option<PyPnPRansacResult>> {
+    let solver = self::pnp_solver(pnp_solver)?;
     let p2 = rows(points2d.as_array(), 2, "points2d")?;
     let p3 = rows(points3d.as_array(), 3, "points3d")?;
     if p2.single || p3.single || p2.count != p3.count {
@@ -408,6 +433,7 @@ pub fn estimate_pose_pnp_ransac(
         })
         .collect::<Vec<_>>();
     let estimator = ransac(
+        solver,
         ransac_iterations,
         reprojection_threshold,
         seed,

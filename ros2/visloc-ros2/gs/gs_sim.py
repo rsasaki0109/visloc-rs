@@ -17,9 +17,13 @@ differential drive driven by `cmd_vel`. It publishes:
   mesh or from a ground-truth scan of the place);
 - `ground_truth` (`nav_msgs/Odometry`, the true pose in the map frame) and
   `collisions` (`std_msgs/Int32`, steps a wall stopped the robot);
-- with `--pedestrians N` (and `--cyclists M`), N people walk (and M ride
-  bicycles along) the scene's route (its start and goals) back and forth
-  (`people.py`). They show in the camera and in the
+- with `--pedestrians N` (and `--cyclists`, `--dog-walkers`, `--strollers`),
+  people walk (ride bicycles, walk dogs, push pushchairs) along the scene's
+  route (its start and goals) back and forth (`people.py`). Walkers now and
+  then stand still a while, and people on foot drift across to the other
+  side. `--cars` drive both ways along a road beside the route, keeping
+  right; the road is `--road-offset` metres to the left of the route, or
+  estimated from the splat's grey ground; They show in the camera and in the
   scan, so Nav2 has to steer round them, and they wait while the robot is
   just in front of them. In the camera they are gaussians rendered with the
   scene by default (`--people-style splat`, `gsplat_render_server
@@ -140,23 +144,40 @@ class Sim(Node):
         here = os.path.dirname(os.path.abspath(args.scene))
         sp = lambda p: p if os.path.isabs(p) else os.path.join(here, p)  # noqa: E731
         # Splat people are rendered with the scene; mesh people are drawn over it by depth.
-        movers = args.pedestrians + args.cyclists
+        movers = args.pedestrians + args.cyclists + args.dog_walkers + args.strollers + args.cars
         self.splat_people = movers > 0 and args.people_style == 'splat'
         self.renderer = Renderer(args.server, sp(scene['splat']), cam,
                                  depth=movers > 0 and not self.splat_people,
-                                 dynamic=2500 * args.pedestrians + 6000 * args.cyclists if self.splat_people else 0)
+                                 dynamic=(2500 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
+                                          + 5500 * args.strollers + 7000 * args.cars) if self.splat_people else 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
+        self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.crowd = None
-        if args.pedestrians + args.cyclists > 0:
+        if movers > 0:
             from people import Crowd  # noqa: PLC0415
             route = scene.get('route') or [scene['start']] + scene.get('goals', [])
             if len(route) < 2:
                 raise SystemExit('--pedestrians needs a route: the scene has no goals')
+            road_offset = args.road_offset
+            if args.road:
+                road_offset = [tuple(r) for r in json.load(open(args.road))]
+            if args.cars and road_offset is None:
+                from make_gs_scene import read_ply  # noqa: PLC0415
+                from people import estimate_road  # noqa: PLC0415
+                ply = read_ply(sp(scene['splat']))
+                xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
+                rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
+                road_offset = estimate_road(xyz, rgb, 1 / (1 + np.exp(-ply['opacity'])), route, self.ground_z)
+                if all(o is None for _, _, o in road_offset):
+                    raise SystemExit('--cars: no road found beside the route; pass --road-offset')
+                self.get_logger().info('cars: road beside the route (estimated, s from-to: offset m): ' + ', '.join(
+                    f'{a:.0f}-{b:.0f}: {"-" if o is None else f"{o:+.1f}"}' for a, b, o in road_offset))
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
-                               cyclists=args.cyclists, cyclist_speed=args.cyclist_speed)
+                               cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
+                               dog_walkers=args.dog_walkers, strollers=args.strollers,
+                               cars=args.cars, road_offset=road_offset, car_speed=args.car_speed)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
-        self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
         self.pose = [x, y, yaw]          # true pose in the map frame
@@ -187,6 +208,8 @@ class Sim(Node):
         self.people = open(args.record + '.people.csv', 'w') if args.record and self.crowd else None
         if self.people:
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
+            json.dump({'road_offset': getattr(self.crowd, 'road_offset', None)},  # number or segments
+                      open(args.record + '.people.json', 'w'))
 
     def on_cmd(self, msg):
         self.cmd = (msg.linear.x, msg.angular.z, self.t)
@@ -342,6 +365,15 @@ def main():
                    help='publish mono8 (a third of the bytes; large rgb8 images can stall some DDS stacks)')
     p.add_argument('--pedestrians', type=int, default=0, help='people walking the route (people.py)')
     p.add_argument('--cyclists', type=int, default=0, help='people riding bicycles along the route (people.py)')
+    p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
+    p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
+    p.add_argument('--cars', type=int, default=0, help='cars driving along the road beside the route')
+    p.add_argument('--road-offset', dest='road_offset', type=float, default=None,
+                   help='the road centre line, m to the left of the route (default: estimated from the splat)')
+    p.add_argument('--road', default='',
+                   help='JSON [[s_start, s_end, offset or null], ...]: the road beside the route per stretch '
+                        '(as estimated and logged, edited where the splat misleads the estimate)')
+    p.add_argument('--car-speed', dest='car_speed', type=float, default=6.0, help='m/s, each +-20%%')
     p.add_argument('--cyclist-speed', dest='cyclist_speed', type=float, default=4.0, help='m/s, each +-20%%')
     p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
                    help='splat: the people are gaussians rendered with the scene; mesh: drawn over it')

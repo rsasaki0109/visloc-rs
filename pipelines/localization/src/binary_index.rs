@@ -433,19 +433,67 @@ impl BinaryLandmarkIndex {
         gates: BinaryMatchGates,
         landmarks: &[usize],
     ) -> CorrespondenceSet {
+        self.match_among_threaded(keypoints, query, gates, landmarks, 1)
+    }
+
+    /// [`Self::match_among`] on `threads` threads (keypoints split in
+    /// order, so the result is the same).
+    pub fn match_among_threaded(
+        &self,
+        keypoints: &[Point2<f64>],
+        query: &PackedDescriptors,
+        gates: BinaryMatchGates,
+        landmarks: &[usize],
+        threads: usize,
+    ) -> CorrespondenceSet {
         let count = keypoints.len().min(query.len());
-        let matches = (0..count)
-            .filter_map(|query_index| {
-                let bits = query.get(query_index)?;
-                let candidates = landmarks.iter().flat_map(|&landmark| {
-                    self.landmark_rows(landmark)
-                        .map(move |train| (landmark, train))
-                });
-                let (distance, landmark, second) = self.search(bits, candidates).accept(gates)?;
-                Some(descriptor_match(query_index, landmark, distance, second))
+        let match_range = |range: std::ops::Range<usize>| {
+            range
+                .filter_map(|query_index| {
+                    let bits = query.get(query_index)?;
+                    let candidates = landmarks.iter().flat_map(|&landmark| {
+                        self.landmark_rows(landmark)
+                            .map(move |train| (landmark, train))
+                    });
+                    let (distance, landmark, second) =
+                        self.search(bits, candidates).accept(gates)?;
+                    Some(descriptor_match(query_index, landmark, distance, second))
+                })
+                .collect::<Vec<_>>()
+        };
+        let threads = threads.clamp(1, count.max(1));
+        let matches = if threads == 1 {
+            match_range(0..count)
+        } else {
+            let chunk = count.div_ceil(threads);
+            std::thread::scope(|scope| {
+                let handles = (0..count)
+                    .step_by(chunk)
+                    .map(|start| {
+                        let match_range = &match_range;
+                        scope.spawn(move || match_range(start..(start + chunk).min(count)))
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("matcher thread panicked"))
+                    .collect()
             })
-            .collect();
+        };
         self.correspondence_set(keypoints, matches, landmarks.len())
+    }
+
+    /// Indices (into this index) of the landmarks within `radius` of
+    /// `center`, in index order: the candidates of a radius search around a
+    /// pose prior, for [`Self::match_among`].
+    pub fn landmarks_within(&self, center: &Point3<f64>, radius: f64) -> Vec<usize> {
+        let r2 = radius * radius;
+        self.positions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| (*p - center).norm_squared() <= r2)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// The nearest of `candidates` (landmark indices with their packed

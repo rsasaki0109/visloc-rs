@@ -31,8 +31,16 @@ RADIUS = 0.25
 class Figure:
     """One pedestrian's triangles at each of PHASES gait phases (x forward, z up, feet at z = 0)."""
 
-    def __init__(self, rng):
+    def __init__(self, rng, extra=None):
+        """extra: None, 'dog' (a dog on a lead at their right) or 'stroller' (pushed ahead)."""
+        self.extra = extra
         self.frames = self._build(rng, 1.0)
+        if extra == 'dog':
+            self.dog_col = [(150, 100, 55), (30, 28, 26), (235, 225, 205), (120, 120, 125)][rng.integers(4)]
+        elif extra == 'stroller':
+            self.stroller_col = [(40, 60, 110), (150, 30, 40), (60, 60, 64), (70, 110, 80)][rng.integers(4)]
+        if extra:
+            self.frames = self._build(rng, 1.0, same_as=self)
         self.low = self._build(rng, 0.5, same_as=self)
 
     def _build(self, rng, detail, same_as=None):
@@ -64,9 +72,15 @@ class Figure:
                               nu=q(14), nv=q(8))               # waist
             rm.superellipsoid(np.array([0, 0, sh - 0.14 * s]), (0.12, 0.19, 0.17 * s), 0.7, col=shirt,
                               nu=q(16), nv=q(8))               # chest and shoulders
+            hands = []
             for side, sw in ((1, -a), (-1, a)):           # arms swing against the legs
                 y = 0.20 * side
                 hand = np.array([0.58 * s * math.sin(0.35 * sw), y * 1.05, sh - 0.03 - 0.58 * s * math.cos(0.35 * sw)])
+                if self.extra == 'stroller' and same_as is not None:      # both hands on the handle
+                    hand = np.array([0.42, 0.19 * side, 0.98 * s])
+                elif self.extra == 'dog' and same_as is not None and side < 0:   # the lead in the right hand
+                    hand = np.array([0.22, -0.26, 0.92 * s])
+                hands.append(hand)
                 elbow = (np.array([0, y, sh - 0.03]) + hand) / 2
                 rm.cylinder([0, y, sh - 0.03], elbow, 0.048, shirt, n=q(8))
                 rm.cylinder(elbow, hand, 0.04, skin, n=q(8))
@@ -75,12 +89,132 @@ class Figure:
             rm.superellipsoid(head, (0.10 * s, 0.085 * s, 0.115 * s), 1.0, col=skin, nu=q(12), nv=q(8))
             rm.superellipsoid(head + np.array([-0.015, 0, 0.03 * s]), (0.10 * s, 0.09 * s, 0.10 * s), 1.0, col=hair,
                               zmin=0.0, nu=q(12), nv=q(6))
+            if self.extra == 'dog' and same_as is not None:
+                _dog(np.array([0.85, -0.35, 0.0]), 2 * math.pi * ph / PHASES, self.dog_col, hands[1], q)
+            elif self.extra == 'stroller' and same_as is not None:
+                _stroller(np.array([0.75, 0.0, 0.0]), 2 * math.pi * ph / PHASES, self.stroller_col, q)
             m = type('Mesh', (), {})()
             m.tris, m.vn = np.array(rm._T), np.array(rm._N)
             m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
             frames.append(m)
         del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
         return frames
+
+
+def _dog(base, th, col, hand, q):
+    """A medium dog trotting at base (its frame: x forward), legs by gait angle th, on a lead."""
+    body = base + np.array([0, 0, 0.42])
+    rm.superellipsoid(body, (0.32, 0.11, 0.12), 0.8, col=col, nu=q(14), nv=q(8))
+    head = base + np.array([0.36, 0, 0.58])
+    rm.superellipsoid(head, (0.11, 0.08, 0.09), 0.9, col=col, nu=q(10), nv=q(6))
+    rm.superellipsoid(head + np.array([0.1, 0, -0.03]), (0.06, 0.045, 0.045), 0.9, col=col, nu=q(8), nv=q(4))  # muzzle
+    for y in (-0.05, 0.05):                                    # ears
+        rm.superellipsoid(head + np.array([-0.02, y, 0.09]), (0.03, 0.02, 0.05), 0.9, col=col, nu=6, nv=4)
+    for x, y, ph in ((0.22, 0.07, 0.0), (0.22, -0.07, math.pi), (-0.22, 0.07, math.pi), (-0.22, -0.07, 0.0)):
+        top = base + np.array([x, y, 0.38])
+        foot = base + np.array([x + 0.09 * math.sin(th + ph), y, 0.02])
+        rm.cylinder(top, foot, 0.035, col, n=q(6))
+    rm.cylinder(base + np.array([-0.3, 0, 0.47]), base + np.array([-0.42, 0, 0.62 + 0.03 * math.sin(2 * th)]),
+                0.025, col, n=q(6))                            # tail
+    collar = head + np.array([-0.08, 0, -0.06])
+    rm.cylinder(hand, collar, 0.006, (200, 40, 40), n=4, caps=False)   # the lead
+
+
+def _stroller(base, th, col, q):
+    """A pushchair ahead of its pusher (frame: x forward): bassinet, hood, frame, turning wheels."""
+    rm.superellipsoid(base + np.array([0.05, 0, 0.62]), (0.34, 0.22, 0.14), 0.6, col=col, nu=q(14), nv=q(8))
+    rm.superellipsoid(base + np.array([-0.12, 0, 0.78]), (0.2, 0.23, 0.2), 0.9, col=col, zmin=0.0,
+                      nu=q(12), nv=q(6))                       # hood
+    grey = (60, 60, 64)
+    for y in (-0.19, 0.19):
+        rm.cylinder(base + np.array([-0.33, y, 0.98]), base + np.array([-0.05, y, 0.48]), 0.012, grey, n=q(6))
+        rm.cylinder(base + np.array([-0.05, y, 0.48]), base + np.array([0.28, y, 0.12]), 0.012, grey, n=q(6))
+        rm.cylinder(base + np.array([-0.05, y, 0.48]), base + np.array([-0.25, y, 0.12]), 0.012, grey, n=q(6))
+        for x in (0.28, -0.25):                               # wheels
+            rm.cylinder(base + np.array([x, y - 0.02, 0.12]), base + np.array([x, y + 0.02, 0.12]), 0.11,
+                        (25, 25, 28), n=q(12))
+    rm.cylinder(base + np.array([-0.33, -0.22, 0.98]), base + np.array([-0.33, 0.22, 0.98]), 0.016, grey, n=q(6))
+    del th
+
+
+class Car:
+    """A small car (frame: x forward, z up, wheels on z = 0), its wheels turned by PHASES steps."""
+
+    def __init__(self, rng):
+        paint = [(200, 30, 35), (235, 235, 232), (30, 32, 36), (60, 90, 150), (150, 155, 160), (40, 90, 60),
+                 (220, 180, 50)][rng.integers(7)]
+        glass, tyre, rim = (35, 45, 55), (22, 22, 24), (175, 178, 182)
+        self.frames = []
+        for ph in range(PHASES):
+            th = 2 * math.pi * ph / PHASES
+            del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+            rm.superellipsoid(np.array([0.0, 0, 0.62]), (2.2, 0.88, 0.33), 0.35, col=paint, nu=24, nv=10)   # body
+            rm.superellipsoid(np.array([-0.25, 0, 1.06]), (1.25, 0.8, 0.3), 0.45, col=paint, zmin=0.0,
+                              nu=20, nv=8)                                                               # roof
+            rm.superellipsoid(np.array([-0.25, 0, 1.08]), (1.18, 0.82, 0.22), 0.5, col=glass, zmin=-0.2,
+                              zmax=0.6, nu=20, nv=8)                                                     # windows
+            for x in (-1.35, 1.35):
+                for y in (-0.8, 0.8):
+                    s_ = 1 if y > 0 else -1
+                    rm.cylinder([x, y - s_ * 0.12, 0.33], [x, y + s_ * 0.1, 0.33], 0.33, tyre, n=16)
+                    hub = np.array([x, y + s_ * 0.105, 0.33])
+                    for k in range(3):                                        # spokes turn with the phase
+                        a = th + k * math.pi / 3
+                        rm.cylinder(hub - [0.2 * math.cos(a), 0, 0.2 * math.sin(a)],
+                                    hub + [0.2 * math.cos(a), 0, 0.2 * math.sin(a)], 0.03, rim, n=4)
+            for y in (-0.6, 0.6):
+                rm.cylinder([2.18, y, 0.7], [2.22, y, 0.7], 0.11, (255, 250, 225), emissive=True)   # headlights
+                rm.cylinder([-2.22, y, 0.75], [-2.18, y, 0.75], 0.09, (220, 25, 25), emissive=True)  # tail lights
+            m = type('Mesh', (), {})()
+            m.tris, m.vn = np.array(rm._T), np.array(rm._N)
+            m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
+            self.frames.append(m)
+        del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+        self.low = self.frames
+
+
+def estimate_road(xyz, rgb, opacity, route, ground_z, search=(2.5, 12.0), min_score=0.25):
+    """Where a road runs beside the route, from the splat's colours: per route segment, the
+    side offset (m, + to the left of the route's direction) of the densest band of
+    asphalt-like ground (grey, near the ground, opaque), or None where there is no such band.
+    Returns [(s_start, s_end, offset or None)] along the route. A guess: pass
+    --road-offset when the scene says otherwise."""
+    route = np.asarray(route, float)[:, :2]
+    gz = np.array([ground_z(x, y) for x, y in xyz[:, :2]])
+    mx, mn = rgb.max(1), rgb.min(1)
+    grey = ((mx - mn) / np.maximum(mx, 1e-3) < 0.12) & (mx > 0.25) & (mx < 0.65)
+    ground = (np.abs(xyz[:, 2] - gz) < 0.15) & (opacity > 0.5)
+    bins = np.arange(-search[1], search[1] + 0.01, 1.0)
+    centre = (bins[:-1] + bins[1:]) / 2
+    out, s0 = [], 0.0
+    for a, b in zip(route[:-1], route[1:]):
+        d = b - a
+        L = float(np.linalg.norm(d))
+        u = d / max(L, 1e-9)
+        n = np.array([-u[1], u[0]])
+        rel = xyz[:, :2] - a
+        m = ground & (rel @ u > 0) & (rel @ u < L)
+        lat = rel @ n
+        tot = np.histogram(lat[m], bins)[0]
+        asp = np.histogram(lat[m & grey], bins)[0]
+        # a 3 m wide band: the road, not a strip of shadow
+        tot3 = np.convolve(tot, np.ones(3), 'same')
+        asp3 = np.convolve(asp, np.ones(3), 'same')
+        ok = (np.abs(centre) >= search[0]) & (tot3 > 60)
+        frac = np.where(ok, asp3 / np.maximum(tot3, 1), 0)
+        k = int(np.argmax(frac))
+        out.append((s0, s0 + L, float(centre[k]) if frac[k] >= min_score else None))
+        s0 += L
+    return out
+
+
+# Footprints (along, left, radius) in each kind's frame: walker, cyclist, dog walker, stroller, car.
+FOOT = {0: ((0.0, 0.0, RADIUS),),
+        1: ((-0.6, 0.0, 0.3), (0.0, 0.0, 0.3), (0.6, 0.0, 0.3)),
+        2: ((0.0, 0.0, RADIUS), (0.85, -0.35, 0.22)),
+        3: ((0.0, 0.0, RADIUS), (0.75, 0.0, 0.32)),
+        4: ((-1.4, 0.0, 0.9), (0.0, 0.0, 0.9), (1.4, 0.0, 0.9))}
+LANE_HALF = 1.6     # a lane's centre from the road's centre line (m)
 
 
 def _two_link(hip, foot, l1, l2, forward):
@@ -285,7 +419,8 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 
 
 class Crowd:
-    def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0):
+    def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
+                 dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
@@ -308,6 +443,80 @@ class Crowd:
             self.figures += [Bike(rng) for _ in range(cyclists)]
             self.kind = np.concatenate([self.kind, np.ones(cyclists, int)])
             n += cyclists
+        for kind, count, extra, v in ((2, dog_walkers, 'dog', 0.9 * speed), (3, strollers, 'stroller', 0.8 * speed)):
+            if count:                                               # after the cyclists, likewise
+                self.s = np.concatenate([self.s, rng.uniform(0, self.length, count)])
+                self.dir = np.concatenate([self.dir, rng.choice([-1.0, 1.0], count)])
+                self.v = np.concatenate([self.v, v * rng.uniform(0.8, 1.2, count)])
+                self.side = np.concatenate([self.side, rng.uniform(-1.0, 1.0, count)])
+                self.phase = np.concatenate([self.phase, rng.uniform(0, 1, count)])
+                self.figures += [Figure(rng, extra) for _ in range(count)]
+                self.kind = np.concatenate([self.kind, np.full(count, kind)])
+                n += count
+        if cars:                                                    # last, likewise
+            if road_offset is None:
+                raise ValueError('cars need road_offset (the road centre line beside the route)')
+            # A number: one road all along; else [(s_start, s_end, offset or None)] per segment,
+            # and the cars keep to the longest stretch of road.
+            road = [(0.0, self.length, float(road_offset))] if np.isscalar(road_offset) else road_offset
+            runs, cur = [], []
+            for seg in road:
+                if seg[2] is None:
+                    cur and runs.append(cur)
+                    cur = []
+                else:
+                    cur.append(seg)
+            cur and runs.append(cur)
+            if not runs:
+                raise ValueError('no road beside the route')
+            self.road = max(runs, key=lambda r: r[-1][1] - r[0][0])
+            self.road_offset = road_offset
+            self.road_s = (self.road[0][0] + 1.0, self.road[-1][1] - 1.0)
+            # The two lanes as polylines offset from the route's vertices along their corner
+            # bisectors (mitred), so a car's path stays continuous round the corners.
+            seg_off = []
+            for a_, b_ in zip(self.cum[:-1], self.cum[1:]):
+                mid = (a_ + b_) / 2
+                o = next((o for a, b, o in self.road if a <= mid <= b), None)
+                seg_off.append(o)
+            last = next(o for o in seg_off if o is not None)
+            for k, o in enumerate(seg_off):       # stretches without a road: the nearest road's offset
+                seg_off[k] = last if o is None else o
+                last = seg_off[k]
+            dirs = np.diff(self.path, axis=0)
+            dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12
+            normals = np.stack([-dirs[:, 1], dirs[:, 0]], 1)
+            self.lanes = {}
+            for d_ in (1.0, -1.0):
+                verts = []
+                for k in range(len(self.path)):
+                    na = normals[max(k - 1, 0)]
+                    nb = normals[min(k, len(normals) - 1)]
+                    oa = seg_off[max(k - 1, 0)] - LANE_HALF * d_
+                    ob = seg_off[min(k, len(normals) - 1)] - LANE_HALF * d_
+                    m = na + nb
+                    m /= np.linalg.norm(m) + 1e-12
+                    scale = 1.0 / max(m @ nb, 0.5)          # mitre, capped at a 120-degree corner
+                    verts.append(self.path[k] + m * scale * (oa + ob) / 2)
+                self.lanes[d_] = np.array(verts)
+            self.lane_mix = None   # set below: per car, -1 .. 1, the lane it is in (moves on a U-turn)
+            car_s = rng.uniform(*self.road_s, cars)
+            self.s = np.concatenate([self.s, car_s])
+            car_dir = rng.choice([-1.0, 1.0], cars)
+            self.dir = np.concatenate([self.dir, car_dir])
+            self.v = np.concatenate([self.v, car_speed * rng.uniform(0.8, 1.2, cars)])
+            self.side = np.concatenate([self.side, [self.lane(s_, d_) for s_, d_ in zip(car_s, car_dir)]])
+            self.phase = np.concatenate([self.phase, rng.uniform(0, 1, cars)])
+            self.figures += [Car(rng) for _ in range(cars)]
+            self.kind = np.concatenate([self.kind, np.full(cars, 4)])
+            n += cars
+        self.lane_mix = self.dir.copy()
+        # Behaviour: walkers now and then stand still a while (a chat, a phone); anyone on foot
+        # now and then drifts across to the other side.
+        self.brng = np.random.default_rng(seed + 2000)
+        self.pauses = pauses
+        self.pause = np.zeros(n)
+        self.side_goal = self.side.copy()
         self.xy, self.yaw = np.zeros((n, 2)), np.zeros(n)
         self.normal = np.zeros((n, 2))
         self.dodge = np.zeros(n)        # extra side offset while stepping round the robot (m)
@@ -323,6 +532,19 @@ class Crowd:
                 self.s[i] = (self.s[i] + 1.0) % self.length
             self._place()
 
+    def lane(self, s, direction):
+        """A car's side offset at arc position s going this way: the road's offset there,
+        keeping right."""
+        road = self.road
+        k = next((n for n, (a, b, _) in enumerate(road) if a <= s <= b), 0 if s < road[0][0] else len(road) - 1)
+        off = road[k][2]
+        # Blend across a change of offset over 4 m either side of the joint.
+        for j, edge in ((k - 1, road[k][0]), (k + 1, road[k][1])):
+            if 0 <= j < len(road) and abs(s - edge) < 4.0:
+                w = 0.5 * (1 - abs(s - edge) / 4.0)
+                off = (1 - w) * off + w * road[j][2]
+        return off - LANE_HALF * direction
+
     def _at(self, s):
         k = np.clip(np.searchsorted(self.cum, s) - 1, 0, len(self.path) - 2)
         t = (s - self.cum[k]) / np.maximum(self.cum[k + 1] - self.cum[k], 1e-9)
@@ -330,21 +552,47 @@ class Crowd:
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
         return self.path[k] + t[:, None] * (self.path[k + 1] - self.path[k]), d
 
+    def _car_pose(self, i, s):
+        """A car at route arc position s, in its lane (blended while it changes lanes)."""
+        k = int(np.clip(np.searchsorted(self.cum, s) - 1, 0, len(self.path) - 2))
+        t = (s - self.cum[k]) / max(self.cum[k + 1] - self.cum[k], 1e-9)
+        w = (self.lane_mix[i] + 1) / 2                       # 1: the +1 lane, 0: the -1 lane
+        pts = {d_: (1 - t) * L[k] + t * L[k + 1] for d_, L in self.lanes.items()}
+        xy = w * pts[1.0] + (1 - w) * pts[-1.0]
+        seg = w * (self.lanes[1.0][k + 1] - self.lanes[1.0][k]) + (1 - w) * (self.lanes[-1.0][k + 1] - self.lanes[-1.0][k])
+        seg /= np.linalg.norm(seg) + 1e-12
+        yaw = math.atan2(seg[1] * self.dir[i], seg[0] * self.dir[i])
+        return xy, yaw, np.array([-seg[1], seg[0]])
+
     def _pose(self, i, s, dodge, direction):
         """Where agent i would stand at arc position s with this dodge: (xy, yaw, normal)."""
+        if self.kind[i] == 4:
+            return self._car_pose(i, s)
         p, d = self._at(np.array([s]))
         p, d = p[0], d[0]
         normal = np.array([-d[1], d[0]])
         off = self.side[i] + dodge
-        while abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
-            off *= 0.7
+        while self.kind[i] != 4 and abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
+            off *= 0.7                            # (cars keep to their lane: the road is off the grid)
         return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
 
     def _footprint(self, i, xy, yaw):
-        if self.kind[i]:
-            h = np.array([math.cos(yaw), math.sin(yaw)])
-            return np.array([xy - 0.6 * h, xy, xy + 0.6 * h]), np.full(3, 0.3)
-        return np.array([xy]), np.array([RADIUS])
+        h = np.array([math.cos(yaw), math.sin(yaw)])
+        left = np.array([-h[1], h[0]])
+        f = FOOT[int(self.kind[i])]
+        return np.array([xy + a * h + b * left for a, b, _ in f]), np.array([r for _, _, r in f])
+
+    def _overlap(self, i, xy, yaw, robot):
+        """How deep agent i standing at (xy, yaw) is in anyone (or within 5 cm of the robot), m."""
+        c, r = self._footprint(i, xy, yaw)
+        worst = float((r + self.robot_radius + 0.05 - np.hypot(c[:, 0] - robot[0], c[:, 1] - robot[1])).max())
+        for j in range(len(self.s)):
+            if j == i:
+                continue
+            cj, rj = self._footprint(j, self.xy[j], self.yaw[j])
+            d = np.hypot(c[:, None, 0] - cj[None, :, 0], c[:, None, 1] - cj[None, :, 1])
+            worst = max(worst, float((r[:, None] + rj[None, :] - d).max()))
+        return worst
 
     def _clear(self, i, xy, yaw, robot, slack=0.02):
         """Whether agent i standing at (xy, yaw) overlaps nobody by more than slack, and
@@ -367,8 +615,11 @@ class Crowd:
         normal = np.stack([-d[:, 1], d[:, 0]], 1)
         self.normal = normal
         for i in range(len(self.s)):
+            if self.kind[i] == 4:
+                self.xy[i], self.yaw[i], self.normal[i] = self._car_pose(i, self.s[i])
+                continue
             off = self.side[i] + self.dodge[i]    # shrink the side offset until the spot is free
-            while abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
+            while self.kind[i] != 4 and abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
                 off *= 0.7
             self.xy[i] = p[i] + off * normal[i]
             self.yaw[i] = math.atan2(d[i, 1] * self.dir[i], d[i, 0] * self.dir[i])
@@ -389,13 +640,15 @@ class Crowd:
         (3 m) and so overtake walkers."""
         robot = np.asarray(robot_xy, float)
         n = len(self.s)
-        rad = np.where(self.kind == 1, 0.3, RADIUS)          # footprint half-width
-        half = np.where(self.kind == 1, 0.6, 0.0)            # a bicycle's half-length beyond that
+        rad = np.array([max(abs(b) + r for _, b, r in FOOT[int(k)]) for k in self.kind])    # half-width
+        half = np.array([max(abs(a) + r for a, _, r in FOOT[int(k)]) for k in self.kind]) - rad  # length beyond
         heading = np.stack([np.cos(self.yaw), np.sin(self.yaw)], 1)
         vel = heading * (self.v * self.moving)[:, None] if hasattr(self, 'moving') else heading * self.v[:, None]
         moving = np.ones(n)
         for i in range(n):
-            look = self.yield_m * (2.5 if self.kind[i] else 1.0)
+            bike = self.kind[i] == 1
+            car = self.kind[i] == 4
+            look = 12.0 if car else self.yield_m * (2.5 if bike else 1.0)
             # (ahead, lateral, needed clearance, same-direction speed or None for "wait")
             best = None
             rel = robot - self.xy[i]
@@ -419,7 +672,26 @@ class Crowd:
                 if best is None or a < best[0]:
                     best = (a, lat, need, follow, False)
             speed = self.v[i]
-            old_dodge = self.dodge[i]
+            old_dodge, old_side = self.dodge[i], self.side[i]
+            if car:                                              # into its lane, 1 m/s across on a U-turn
+                step = float(np.clip(self.dir[i] - self.lane_mix[i], -dt * 1.0 / LANE_HALF, dt * 1.0 / LANE_HALF))
+                self.lane_mix[i] += step
+                if step:
+                    speed *= 0.3
+            elif not bike:                                       # drift across now and then
+                if self.brng.random() < dt / 90.0:
+                    self.side_goal[i] = self.brng.uniform(-1.6, 1.6)
+                step = float(np.clip(self.side_goal[i] - self.side[i], -0.5 * dt, 0.5 * dt))
+                self.side[i] += step
+                if step:
+                    speed *= 0.8
+            pausing = False
+            if self.pauses and self.kind[i] == 0:                # a walker stands still a while now and then
+                if self.pause[i] > 0:
+                    self.pause[i] -= dt
+                    pausing = True
+                elif self.brng.random() < dt / 60.0:
+                    self.pause[i] = self.brng.uniform(8.0, 20.0)
             if best is not None:
                 a, lat, need, follow, is_robot = best
                 away = -1.0 if lat > 0 else 1.0
@@ -427,7 +699,7 @@ class Crowd:
                     away = -away                                 # that side is blocked: try the other
                 if self.waited[i] > 6.0:
                     self.waited[i] = 0.0
-                self.dodge[i] = float(np.clip(self.dodge[i] + away * (1.2 if self.kind[i] else 0.8) * dt,
+                self.dodge[i] = float(np.clip(self.dodge[i] + away * (0.0 if car else 1.2 if bike else 0.8) * dt,
                                               -2.0, 2.0))
                 self.waited[i] += dt if a < need + 0.3 else 0.0
                 in_way = abs(lat) < need + 0.05
@@ -437,31 +709,38 @@ class Crowd:
                     speed = 0.0
                 else:
                     speed = (0.35 if is_robot else 0.6) * self.v[i]
-            else:
+            if pausing:
+                speed = 0.0
+            if best is None:
                 self.waited[i] = 0.0
                 self.dodge[i] -= np.sign(self.dodge[i]) * min(abs(self.dodge[i]), 0.3 * dt)
             # Never step into someone: try the move with the new dodge, then without moving
             # on, then without the new dodge; else stay put.
             s_new = min(max(self.s[i] + self.dir[i] * speed * dt, 0.0), self.length)
             moved = False
+            # Already inside someone (placed there, or the robot drove up): any step that
+            # gets less deep is allowed, so nobody stays stuck inside another.
+            now = self._overlap(i, self.xy[i], self.yaw[i], robot)
             for s_try, dodge_try in ((s_new, self.dodge[i]), (self.s[i], self.dodge[i]), (s_new, old_dodge)):
                 xy, yaw, normal = self._pose(i, s_try, dodge_try, self.dir[i])
-                if self._clear(i, xy, yaw, robot):
+                if self._clear(i, xy, yaw, robot) or (now > 0.02 and self._overlap(i, xy, yaw, robot) < now - 1e-4):
                     moved = s_try != self.s[i]
                     self.s[i], self.dodge[i] = s_try, dodge_try
                     self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
                     break
             else:
-                self.dodge[i] = old_dodge
-            if moved:
+                self.dodge[i], self.side[i] = old_dodge, old_side
+                self.side_goal[i] = old_side                     # that way is taken: stay on this line
+            if moved or pausing:
                 self.stuck[i] = 0.0
                 # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
-                self.phase[i] = (self.phase[i] + speed * dt / (4.5 if self.kind[i] else 1.3)) % 1.0
+                self.phase[i] = (self.phase[i] + speed * dt / (2.1 if car else 4.5 if bike else 1.3)) % 1.0
             else:
                 self.stuck[i] += dt
                 speed = 0.0
             moving[i] = speed / max(self.v[i], 1e-6)
-            if self.s[i] <= 0.0 or self.s[i] >= self.length or self.stuck[i] > 8.0:
+            lo, hi = self.road_s if car else (0.0, self.length)
+            if (self.s[i] <= lo and self.dir[i] < 0) or (self.s[i] >= hi and self.dir[i] > 0) or self.stuck[i] > 8.0:
                 self.dir[i] *= -1                            # the end of the route, or no way through: turn back
                 self.stuck[i] = 0.0
                 self.waited[i] = 0.0
@@ -470,7 +749,7 @@ class Crowd:
     def overlaps(self, robot_xy, robot_radius):
         """(person-person, person-robot) pairs whose footprints overlap now."""
         c, r = self.circles()
-        owner = np.concatenate([[i] * (3 if k else 1) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
+        owner = np.concatenate([[i] * len(FOOT[int(k)]) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
         d = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
         hit = (d < r[:, None] + r[None, :]) & (owner[:, None] < owner[None, :])
         pp = len({(owner[a], owner[b]) for a, b in zip(*np.nonzero(hit))})
@@ -482,14 +761,10 @@ class Crowd:
         """Footprints as circles: (centres M x 2, radii M). A person is one circle, a
         bicycle three along its length."""
         cs, rs = [], []
-        for p, yw, k in zip(self.xy, self.yaw, self.kind):
-            if k:
-                for o in (-0.6, 0.0, 0.6):
-                    cs.append(p + o * np.array([math.cos(yw), math.sin(yw)]))
-                    rs.append(0.3)
-            else:
-                cs.append(p)
-                rs.append(RADIUS)
+        for i in range(len(self.xy)):
+            c, r = self._footprint(i, self.xy[i], self.yaw[i])
+            cs += list(c)
+            rs += list(r)
         return np.array(cs).reshape(-1, 2), np.array(rs)
 
     def hits(self, x, y, r):

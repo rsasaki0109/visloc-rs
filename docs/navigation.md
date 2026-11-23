@@ -840,6 +840,43 @@ street, and Nav2 "failed to make progress" for 350 s.
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |
 | 6 walkers + 2 cyclists, gaussians | 4/4, all at the first try | 0 | 814 of 850 | 3.5 / 2.5 / 19 cm |
+| 4 walkers, 2 cyclists, a dog walker, a pushchair | 4/4, all at the first try | 0 | 821 of 850 | 4.0 / 2.4 / 22 cm |
+
+`--dog-walkers` adds a dog trotting on a lead at the walker's right.
+`--strollers` adds a pushchair, held with both hands, whose wheels turn.
+Footprints are per kind (`people.FOOT`). Walkers now and then stand still
+for 8–20 s (a chat, a phone), and people on foot now and then drift across
+to the other side. Video:
+[media/gs_street_busy.mp4](media/gs_street_busy.mp4).
+
+**Cars.** `--cars N` drives cars both ways along a road beside the route,
+keeping right.
+
+- **Finding the road**: the splat has no idea where the road is, so
+  `people.estimate_road` looks, per route segment, for the band of grey
+  ground near ground height beside the route that is densest.
+- **This street**: it found the road 10.5 m and 7.5 m to the left of the
+  middle stretches. Along the last 40 m it found a band too, but rendering
+  there showed the splat itself broken up, not a road. So that stretch
+  was set to no road by hand in a `--road FILE`, the format the estimate
+  is logged in.
+- **Driving**: the cars drive the longest stretch of road and U-turn at
+  its ends, moving across to the other lane at 1 m/s.
+- **Lanes**: the lanes are polylines mitred at the route's corners, so no
+  car jumps.
+- **Traffic**: cars never swerve; they follow, or stop for, whoever is in
+  their lane.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| + 3 cars | 4/4, all at the first try | 0 | 812 of 850 | 9.4 / 2.2 / 55 cm |
+
+The error exceeded 20 cm for 12 s of the 424 s, at the corner before goal
+3. There a run of fixes was rejected, then a reset. No car or person was
+within 12 m in front of the robot then, so it is localization's own
+spread at that corner, not the cars. One run, though. The nearest car came
+1.9 m from the robot. Video:
+[media/gs_street_cars.mp4](media/gs_street_cars.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
@@ -881,6 +918,20 @@ plaza in Bangkok, 300 frames, 121 m), on 4 CPU cores with no GPU, it took:
 | map (1799 keyframes) and occupancy | 23 min |
 
 That is about 1 h 45 min from the video to a simulator with its map.
+
+More options:
+
+- `--nav --pedestrians 4 --cyclists 2 --dog-walkers 1 --strollers 1` drives
+  the goals with people on the street.
+- `--video` then renders `chase.mp4` behind the robot.
+- **On a machine with a GPU**, build the examples with `--features gpu`
+  (`cargo build --release -p visloc-gsplat-train --features gpu --examples`,
+  and `cargo build --release --examples` for the rest), then pass `--gpu`.
+  - `--gpu` moves SfM's matching to wgpu.
+  - `gsplat_train` and `gsplat_render_server` use a GPU whenever wgpu finds
+    one, and fall back to the CPU rasterizer on a software adapter.
+  - Not timed here (no GPU in this environment). The 3DGS step, the longest
+    here, is the one a GPU shortens most.
 
 ### Appearance change, and real photos as queries
 
@@ -952,6 +1003,78 @@ within 50 cm for 94%, against 10 cm median for the 48 fixes of the plain
 map. That is the first real cross-session localization here. It localized
 9% of the images, enough to correct wheel odometry every few metres, not to
 run on alone.
+
+**Keep every landmark.** `tum_rgbd_save_map` keeps a landmark only when two
+keyframes saw it (`--min-observations 2`). With real photos and the
+splat's depth, tracks between keyframes break easily, so this map kept
+about 20 landmarks per keyframe. With `--min-observations 1`, every
+keypoint with a depth becomes a landmark. The table uses smoothing +
+CLAHE, a 10 m prior and retrieval. The second walk was queried at every
+6th image (300).
+
+| Map | Held-out real photos (898) | Renders (898) | Second walk, 12 min later (300) | Fit residual, median / p90 | Time per image | Map size |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| 2 observations (19k landmarks) | 524 | 169 | 35 (12%) | 21 / 59 cm | 0.2 s | 34 MB |
+| 1 observation, 400 points per keyframe (290k) | | | 111 (37%) | 17 / 45 cm | 0.4 s | 169 MB |
+| **1 observation, 1000 points (681k)** | **870** | **401** | **175 (58%)** | **19 / 46 cm** | 1.3 s | 397 MB |
+
+All the second walk's fixes fit its SfM by one similarity, every time. So
+the denser map localizes 58% of another walk's images, 12 minutes later.
+It costs 6 times the search time and 12 times the size. For a robot that
+localizes every few images, 1.3 s is enough. On a long route, the map
+should be split by area.
+
+**Searching a dense map faster.** Most of the 1.3 s went to two things.
+When an image did not localize, the demo dropped its prior, so the next
+image searched the whole map. And the radius search went through a
+generic matcher. `basalt_euroc_localize_demo` has four options for that:
+
+- `--fast-radius` matches the radius search's landmarks through the packed
+  descriptor index, as retrieval does. It finds the same matches.
+- `--prior-hold N` keeps the last fix as the prior through N failed
+  images.
+- `--threads N` runs the searches on N threads.
+- `--no-global-with-prior` skips the map-wide search while a prior is
+  held.
+
+The same 300 images of the second walk, on the 681k-landmark map, with 4
+threads:
+
+| Options | Localized | Residual median / p90 | Total time | Per image |
+| --- | ---: | --- | ---: | ---: |
+| as above | 175 | 19 / 46 cm | 564 s | 1.9 s |
+| `--fast-radius --threads 4` | 175 (the same) | 19 / 46 cm | 309 s | 1.0 s |
+| + `--prior-hold 30` | 180 | 20 / 46 cm | 270 s | 0.9 s |
+| + `--no-global-with-prior` | 169 | 20 / 46 cm | **150 s** | **0.5 s** |
+
+A robot with odometry always has a prior, so the last row is its setting.
+It is 3.8 times as fast as before and loses 6 of the 175 fixes.
+
+**On a real robot's own depth camera (OpenLORIS-Scene).** The same test runs
+on data with real depth: OpenLORIS-Scene's office, a wheeled robot with a
+D435i (848 × 480 colour and aligned depth) and motion capture.
+`scripts/openloris_to_tum_rgbd.py` turns a sequence into a TUM RGB-D
+sequence with the colour camera's motion-capture poses, and a query set.
+A map of office1-1 (`tum_rgbd_save_map`, smoothing + CLAHE, depth to 5 m)
+is queried with every 3rd image of the other sessions, one image at a time
+with no odometry (`--prior-radius-m 3 --fast-radius --prior-hold 15
+--retrieval-keyframes 10`). The error is against motion capture.
+
+| Queries | 2 observations (7.4k landmarks) | 1 observation (22.4k) |
+| --- | ---: | ---: |
+| office1-1 itself (270) | 270, median 0.6 cm | |
+| office1-6, 2.8 days later, furniture moved, same direction (360) | 208 (58%), 2.2 cm median, 9.8 cm p90 | **228 (63%)**, 2.4 cm, 9.2 cm |
+| office1-2, same evening, opposite direction (300) | 0 | 0 |
+| office1-7, 2.8 days later, opposite direction (381) | 0 | 0 |
+| office1-4, daylight, lights off (290) | 0 | 0 |
+
+With a real depth camera, landmarks are tracked across keyframes better
+than with a splat's depth. Keeping single observations still adds 5 points
+and gives every fix within 50 cm. A map from one direction cannot
+localize the other: the camera sees the other side of the room. A
+daylight session against a night map stays at 0 for single images. The
+[OpenLORIS page](openloris_map_localization.md) gets some of it back by
+correcting the VIO with weak fixes.
 
 Smoothing and CLAHE nearly double the real fixes. They raise the renders
 from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza

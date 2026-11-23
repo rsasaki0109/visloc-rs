@@ -47,6 +47,33 @@ All notable changes to `visloc-rs` will be documented here.
   On TUM-VI room2 (above), 3 rounds localized a few more images at the
   inlier threshold (147 to 152 at 30, 371 to 375 at 20) at the same
   accuracy.
+- **Faster search of dense maps** (`basalt_euroc_localize_demo`):
+  `--fast-radius` (the radius search through the packed index;
+  `BinaryLandmarkIndex::landmarks_within`, `match_among_threaded`),
+  `--prior-hold N`, `--threads N` and `--no-global-with-prior`. On a
+  681k-landmark map, 300 images of a second walk took 150 s instead of
+  564 s, with 169 of the 175 fixes kept. A failed image no longer reports
+  the previous image's pose.
+- `scripts/openloris_to_tum_rgbd.py`: OpenLORIS-Scene's D435i colour and
+  aligned depth as a TUM RGB-D sequence with motion-capture camera poses.
+  A map of office1-1 localizes office1-6 (2.8 days later, furniture moved)
+  63% of the time at 2.4 cm median.
+
+- **Selectable PnP solver for wall-heavy scenes** (`LocalizationConfig::pnp_solver`,
+  `visloc_vision::pnp::PnpMinimalSolver`). The default localization
+  pipeline's RANSAC can now use P3P instead of the 6-point DLT, which is
+  degenerate when the matched landmarks are coplanar (a view of one wall).
+  `PnpMinimalSolver::Dlt` stays the default, so existing results do not
+  change. A built pipeline switches with `set_pnp_solver` /
+  `with_pnp_solver`. Also `--pnp-solver dlt|p3p` in
+  `localize_openloris_map` and `localize_rne_map_sequence`, and
+  `pnp_solver="p3p"` in the Python `localize` / `estimate_pose_pnp_ransac`.
+  On a synthetic 25-point wall, DLT fails and P3P recovers the camera centre
+  to under 0.1 mm. API change: the default pipeline type is now
+  `LocalizationPipeline<_, _, LocalizationRansac>`
+  (`PnPRansac<PnpMinimalSolver>`). Code that names
+  `LocalizationPipeline<_, _, PnPRansac>` and calls `default()`, `new` or
+  `with_candidate_selector` must switch to `LocalizationRansac`.
 - **`visloc_vio_node` drives on through lost tracking on wheel odometry**
   (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
   no longer silences the outputs: the pose follows the wheel odometry until
@@ -65,6 +92,8 @@ All notable changes to `visloc-rs` will be documented here.
   `--cyclists` adds bicycles with pedalling riders. Everyone keeps clear of
   the robot and of each other (no overlap over 2 cm). With 6 walkers and 2
   cyclists, Nav2 reached 4/4 goals at the first try at 3.5 cm RMSE.
+  `--dog-walkers`, `--strollers` and `--cars` (on a road estimated from
+  the splat's grey ground, or given with `--road FILE`) add more traffic.
 - **`gs/real2sim.py`**: an Insta360 `.insv` walk to a simulator, its map
   and, with `--nav`, Nav2 in one resumable command. It took about 1 h 45
   min on 4 CPU cores for a 121 m walk.
@@ -75,7 +104,10 @@ All notable changes to `visloc-rs` will be documented here.
   night and patches over a replay. Smoothing keeps 838 of 858 images
   localized under σ 10 noise, where the plain map gets 218 fixes, metres
   wrong. `gs/real_map_test.py` localizes real held-out photos, splat
-  renders and a second walk against a map of real photos.
+  renders and a second walk against a map of real photos. With
+  `tum_rgbd_save_map --min-observations 1`, a real-photo map localizes
+  58% of a second walk's images 12 minutes later (from 12%), all
+  consistent with that walk's SfM, at 6x the search time.
 - **Real to sim: a robot simulator made of a 3D Gaussian splat** (docs/navigation.md,
   `ros2/visloc-ros2/gs/`). From public photos (TUM RGB-D's Pioneer hall),
   visloc-rs's SfM (put in metres by a 7-number fit to the motion capture,

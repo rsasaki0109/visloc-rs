@@ -9,6 +9,7 @@ mod gr6p_data;
 mod lambda_twist;
 mod p3p;
 pub mod p4pf;
+mod solver;
 pub use generalized::{
     GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedDltPoseEstimator,
     GeneralizedGaussNewtonPoseRefiner, GeneralizedPnPRansac, GeneralizedRansacReport,
@@ -29,6 +30,7 @@ pub use p3p::{P3PGrunert, P3PSolver, P3P};
 pub use p4pf::{
     estimate_pose_with_focal, p4pf_minimal, FocalPose, P4PfRansacConfig, P4PfRansacReport,
 };
+pub use solver::PnpMinimalSolver;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Correspondence2D3D {

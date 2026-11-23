@@ -16,6 +16,18 @@
 //! words, 16 by default), and falls back to the whole map when that does
 //! not localize.
 //!
+//! For dense maps (hundreds of thousands of landmarks):
+//! - `--fast-radius` matches the radius search's landmarks through the
+//!   packed descriptor index, as the retrieval search does, instead of the
+//!   generic candidate selector. The candidates are the same, and so is the
+//!   ratio test among them.
+//! - `--prior-hold N` keeps the last localized pose as that search's prior
+//!   through up to N images that do not localize, instead of dropping it
+//!   after one, which sent the next image to the map-wide search.
+//! - `--threads N` runs the index searches on N threads.
+//! - `--no-global-with-prior` skips the map-wide search while a prior is
+//!   held: the radius search and retrieval have had their try.
+//!
 //! ```text
 //! # 1. Map a sequence and save the map.
 //! cargo run --release --example basalt_euroc_online_slam_demo -- \
@@ -146,6 +158,18 @@ struct Args {
     /// `PnPRansac::inlier_refits`.
     inlier_refits: usize,
     prior_radius_m: Option<f64>,
+    /// Match the radius search's landmarks through the packed index (as the
+    /// retrieval search does) instead of the generic candidate selector.
+    fast_radius: bool,
+    /// Keep the last localized pose as the radius search's prior through up
+    /// to this many images that do not localize (0: drop it at once).
+    prior_hold: usize,
+    /// Threads for the index searches (radius with `--fast-radius`,
+    /// retrieval, map-wide).
+    threads: usize,
+    /// Skip the map-wide search while a prior is held (the robot is near
+    /// its last fix; a match anywhere else in the map would be wrong).
+    no_global_with_prior: bool,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
     /// Extra descriptors per landmark to match (the map's
@@ -198,7 +222,8 @@ impl Args {
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
          [--p3p-solver grunert|lambda-twist] [--inlier-refits N] \
-         [--prior-radius-m M] [--duplicate-radius-m M] [--extra-descriptors N] \
+         [--prior-radius-m M [--fast-radius] [--prior-hold N] [--no-global-with-prior]] [--threads N] \
+         [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
@@ -238,6 +263,10 @@ impl Args {
             p3p_solver: P3PSolver::Grunert,
             inlier_refits: 0,
             prior_radius_m: None,
+            fast_radius: false,
+            prior_hold: 0,
+            threads: 1,
+            no_global_with_prior: false,
             duplicate_radius_m: None,
             extra_descriptors: 0,
             retrieval_keyframes: None,
@@ -298,6 +327,10 @@ impl Args {
                         .map_err(|error| format!("--p3p-solver: {error}"))?;
                 }
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
+                "--fast-radius" => args.fast_radius = true,
+                "--prior-hold" => args.prior_hold = number(&option, value()?)?,
+                "--threads" => args.threads = number(&option, value()?)?,
+                "--no-global-with-prior" => args.no_global_with_prior = true,
                 "--extra-descriptors" => {
                     args.extra_descriptors = value()?
                         .parse()
@@ -525,6 +558,12 @@ struct Localizer {
     index: BinaryLandmarkIndex,
     gates: BinaryMatchGates,
     prior_radius_m: Option<f64>,
+    fast_radius: bool,
+    prior_hold: usize,
+    threads: usize,
+    no_global_with_prior: bool,
+    /// Images since `previous` last localized.
+    previous_age: usize,
     projection_radius_px: Option<f64>,
     /// Keyframe retrieval, and how many keyframes' landmarks to match among.
     retrieval: Option<(KeyframeRetrieval, usize)>,
@@ -599,6 +638,11 @@ impl Localizer {
                 ratio: args.ratio,
             },
             prior_radius_m: args.prior_radius_m,
+            fast_radius: args.fast_radius,
+            prior_hold: args.prior_hold,
+            threads: args.threads.max(1),
+            no_global_with_prior: args.no_global_with_prior,
+            previous_age: 0,
             projection_radius_px: args.projection_radius_px,
             weak_projected: args.weak_gate_m > 0.0,
             weak_min_inliers: (args.vio || args.odometry.is_some())
@@ -649,13 +693,29 @@ impl Localizer {
                 .as_ref()
                 .zip(self.prior_radius_m)
                 .map(|(pose, radius)| {
-                    self.pipeline
-                        .localize_with_candidate_selector_and_descriptor_store(
-                            &query,
-                            &self.map.map,
-                            &self.map.descriptors,
-                            RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
+                    if self.fast_radius {
+                        let landmarks = self
+                            .index
+                            .landmarks_within(&pose.camera_center_world(), radius);
+                        self.pipeline.localize_correspondences(
+                            &self.camera,
+                            self.index.match_among_threaded(
+                                &query.keypoints,
+                                &packed,
+                                self.gates,
+                                &landmarks,
+                                self.threads,
+                            ),
                         )
+                    } else {
+                        self.pipeline
+                            .localize_with_candidate_selector_and_descriptor_store(
+                                &query,
+                                &self.map.map,
+                                &self.map.descriptors,
+                                RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
+                            )
+                    }
                 })
         });
         let used_prior = prior_result.as_ref().is_some_and(accepted);
@@ -681,11 +741,12 @@ impl Localizer {
                         let landmarks = retrieval.candidate_landmarks(&packed, *top_k);
                         self.pipeline.localize_correspondences(
                             &self.camera,
-                            self.index.match_among(
+                            self.index.match_among_threaded(
                                 &query.keypoints,
                                 &packed,
                                 self.gates,
                                 &landmarks,
+                                self.threads,
                             ),
                         )
                     })
@@ -695,20 +756,35 @@ impl Localizer {
                         matching = "retrieval";
                         result
                     }
+                    // Near a held prior, the radius search has had its try.
+                    None if self.no_global_with_prior && prior_result.is_some() => {
+                        matching = "radius";
+                        prior_result.clone().expect("checked")
+                    }
                     None => self.pipeline.localize_correspondences(
                         &self.camera,
                         self.index
-                            .match_all(&query.keypoints, &packed, self.gates, 1),
+                            .match_all(&query.keypoints, &packed, self.gates, self.threads),
                     ),
                 }
             }
         };
         let latency_ms = started.elapsed().as_secs_f64() * 1e3;
         let success = accepted(&result);
-        self.previous = success.then(|| result.pose.clone()).flatten();
-        let world_from_imu = self
-            .previous
-            .as_ref()
+        if success {
+            self.previous = result.pose.clone();
+            self.previous_age = 0;
+        } else {
+            // Without a fix the prior goes, or with --prior-hold N stays for
+            // N more images (the robot cannot have gone far).
+            self.previous_age += 1;
+            if self.previous_age > self.prior_hold {
+                self.previous = None;
+            }
+        }
+        let world_from_imu = success
+            .then_some(self.previous.as_ref())
+            .flatten()
             .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
         // Turned down only for too few inliers: a weak localization. With
         // --weak-gate-cm, the projection search's counts first.

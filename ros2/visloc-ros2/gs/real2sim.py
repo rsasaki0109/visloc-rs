@@ -9,8 +9,8 @@ exists (so a run can be resumed or redone from any step by deleting its
 directory):
 
 1. `frames/`: the first `--frames` frames, both lenses side by side (ffmpeg).
-2. `sfm/`: `gsplat_photos --insv --steps 0 --cpu`, the lens faces in metres
-   from the camera's IMU.
+2. `sfm/`: `gsplat_photos --insv --steps 0 --cpu` (without `--cpu` given
+   `--gpu`), the lens faces in metres from the camera's IMU.
 3. `level/`: `level_sfm.py`, z up and the ground at 0; its `level.json`
    holds the capture height.
 4. `train/`: the faces with their blacked-out pixels (blurred faces, the
@@ -23,6 +23,10 @@ directory):
    `visual_map_to_occupancy`.
 7. With `--nav`: `gs_nav.launch.py` and `nav_goals.py` (the tuned
    localization settings, `--dump_inliers`), results in `sim/nav.json`.
+   `--pedestrians`, `--cyclists`, `--dog-walkers` and `--strollers` put
+   people on the street (`gs_sim.py`, `people.py`).
+8. With `--video` (and `--nav`): `chase_video.py` and ffmpeg make
+   `chase.mp4`, the drive seen from behind the robot.
 
 Needs the release examples `gsplat_photos`, `gsplat_train`,
 `gsplat_render_server`, `tum_rgbd_save_map` and `visual_map_to_occupancy`,
@@ -109,7 +113,14 @@ def main():
     p.add_argument('--camera-height', type=float, default=1.2, help="the robot's camera over the ground, m")
     p.add_argument('--goals', type=int, default=4)
     p.add_argument('--fence-m', type=float, default=3.0)
+    p.add_argument('--gpu', action='store_true',
+                   help="run SfM's matching on the GPU (wgpu) too; 3DGS training uses a GPU whenever wgpu finds one")
     p.add_argument('--nav', action='store_true', help='also drive the goals with Nav2')
+    p.add_argument('--pedestrians', type=int, default=0, help='with --nav: people walking the street')
+    p.add_argument('--cyclists', type=int, default=0, help='with --nav: people riding bicycles')
+    p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='with --nav: people with a dog')
+    p.add_argument('--strollers', type=int, default=0, help='with --nav: people pushing a pushchair')
+    p.add_argument('--video', action='store_true', help='with --nav: a chase-camera video of the drive (chase.mp4)')
     args = p.parse_args()
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
@@ -141,7 +152,7 @@ def main():
 
     def do_sfm():
         cmd = [os.path.join(EX, 'gsplat_photos'), '--insv', args.insv, '--images', frames_dir, '--out', sfm,
-               '--steps', '0', '--max-size', '640', '--window', '2', '--cpu']
+               '--steps', '0', '--max-size', '640', '--window', '2'] + ([] if args.gpu else ['--cpu'])
         if args.imu_frame_period:
             cmd += ['--imu-frame-period', args.imu_frame_period]
         run(cmd, log=os.path.join(out, 'sfm.log'))
@@ -234,28 +245,43 @@ def main():
             json.dump({'x': 0.0, 'y': 0.0, 'yaw': 0.0}, open(ident, 'w'))
             ros2 = os.path.join(REPO, 'ros2', 'visloc-ros2')
             loc = ' '.join(TUNED + ['--dump_inliers', os.path.join(sim, 'inliers.csv')])
+            sim_args = ' '.join(['--mono', '--pedestrians', str(args.pedestrians), '--cyclists', str(args.cyclists),
+                                 '--dog-walkers', str(args.dog_walkers), '--strollers', str(args.strollers)])
+            # only this scene's processes (other splats may be rendering on the machine)
+            kill = (f'pkill -9 -f "gs_sim.py --scene {scene_json}"; pkill -9 -f "gsplat_render_server --ply {sim}"; '
+                    'pkill -9 -f visloc_map_localize; pkill -9 -f "ros-args"')
             script = f'''
 source /opt/ros/jazzy/setup.bash
 export RCUTILS_COLORIZED_OUTPUT=0
 for attempt in 1 2 3; do
   ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} record:={sim}/nav.sim.csv \\
-    sim_args:=--mono "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
+    "sim_args:={sim_args}" "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
   LP=$!; ok=0
   for t in $(seq 1 60); do sleep 5; grep -q "lifecycle_manager_navigation\\]: .*Managed nodes are active" {sim}/nav.launch.log && {{ ok=1; break; }}; done
   [ $ok = 1 ] && break
   echo "Nav2 bringup stalled (attempt $attempt), relaunching"; kill -INT $LP; sleep 8
-  pkill -9 -f gs_sim.py; pkill -9 -f gsplat_render_server; pkill -9 -f visloc_map_localize; pkill -9 -f "ros-args"; sleep 3
+  {kill}; sleep 3
 done
 ${{ROS_PYTHON:-python3}} -u {ros2}/gz/nav_goals.py --world-from-map {ident} --scene {scene_json} --timeout 900 \\
   --out {sim}/nav.json --label real2sim --record {sim}/nav.csv --retries 3 --spin-after 5 > {sim}/nav.goals.log 2>&1
 kill -INT $LP; sleep 8
-pkill -9 -f gs_sim.py; pkill -9 -f gsplat_render_server; pkill -9 -f visloc_map_localize; pkill -9 -f "ros-args"
+{kill}
 '''
             run(['bash', '-c', script])
             res = json.load(open(os.path.join(sim, 'nav.json')))
             print(f"Nav2: {res['reached']}/{res['goal_count']} goals, {res['contacts']} contacts, "
                   f"/map_pose RMSE {res['pose_error_m']['rmse'] * 100:.1f} cm")
         step('nav', nav)
+
+        if args.video:
+            def video():
+                frames = os.path.join(out, 'chase')
+                run([sys.executable, os.path.join(HERE, 'chase_video.py'), '--splat', splat, '--scene', scene_json,
+                     '--run', os.path.join(sim, 'nav'), '--map', mapd, '--inliers', os.path.join(sim, 'inliers.csv'),
+                     '--out', frames], log=os.path.join(out, 'video.log'))
+                run(['ffmpeg', '-v', 'error', '-y', '-framerate', 30, '-i', os.path.join(frames, '%05d.jpg'),
+                     '-vf', 'scale=960:-2', '-pix_fmt', 'yuv420p', '-crf', 26, os.path.join(out, 'chase.mp4')])
+            step('video', video)
 
     print(f'done: splat {splat}, scene {scene_json}, map {mapd}')
     print('timing (s):', {k: round(v) for k, v in times.items()})

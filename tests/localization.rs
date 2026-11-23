@@ -12,7 +12,7 @@ use visloc_rs::core::types::{
 };
 use visloc_rs::vision::features::{FeatureExtractor, FeatureSet};
 use visloc_rs::vision::matching::{BruteForceMatcher, DescriptorMatch, Matcher};
-use visloc_rs::vision::pnp::Correspondence2D3D;
+use visloc_rs::vision::pnp::{Correspondence2D3D, PnpMinimalSolver};
 use visloc_rs::vision::ransac::RansacReport;
 use visloc_rs::{
     localize, localize_frame, localize_frames, localize_with_descriptor_store,
@@ -1767,4 +1767,78 @@ fn localizes_query_with_unknown_focal_length() {
         fixed.inlier_count,
         result.inlier_count
     );
+}
+
+/// A map that is one wall (every landmark on the plane z = 8) and a query
+/// that sees all of it, with the matching descriptors.
+fn wall_map_and_query(camera: &Camera, pose: &Pose) -> (VisualMap, QueryImage) {
+    let mut map = VisualMap::new();
+    let mut keypoints = Vec::new();
+    let mut descriptors = Vec::new();
+    for (index, (xi, yi)) in (-2..=2)
+        .flat_map(|x| (-2..=2).map(move |y| (x, y)))
+        .enumerate()
+    {
+        let point = Point3::new(xi as f64 * 0.8, yi as f64 * 0.8, 8.0);
+        let descriptor = vec![index as f32 * 3.0, 1.0, 0.25];
+        let mut landmark = Landmark::new(index as u64, point);
+        landmark.descriptor = Some(descriptor.clone());
+        map.landmarks.insert(landmark.id, landmark);
+        keypoints.push(camera.project(&pose.transform_world_point(&point)).unwrap());
+        descriptors.push(descriptor);
+    }
+    let query = QueryImage {
+        camera: camera.clone(),
+        keypoints,
+        descriptors,
+    };
+    (map, query)
+}
+
+#[test]
+fn pnp_solver_setting_selects_p3p_for_a_wall_only_map() {
+    let camera = Camera::pinhole(1, 1024, 768, 900.0, 900.0, 512.0, 384.0);
+    let true_pose = Pose::from_world_to_camera(
+        UnitQuaternion::from_scaled_axis(Vector3::new(-0.07, 0.12, -0.03)),
+        Vector3::new(-0.4, 0.25, 0.1),
+    );
+    let (map, query) = wall_map_and_query(&camera, &true_pose);
+    let config = LocalizationConfig {
+        min_inliers: 12,
+        ..LocalizationConfig::default()
+    };
+    assert_eq!(config.pnp_solver, PnpMinimalSolver::Dlt);
+
+    let center_error = |result: &LocalizationResult| {
+        result.pose.as_ref().map(|pose| {
+            (pose.world_to_camera.inverse().translation
+                - true_pose.world_to_camera.inverse().translation)
+                .norm()
+        })
+    };
+
+    let dlt = LocalizationPipeline::new(BruteForceMatcher { ratio: Some(0.8) }, config.clone())
+        .localize(&query, &map);
+    // The default DLT is degenerate on coplanar landmarks: no accurate pose.
+    assert!(
+        !dlt.success || center_error(&dlt).is_none_or(|e| e > 1.0e-2),
+        "DLT unexpectedly solved the wall: {dlt:?}"
+    );
+
+    let p3p_config = LocalizationConfig {
+        pnp_solver: PnpMinimalSolver::P3p,
+        ..config.clone()
+    };
+    let p3p = LocalizationPipeline::new(BruteForceMatcher { ratio: Some(0.8) }, p3p_config)
+        .localize(&query, &map);
+    assert!(p3p.success, "P3P localizes the wall: {p3p:?}");
+    assert_eq!(p3p.inlier_count, 25);
+    let error = center_error(&p3p).unwrap();
+    assert!(error < 1.0e-4, "P3P camera centre off by {error}");
+
+    // Switching a built pipeline gives the same answer as configuring it.
+    let switched = LocalizationPipeline::new(BruteForceMatcher { ratio: Some(0.8) }, config)
+        .with_pnp_solver(PnpMinimalSolver::P3p);
+    assert_eq!(switched.config.pnp_solver, PnpMinimalSolver::P3p);
+    assert_eq!(switched.localize(&query, &map), p3p);
 }

@@ -125,6 +125,8 @@ def main():
     p.add_argument('--map-args', default='', help='extra tum_rgbd_save_map arguments')
     p.add_argument('--loc-args', default='--max-hamming 90 --reprojection-px 5 --min-inliers 20',
                    help='basalt_euroc_localize_demo arguments')
+    p.add_argument('--map-all', action='store_true',
+                   help='build the map from every frame (for --query-run; the held-out sets are then in the map)')
     p.add_argument('--map-tag', default='', help='suffix of the map directory (one per --map-args)')
     p.add_argument('--tag', default='', help='suffix of the result directories')
     args = p.parse_args()
@@ -134,7 +136,7 @@ def main():
     splat = os.path.join(args.run, 'scene.ply')
     faces = horizontal_faces(os.path.join(args.run, 'sfm', 'image_names.txt'),
                              os.path.join(args.run, 'level', 'sparse', '0'), os.path.join(args.run, 'sfm', 'images'))
-    mapping = [f for f in faces if f[0] % 2 == 0]
+    mapping = faces if args.map_all else [f for f in faces if f[0] % 2 == 0]
     held = [f for f in faces if f[0] % 2 == 1]
 
     def tum_rows(items):
@@ -146,8 +148,8 @@ def main():
                         f'{q[1]:.8f} {q[2]:.8f} {q[3]:.8f} {q[0]:.8f}\n')
         return rows
 
-    seq = os.path.join(args.out, 'map_seq')
-    traj = os.path.join(args.out, 'map.tum')
+    seq = os.path.join(args.out, 'map_seq_all' if args.map_all else 'map_seq')
+    traj = os.path.join(args.out, 'map_all.tum' if args.map_all else 'map.tum')
     if not os.path.exists(os.path.join(seq, 'depth.txt')):
         os.makedirs(os.path.join(seq, 'rgb'), exist_ok=True)
         os.makedirs(os.path.join(seq, 'depth'), exist_ok=True)
