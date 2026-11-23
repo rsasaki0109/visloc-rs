@@ -359,6 +359,9 @@ All notable changes to `visloc-rs` will be documented here.
   plates, mirrors) in street colours, with a shadow. They no longer start
   and stop at once: 2 m/s² up, at most 6 m/s² down, braking for the car
   ahead and for the line, and slowing for the U-turn.
+- 3DGS sim cars drive along the street, not along the robot's route
+  offset sideways (`people.fit_road_lines`, `gs_sim --no-road-fit`):
+  where the route cut across a side street they had driven 26° off it.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.
