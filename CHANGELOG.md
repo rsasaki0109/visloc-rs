@@ -24,7 +24,14 @@ All notable changes to `visloc-rs` will be documented here.
   `SimRobotConfig::p3p_solver`. In `nav_sim_drive --laps 2` (the
   apartment) both reach 34/34 waypoints at 2.4-3.1 cm RMSE, but the drive
   is not deterministic: the same settings twice gave 2.3 and 3.0 cm, so no
-  difference between the solvers shows there.
+  difference between the solvers shows there. On real images (TUM-VI
+  room2 localized in a map of room1, `basalt_euroc_localize_demo`) the
+  two solvers gave the same result on 2881 of 2882 images (median pose
+  difference 0): with real noise the solver is not what limits
+  localization. That map localizes room2 to only about 20 cm against the
+  motion capture with either solver, though SLAM on room1 is at 1 cm; the
+  map's OPENCV_FISHEYE fit of TUM-VI's camera is off by up to 8.7 px at
+  the image edge, a likely cause, not looked into here.
 - **`PnPRansac::inlier_refits`**: after the final refinement, re-collect
   the refined pose's inliers and refine again (until the set stops
   changing, a round stops improving the score, or N rounds). The RANSAC
@@ -37,6 +44,9 @@ All notable changes to `visloc-rs` will be documented here.
   the default, keeps the single refinement, so earlier results do not
   change. `inlier_refits` on `visloc_map_localize_node`, `--inlier-refits`
   on `basalt_euroc_localize_demo` and `nav_sim_drive`.
+  On TUM-VI room2 (above), 3 rounds localized a few more images at the
+  inlier threshold (147 to 152 at 30, 371 to 375 at 20) at the same
+  accuracy.
 - **`visloc_vio_node` drives on through lost tracking on wheel odometry**
   (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
   no longer silences the outputs: the pose follows the wheel odometry until
