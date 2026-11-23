@@ -1634,8 +1634,8 @@ GPU), the temperature terms by day, the low-light pass with the gyroscope matrix
 Per track on Actions: Short 80.91, Medium 69.82, Long 69.07, Low light 72.14, Moving platform 35.97 (mean of
 twelve 68.14). The low-light pass with the gyroscope matrix shows on both low-light sequences (+8.4, +5.0)
 and on the test set (+4.7 on the track, submission 11). The two R sequences lose 9 and 16 points without
-ALIKED, which the runners have no GPU for; sequence_5_11 gains 14 points from the Moving track's changes
-since (both cameras' features in the VIO). A run takes about 2 h 40 min for the twelve at six at a time.
+ALIKED, which the runners have no GPU for; sequence_5_11 gains 14 points, not looked into
+yet. A run takes about 2 h 40 min for the twelve at six at a time.
 This run is the reference for later ones with `PASS_ARGS`.
 ### A ride the VIO halves
 
