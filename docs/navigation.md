@@ -908,6 +908,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | --- | --- | ---: | ---: | --- |
 | everything, the road estimated, a crossing (wrong-way U-turns, see below) | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
 | the same, cars keeping right | 4/4, all at the first try | 0 | 813 of 850 | 16.4 / 2.2 / 76 cm |
+| the same, the car bodies and braking above | 4/4, all at the first try | 0 | 821 of 850 | 4.2 / 2.5 / 31 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -921,7 +922,9 @@ In the second run the error stayed above 30 cm for 20 s just past goal 3
 (300 to 320 s). There the node rejected every fix but one until a reset.
 No car or person was within 6 m in front of the robot then. It is the same
 stretch where the cars run lost track. So it is localization's
-run-to-run spread around goal 3, not the cars. Video:
+run-to-run spread around goal 3, not the cars. The third run, with the
+new car bodies and their braking, went through that stretch at 4.2 cm
+RMSE. Video (the third run):
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
