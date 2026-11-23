@@ -99,6 +99,25 @@ def test_pnp_ransac_from_correspondences(rng):
     np.testing.assert_array_equal(again.pose.matrix(), result.pose.matrix())
 
 
+@pytest.mark.parametrize("pnp_solver", ["p3p", "p3p-lambda-twist"])
+def test_pnp_ransac_p3p_solvers_on_a_wall(rng, pnp_solver):
+    # Every point on one wall facing the camera: the 6-point DLT is
+    # degenerate there, both P3P solvers are not.
+    camera = visloc.Camera.pinhole(500.0, 500.0, 320.0, 240.0, 640, 480)
+    true_pose = visloc.Pose.exp([0.05, -0.08, 0.02, 0.2, -0.1, 0.3])
+    world = np.column_stack(
+        [rng.uniform(-2.0, 2.0, 80), rng.uniform(-1.5, 1.5, 80), np.full(80, 6.0)]
+    )
+    pixels = camera.project(world, pose=true_pose)
+    result = visloc.estimate_pose_pnp_ransac(
+        camera, pixels, world, ransac_iterations=200, reprojection_threshold=2.0, seed=3,
+        pnp_solver=pnp_solver,
+    )
+    assert result is not None
+    assert result.inlier_count == 80
+    np.testing.assert_allclose(result.pose.matrix(), true_pose.matrix(), atol=1e-6)
+
+
 def test_pnp_ransac_input_errors_and_failure(rng):
     camera = visloc.Camera.pinhole(500.0, 500.0, 320.0, 240.0, 640, 480)
     with pytest.raises(ValueError, match="same N"):

@@ -9,7 +9,7 @@
 //! ```text
 //! cargo run --release --example localize_rne_map_sequence -- \
 //!   --out-dir <dir> [--radius-m 5.0] [--min-inliers 6] [--projection-px 30] [--motion-model] [--gpu] \
-//!   [--pnp-solver dlt|p3p] \
+//!   [--pnp-solver dlt|p3p|p3p-lambda-twist] \
 //!   <colmap_text_dir> <landmark_descriptors.txt> <camera_id> \
 //!   <query_features.txt> [query_features_2.txt ...]
 //! ```

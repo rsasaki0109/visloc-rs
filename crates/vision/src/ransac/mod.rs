@@ -99,6 +99,14 @@ pub struct PnPRansac<P = DltPnP, R = GaussNewtonPoseRefiner> {
     /// been drawn (`needed = log(1-conf)/log(1-w^s)`, standard RANSAC
     /// termination). `None` keeps the fixed budget.
     pub confidence: Option<f64>,
+    /// After the final refinement, re-collect the inliers of the refined
+    /// pose and refine again on them, up to this many times (until the set
+    /// stops changing or a round does not improve the score). The RANSAC
+    /// winner comes from a three-point sample, so its inliers can include
+    /// outliers that happen to sit within the threshold of that noisy pose,
+    /// and the least-squares refinement fits them too. 0 (the default) keeps
+    /// the single refinement on the winner's inliers.
+    pub inlier_refits: usize,
 }
 
 impl Default for PnPRansac {
@@ -112,6 +120,7 @@ impl Default for PnPRansac {
             seed: 7,
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         }
     }
 }
@@ -257,12 +266,38 @@ where
                         }
                     }
                 }
-                let score = score_pose(
+                let mut score = score_pose(
                     camera,
                     &refined_pose,
                     correspondences,
                     self.reprojection_threshold,
                 );
+                if let Some(pose_refiner) = &self.pose_refiner {
+                    let mut fitted = search.best_inliers.clone();
+                    for _ in 0..self.inlier_refits {
+                        if score.inliers == fitted {
+                            break;
+                        }
+                        let set = score
+                            .inliers
+                            .iter()
+                            .map(|index| correspondences[*index].clone())
+                            .collect::<Vec<_>>();
+                        let Some(pose) = pose_refiner.refine_pose(&refined_pose, &set, camera)
+                        else {
+                            break;
+                        };
+                        let refit_score =
+                            score_pose(camera, &pose, correspondences, self.reprojection_threshold);
+                        if !is_refinement_better(&refit_score, &score) {
+                            break;
+                        }
+                        fitted = score.inliers;
+                        refined_pose = pose;
+                        refinement_applied = true;
+                        score = refit_score;
+                    }
+                }
                 return Some(RansacReport {
                     pose: refined_pose,
                     inliers: score.inliers,
@@ -721,6 +756,7 @@ mod tests {
             seed: 3,
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         }
         .estimate(&correspondences, &camera)
         .unwrap();
@@ -760,6 +796,7 @@ mod tests {
             seed: 3,
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         }
         .estimate(&correspondences, &camera)
         .unwrap();
@@ -850,6 +887,7 @@ mod tests {
             early_stop_min_iterations: 0,
             confidence: None,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         };
 
         let weighted = ransac
@@ -896,6 +934,7 @@ mod tests {
             early_stop_min_iterations: 0,
             confidence: None,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         };
         let unweighted = ransac.estimate(&correspondences, &camera).unwrap();
         let fallback = ransac
@@ -997,6 +1036,7 @@ mod tests {
             early_stop_min_iterations: 0,
             confidence: None,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         };
 
         // No prior: 1 random iteration is overwhelmingly likely to
@@ -1055,6 +1095,7 @@ mod tests {
             early_stop_min_iterations: 0,
             confidence: None,
             early_stop_inlier_ratio: None,
+            inlier_refits: 0,
         };
 
         let bad_prior = Pose::from_world_to_camera(
@@ -1111,6 +1152,7 @@ mod tests {
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
             confidence: None,
+            inlier_refits: 0,
         };
         let serial = PnPRansac {
             confidence: Some(1.0),
@@ -1143,5 +1185,113 @@ mod tests {
             a.pose.world_to_camera.rotation,
             b.pose.world_to_camera.rotation
         );
+    }
+
+    /// Camera-centre errors (over the scene distance) of P3P-RANSAC with
+    /// `inlier_refits` rounds, on 1 px noise and 30% outliers: a wall
+    /// (`depth_spread` 0) or points spread behind it.
+    fn refit_errors(inlier_refits: usize, depth_spread: f64, scenes: usize) -> Vec<f64> {
+        use crate::pnp::{P3PSolver, P3P};
+        use nalgebra::{Point2, UnitQuaternion};
+        let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut state = 7_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut errors = Vec::new();
+        for _ in 0..scenes {
+            let tilt = 1.3 * next();
+            let azimuth = std::f64::consts::TAU * next();
+            let normal = Vector3::new(
+                tilt.sin() * azimuth.cos(),
+                tilt.sin() * azimuth.sin(),
+                tilt.cos(),
+            );
+            let distance = 2.0 + 6.0 * next();
+            let true_pose = Pose::from_world_to_camera(
+                UnitQuaternion::from_scaled_axis(Vector3::new(
+                    next() - 0.5,
+                    next() - 0.5,
+                    next() - 0.5,
+                )),
+                Vector3::new(next(), next(), next()),
+            );
+            let world_from_camera = true_pose.world_to_camera.inverse();
+            let mut correspondences = Vec::new();
+            for i in 0..150 {
+                let pixel = Point2::new(640.0 * next(), 480.0 * next());
+                let ray = Vector3::new((pixel.x - 320.0) / 500.0, (pixel.y - 240.0) / 500.0, 1.0);
+                let depth = normal.z * distance / normal.dot(&ray);
+                if !(0.3..40.0).contains(&depth) {
+                    continue;
+                }
+                let depth = depth + depth_spread * next();
+                // Box-Muller, 1 px.
+                let (u, v) = (next().max(1.0e-300), next());
+                let radius = (-2.0 * u.ln()).sqrt();
+                let angle = std::f64::consts::TAU * v;
+                let observed = if i % 10 < 3 {
+                    Point2::new(640.0 * next(), 480.0 * next())
+                } else {
+                    Point2::new(
+                        pixel.x + radius * angle.cos(),
+                        pixel.y + radius * angle.sin(),
+                    )
+                };
+                correspondences.push(Correspondence2D3D {
+                    point2d: observed,
+                    point3d: world_from_camera.transform_point(&Point3::from(ray * depth)),
+                    confidence: None,
+                });
+            }
+            let ransac = PnPRansac {
+                pose_estimator: P3P::new(P3PSolver::LambdaTwist),
+                pose_refiner: Some(crate::pnp::GaussNewtonPoseRefiner::default()),
+                iterations: 1000,
+                reprojection_threshold: 3.0,
+                seed: 7,
+                early_stop_min_iterations: 0,
+                early_stop_inlier_ratio: None,
+                confidence: Some(0.999),
+                inlier_refits,
+            };
+            let report = ransac.estimate(&correspondences, &camera).expect("a pose");
+            let centre = report.pose.world_to_camera.inverse().translation;
+            errors.push((centre - world_from_camera.translation).norm() / distance);
+        }
+        errors.sort_by(f64::total_cmp);
+        errors
+    }
+
+    #[test]
+    fn inlier_refits_tighten_the_pose_on_a_wall() {
+        let (before, after) = (refit_errors(0, 0.0, 100), refit_errors(3, 0.0, 100));
+        let mean = |e: &[f64]| e.iter().sum::<f64>() / e.len() as f64;
+        assert!(
+            mean(&after) < 0.9 * mean(&before),
+            "mean centre error {} with refits vs {} without",
+            mean(&after),
+            mean(&before)
+        );
+    }
+
+    /// `cargo test --release -p visloc-vision --lib inlier_refit_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement"]
+    fn inlier_refit_scan() {
+        for (scene, spread) in [("wall", 0.0), ("3d", 3.0)] {
+            for refits in [0, 1, 3] {
+                let e = refit_errors(refits, spread, 400);
+                eprintln!(
+                    "{scene} inlier_refits {refits}: centre error / distance median {:.2e} p90 {:.2e} max {:.2e}",
+                    e[e.len() / 2],
+                    e[e.len() * 9 / 10],
+                    e[e.len() - 1]
+                );
+            }
+        }
     }
 }

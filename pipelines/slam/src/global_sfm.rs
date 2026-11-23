@@ -3331,6 +3331,7 @@ fn repnp_free_cameras_from_prior_structure(
                 seed: 7,
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
+                inlier_refits: 0,
             }
             .estimate(&corrs, camera),
             PnpSolver::Dlt => PnPRansac {
@@ -3473,6 +3474,7 @@ fn pnp_seed_free_cameras_into_priors(
                 seed: 7,
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
+                inlier_refits: 0,
             }
             .estimate(&corrs, camera),
             PnpSolver::Dlt => PnPRansac {

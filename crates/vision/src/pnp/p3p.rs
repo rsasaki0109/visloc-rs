@@ -16,21 +16,122 @@
 //! pose by absolute orientation (Kabsch) on the three 3D-3D pairs. A P3P sample
 //! yields up to four candidate poses; the extra correspondence(s) in the RANSAC
 //! sample disambiguate by reprojection.
+//!
+//! [`P3P`] runs either this solver or Lambda Twist (`lambda_twist.rs`), chosen
+//! with [`P3PSolver`]; [`P3PGrunert`] is the fixed-Grunert estimator.
+
+use std::fmt;
+use std::str::FromStr;
 
 use nalgebra::linalg::Schur;
 use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 
+use super::lambda_twist::solve_lambda_twist;
 use super::{Correspondence2D3D, PoseEstimator};
 
-/// Grunert's P3P solver, usable anywhere a [`PoseEstimator`] is expected (e.g.
-/// as the minimal estimator inside [`PnPRansac`](crate::ransac::PnPRansac)).
+/// Which closed-form P3P solver a [`P3P`] estimator runs on each minimal
+/// sample.
+///
+/// - [`Grunert`](Self::Grunert) (the default): Grunert's quartic, as reviewed
+///   by Haralick et al. It is what every P3P-RANSAC in the repository has used
+///   so far, so it stays the default to keep results reproducible.
+/// - [`LambdaTwist`](Self::LambdaTwist): Persson & Nordberg's Lambda Twist
+///   (see `lambda_twist.rs`). Grunert's elimination divides by terms that pass
+///   through zero for symmetric triangles seen head-on, which is how a camera
+///   facing a wall sees most triples of its points; Lambda Twist has no such
+///   division and polishes every root, so it is the choice for scenes where
+///   most landmarks lie on walls (corridors, rooms, building façades).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum P3PSolver {
+    #[default]
+    Grunert,
+    LambdaTwist,
+}
+
+impl P3PSolver {
+    /// Every solver, in the order of their [`name`](Self::name)s in help text.
+    pub const ALL: [Self; 2] = [Self::Grunert, Self::LambdaTwist];
+
+    /// The name used on command lines and in configuration files.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Grunert => "grunert",
+            Self::LambdaTwist => "lambda-twist",
+        }
+    }
+
+    /// The candidate world→camera poses (up to four) mapping three world
+    /// points onto three camera-frame bearings.
+    pub fn solve(self, points: &[Point3<f64>; 3], rays: &[Vector3<f64>; 3]) -> Option<Vec<Pose>> {
+        match self {
+            Self::Grunert => solve_grunert(points, rays),
+            Self::LambdaTwist => solve_lambda_twist(points, rays),
+        }
+    }
+}
+
+impl fmt::Display for P3PSolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for P3PSolver {
+    type Err = String;
+
+    /// Accepts each solver's [`name`](Self::name), case-insensitively, with
+    /// `_` for `-` (`lambda_twist`) and `lambdatwist`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let normalized = text.trim().to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "grunert" => Ok(Self::Grunert),
+            "lambda-twist" | "lambdatwist" => Ok(Self::LambdaTwist),
+            _ => Err(format!(
+                "unknown P3P solver `{text}` (expected one of: {})",
+                Self::ALL.map(Self::name).join(", ")
+            )),
+        }
+    }
+}
+
+/// A P3P minimal estimator with a selectable [`P3PSolver`], usable anywhere a
+/// [`PoseEstimator`] is expected (e.g. as the minimal estimator inside
+/// [`PnPRansac`](crate::ransac::PnPRansac)).
 ///
 /// `minimum_correspondences()` is 4 — three points define the P3P geometry and
 /// the fourth disambiguates the up-to-four solutions. When handed more than
 /// four (the RANSAC refit on the full inlier set) it solves from a well-spread
 /// triple and scores every candidate against all of them.
+///
+/// `P3P::default()` uses Grunert and behaves exactly like [`P3PGrunert`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct P3P {
+    pub solver: P3PSolver,
+}
+
+impl P3P {
+    pub const fn new(solver: P3PSolver) -> Self {
+        Self { solver }
+    }
+}
+
+impl PoseEstimator for P3P {
+    fn estimate_pose(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        camera: &Camera,
+    ) -> Option<Pose> {
+        estimate_p3p(self.solver, correspondences, camera)
+    }
+
+    fn minimum_correspondences(&self) -> usize {
+        4
+    }
+}
+
+/// Grunert's P3P solver: [`P3P`] fixed to [`P3PSolver::Grunert`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct P3PGrunert;
 
@@ -46,51 +147,59 @@ impl PoseEstimator for P3PGrunert {
         correspondences: &[Correspondence2D3D],
         camera: &Camera,
     ) -> Option<Pose> {
-        if correspondences.len() < self.minimum_correspondences() {
-            return None;
-        }
-
-        // Pick three world points that span a well-conditioned triangle. For
-        // the minimal RANSAC sample this is just the three points; for the
-        // refit-on-all-inliers call it avoids a near-collinear leading triple.
-        let (i0, i1, i2) = spread_triple(correspondences)?;
-
-        // Unit bearing vectors in the camera frame for the solve triple.
-        let f0 = bearing(camera, &correspondences[i0])?;
-        let f1 = bearing(camera, &correspondences[i1])?;
-        let f2 = bearing(camera, &correspondences[i2])?;
-
-        let p0 = correspondences[i0].point3d;
-        let p1 = correspondences[i1].point3d;
-        let p2 = correspondences[i2].point3d;
-
-        let candidates = solve_grunert(&[p0, p1, p2], &[f0, f1, f2])?;
-
-        // Disambiguate by total reprojection error over the whole sample.
-        let mut best: Option<Pose> = None;
-        let mut best_error = f64::INFINITY;
-        for pose in candidates {
-            let mut error = 0.0;
-            let mut valid = true;
-            for c in correspondences {
-                let camera_point = pose.transform_world_point(&c.point3d);
-                let Some(projected) = camera.project(&camera_point) else {
-                    valid = false;
-                    break;
-                };
-                error += camera.pixel_residual(&projected, &c.point2d).norm_squared();
-            }
-            if valid && error < best_error {
-                best_error = error;
-                best = Some(pose);
-            }
-        }
-        best
+        estimate_p3p(P3PSolver::Grunert, correspondences, camera)
     }
 
     fn minimum_correspondences(&self) -> usize {
         4
     }
+}
+
+fn estimate_p3p(
+    solver: P3PSolver,
+    correspondences: &[Correspondence2D3D],
+    camera: &Camera,
+) -> Option<Pose> {
+    if correspondences.len() < 4 {
+        return None;
+    }
+
+    // Pick three world points that span a well-conditioned triangle. For
+    // the minimal RANSAC sample this is just the three points; for the
+    // refit-on-all-inliers call it avoids a near-collinear leading triple.
+    let (i0, i1, i2) = spread_triple(correspondences)?;
+
+    // Unit bearing vectors in the camera frame for the solve triple.
+    let f0 = bearing(camera, &correspondences[i0])?;
+    let f1 = bearing(camera, &correspondences[i1])?;
+    let f2 = bearing(camera, &correspondences[i2])?;
+
+    let p0 = correspondences[i0].point3d;
+    let p1 = correspondences[i1].point3d;
+    let p2 = correspondences[i2].point3d;
+
+    let candidates = solver.solve(&[p0, p1, p2], &[f0, f1, f2])?;
+
+    // Disambiguate by total reprojection error over the whole sample.
+    let mut best: Option<Pose> = None;
+    let mut best_error = f64::INFINITY;
+    for pose in candidates {
+        let mut error = 0.0;
+        let mut valid = true;
+        for c in correspondences {
+            let camera_point = pose.transform_world_point(&c.point3d);
+            let Some(projected) = camera.project(&camera_point) else {
+                valid = false;
+                break;
+            };
+            error += camera.pixel_residual(&projected, &c.point2d).norm_squared();
+        }
+        if valid && error < best_error {
+            best_error = error;
+            best = Some(pose);
+        }
+    }
+    best
 }
 
 /// Unit bearing vector (camera frame) for a correspondence's image point;
@@ -428,5 +537,268 @@ mod tests {
         let ec = est.world_to_camera.inverse().translation;
         let tc = true_pose.world_to_camera.inverse().translation;
         assert!((ec - tc).norm() < 1.0e-4, "centre off: {ec:?} vs {tc:?}");
+    }
+
+    /// Smallest pose error (camera-centre distance, rotation angle) among a
+    /// solver's candidates; infinite when it returns none.
+    fn best_candidate_error(
+        solver: P3PSolver,
+        true_pose: &Pose,
+        points: &[Point3<f64>; 3],
+    ) -> (f64, f64) {
+        let rays = points.map(|p| {
+            let q = true_pose.transform_world_point(&p).coords;
+            q / q.norm()
+        });
+        let truth_centre = true_pose.world_to_camera.inverse().translation;
+        solver
+            .solve(points, &rays)
+            .unwrap_or_default()
+            .iter()
+            .map(|pose| {
+                let centre = pose.world_to_camera.inverse().translation;
+                let angle = (pose.world_to_camera.rotation
+                    * true_pose.world_to_camera.rotation.inverse())
+                .angle();
+                ((centre - truth_centre).norm(), angle)
+            })
+            .fold((f64::INFINITY, f64::INFINITY), |best, e| {
+                if e.0 < best.0 {
+                    e
+                } else {
+                    best
+                }
+            })
+    }
+
+    /// Deterministic xorshift in [0, 1).
+    fn rng(state: &mut u64) -> f64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    #[test]
+    fn solvers_agree_on_general_triples() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..500 {
+            let true_pose = Pose::from_world_to_camera(
+                UnitQuaternion::from_scaled_axis(Vector3::new(
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                )),
+                Vector3::new(
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                    rng(&mut state),
+                ),
+            );
+            let camera_from_world = true_pose.world_to_camera.inverse();
+            let points = [0, 1, 2].map(|_| {
+                let in_camera = Vector3::new(
+                    4.0 * (rng(&mut state) - 0.5),
+                    3.0 * (rng(&mut state) - 0.5),
+                    2.0 + 8.0 * rng(&mut state),
+                );
+                camera_from_world.transform_point(&Point3::from(in_camera))
+            });
+            for solver in P3PSolver::ALL {
+                let (centre, angle) = best_candidate_error(solver, &true_pose, &points);
+                assert!(
+                    centre < 1.0e-5 && angle < 1.0e-6,
+                    "{solver}: centre {centre}, rotation {angle}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lambda_twist_holds_up_on_walls_seen_head_on() {
+        // Triples on a wall facing the camera, symmetric about the optical
+        // axis up to a small jitter: Grunert's quartic and back-substitution
+        // both degenerate here.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut worst = [0.0_f64; 2];
+        let mut failures = [0usize; 2];
+        let trials = 2000;
+        for _ in 0..trials {
+            let tilt = 0.02 * (rng(&mut state) - 0.5);
+            let true_pose = Pose::from_world_to_camera(
+                UnitQuaternion::from_scaled_axis(Vector3::new(tilt, -tilt, 0.0)),
+                Vector3::new(0.0, 0.0, 0.0),
+            );
+            let distance = 2.0 + 6.0 * rng(&mut state);
+            let half = 0.5 + rng(&mut state);
+            let jitter = 1.0e-4;
+            let mut j = || jitter * (rng(&mut state) - 0.5);
+            let in_camera = [
+                Vector3::new(-half + j(), -half + j(), distance),
+                Vector3::new(half + j(), -half + j(), distance),
+                Vector3::new(j(), half + j(), distance),
+            ];
+            let camera_from_world = true_pose.world_to_camera.inverse();
+            let points = in_camera.map(|p| camera_from_world.transform_point(&Point3::from(p)));
+            for (k, solver) in P3PSolver::ALL.into_iter().enumerate() {
+                let (centre, _) = best_candidate_error(solver, &true_pose, &points);
+                if centre.is_finite() && centre < 1.0e-2 {
+                    worst[k] = worst[k].max(centre);
+                } else {
+                    failures[k] += 1;
+                }
+            }
+        }
+        eprintln!(
+            "head-on wall, {trials} triples: grunert failures {} worst {:.2e} m; \
+             lambda-twist failures {} worst {:.2e} m",
+            failures[0], worst[0], failures[1], worst[1]
+        );
+        assert_eq!(failures[1], 0, "lambda twist must solve every wall triple");
+        assert!(
+            worst[1] < 1.0e-6,
+            "lambda twist worst centre error {}",
+            worst[1]
+        );
+    }
+
+    #[test]
+    fn p3p_estimator_runs_each_solver_on_a_wall() {
+        let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let true_pose = Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.01, -0.02, 0.0)),
+            Vector3::new(0.1, 0.0, 0.2),
+        );
+        let corrs: Vec<_> = [
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (0.0, 1.0),
+            (0.4, 0.3),
+            (-0.6, 0.5),
+        ]
+        .into_iter()
+        .map(|(x, y)| make_corr(&camera, &true_pose, Point3::new(x, y, 4.0)))
+        .collect();
+        for solver in P3PSolver::ALL {
+            let est = P3P::new(solver)
+                .estimate_pose(&corrs, &camera)
+                .unwrap_or_else(|| panic!("{solver} found no pose"));
+            let ec = est.world_to_camera.inverse().translation;
+            let tc = true_pose.world_to_camera.inverse().translation;
+            assert!(
+                (ec - tc).norm() < 1.0e-5,
+                "{solver}: centre off by {}",
+                (ec - tc).norm()
+            );
+        }
+        assert_eq!(P3P::default().solver, P3PSolver::Grunert);
+    }
+
+    #[test]
+    fn solver_names_round_trip() {
+        for solver in P3PSolver::ALL {
+            assert_eq!(solver.name().parse::<P3PSolver>(), Ok(solver));
+            assert_eq!(solver.to_string(), solver.name());
+        }
+        assert_eq!(
+            "Lambda_Twist".parse::<P3PSolver>(),
+            Ok(P3PSolver::LambdaTwist)
+        );
+        assert_eq!(
+            "lambdatwist".parse::<P3PSolver>(),
+            Ok(P3PSolver::LambdaTwist)
+        );
+        assert!("kneip".parse::<P3PSolver>().is_err());
+    }
+
+    /// The wall scan behind the CHANGELOG numbers: noise-free triples on
+    /// walls tilted 0-85 degrees, shortest side at least 1% of the longest.
+    /// `cargo test --release -p visloc-vision --lib wall_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, ~3 s in release"]
+    fn wall_scan() {
+        let mut state = 12345_u64;
+        let (mut failures, mut errors) = ([0usize; 2], [Vec::new(), Vec::new()]);
+        let mut timing = [0.0_f64; 2];
+        for _ in 0..200_000 {
+            let distance = 1.0 + 9.0 * rng(&mut state);
+            let tilt = 1.48 * rng(&mut state);
+            let azimuth = std::f64::consts::TAU * rng(&mut state);
+            let normal = Vector3::new(
+                tilt.sin() * azimuth.cos(),
+                tilt.sin() * azimuth.sin(),
+                tilt.cos(),
+            );
+            let on_wall: Vec<Vector3<f64>> = (0..3)
+                .map(|_| {
+                    let ray = Vector3::new(
+                        2.0 * (rng(&mut state) - 0.5),
+                        1.5 * (rng(&mut state) - 0.5),
+                        1.0,
+                    );
+                    ray * (normal.z * distance / normal.dot(&ray))
+                })
+                .collect();
+            let true_pose = Pose::from_world_to_camera(
+                UnitQuaternion::from_scaled_axis(Vector3::new(
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                )),
+                Vector3::new(rng(&mut state), rng(&mut state), rng(&mut state)),
+            );
+            if on_wall.iter().any(|p| p.z <= 0.1 || p.norm() > 60.0) {
+                continue;
+            }
+            let sides = [
+                (on_wall[0] - on_wall[1]).norm_squared(),
+                (on_wall[0] - on_wall[2]).norm_squared(),
+                (on_wall[1] - on_wall[2]).norm_squared(),
+            ];
+            let longest = sides.iter().copied().fold(0.0, f64::max);
+            let area = (on_wall[1] - on_wall[0])
+                .cross(&(on_wall[2] - on_wall[0]))
+                .norm();
+            let shortest = sides.iter().copied().fold(f64::INFINITY, f64::min);
+            if area < 1.0e-3 * longest || shortest < 1.0e-4 * longest {
+                continue;
+            }
+            let camera_from_world = true_pose.world_to_camera.inverse();
+            let points =
+                [0, 1, 2].map(|i| camera_from_world.transform_point(&Point3::from(on_wall[i])));
+            let rays = [0, 1, 2].map(|i| on_wall[i].normalize());
+            let centre = camera_from_world.translation;
+            for (k, solver) in P3PSolver::ALL.into_iter().enumerate() {
+                let start = std::time::Instant::now();
+                let candidates = solver.solve(&points, &rays).unwrap_or_default();
+                timing[k] += start.elapsed().as_secs_f64();
+                let best = candidates
+                    .iter()
+                    .map(|pose| {
+                        (pose.world_to_camera.inverse().translation - centre).norm() / distance
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                if best < 1.0e-2 {
+                    errors[k].push(best);
+                } else {
+                    failures[k] += 1;
+                }
+            }
+        }
+        for (k, solver) in P3PSolver::ALL.into_iter().enumerate() {
+            let e = &mut errors[k];
+            e.sort_by(f64::total_cmp);
+            let at = |q: f64| e[((e.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "{solver}: {} triples, {} without a correct pose, centre error / distance \
+                 median {:.1e} p99 {:.1e} p99.9 {:.1e}, {:.2} us/solve",
+                e.len() + failures[k],
+                failures[k],
+                at(0.5),
+                at(0.99),
+                at(0.999),
+                1.0e6 * timing[k] / (e.len() + failures[k]) as f64
+            );
+        }
     }
 }

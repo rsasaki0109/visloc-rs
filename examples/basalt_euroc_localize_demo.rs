@@ -131,13 +131,13 @@ use visloc_rs::localization::{
     OdomCorrectionConfig,
 };
 use visloc_rs::vision::matching::HammingMatcher;
-use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
+use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
 use visloc_rs::{
     AllLandmarksSelector, LocalizationConfig, LocalizationPipeline, PnPRansac,
     RadiusLandmarkSelector,
 };
 
-type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
+type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3P>>;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Args {
@@ -153,6 +153,10 @@ struct Args {
     min_inliers: usize,
     reprojection_px: f64,
     ransac_iterations: usize,
+    /// P3P solver inside RANSAC; Lambda Twist suits views of walls.
+    p3p_solver: P3PSolver,
+    /// `PnPRansac::inlier_refits`.
+    inlier_refits: usize,
     prior_radius_m: Option<f64>,
     /// Match the radius search's landmarks through the packed index (as the
     /// retrieval search does) instead of the generic candidate selector.
@@ -217,6 +221,7 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
+         [--p3p-solver grunert|lambda-twist] [--inlier-refits N] \
          [--prior-radius-m M [--fast-radius] [--prior-hold N] [--no-global-with-prior]] [--threads N] \
          [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
@@ -255,6 +260,8 @@ impl Args {
             min_inliers: 30,
             reprojection_px: 3.0,
             ransac_iterations: 1000,
+            p3p_solver: P3PSolver::Grunert,
+            inlier_refits: 0,
             prior_radius_m: None,
             fast_radius: false,
             prior_hold: 0,
@@ -313,6 +320,12 @@ impl Args {
                 "--min-inliers" => args.min_inliers = number(&option, value()?)?,
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
+                "--inlier-refits" => args.inlier_refits = number(&option, value()?)?,
+                "--p3p-solver" => {
+                    args.p3p_solver = value()?
+                        .parse()
+                        .map_err(|error| format!("--p3p-solver: {error}"))?;
+                }
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
                 "--fast-radius" => args.fast_radius = true,
                 "--prior-hold" => args.prior_hold = number(&option, value()?)?,
@@ -447,7 +460,7 @@ fn pipeline(args: &Args) -> Pipeline {
         ..LocalizationConfig::default()
     };
     let ransac = PnPRansac {
-        pose_estimator: P3PGrunert,
+        pose_estimator: P3P::new(args.p3p_solver),
         pose_refiner: Some(GaussNewtonPoseRefiner::default()),
         iterations: args.ransac_iterations,
         reprojection_threshold: args.reprojection_px,
@@ -455,6 +468,7 @@ fn pipeline(args: &Args) -> Pipeline {
         early_stop_min_iterations: 0,
         early_stop_inlier_ratio: None,
         confidence: Some(0.999),
+        inlier_refits: args.inlier_refits,
     };
     let matcher = HammingMatcher {
         max_distance: args.max_hamming,
@@ -1298,6 +1312,14 @@ mod tests {
         assert_eq!(args.prior_radius_m, Some(4.0));
         assert_eq!(args.camera, 1);
         assert_eq!(args.min_inliers, 30);
+        assert_eq!(args.p3p_solver, P3PSolver::Grunert);
+        let base = ["--map", "m", "--euroc-dir", "d", "--p3p-solver"];
+        let with = |solver: &str| parse(&[&base[..], &[solver]].concat());
+        assert_eq!(
+            with("lambda-twist").expect("parses").p3p_solver,
+            P3PSolver::LambdaTwist
+        );
+        assert!(with("kneip").is_err());
     }
 
     #[test]

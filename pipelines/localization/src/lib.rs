@@ -87,6 +87,7 @@ fn localization_ransac(config: &LocalizationConfig) -> LocalizationRansac {
         early_stop_min_iterations: defaults.early_stop_min_iterations,
         early_stop_inlier_ratio: defaults.early_stop_inlier_ratio,
         confidence: defaults.confidence,
+        inlier_refits: 0,
     }
 }
 

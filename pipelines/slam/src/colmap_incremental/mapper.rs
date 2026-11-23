@@ -934,6 +934,7 @@ impl IncrementalMapper {
             early_stop_min_iterations: 0,
             early_stop_inlier_ratio: None,
             confidence: None,
+            inlier_refits: 0,
         };
         let Some(report) = ransac.estimate(&correspondences, &camera) else {
             if std::env::var_os("VISLOC_DEBUG_REG_FAIL").is_some() {

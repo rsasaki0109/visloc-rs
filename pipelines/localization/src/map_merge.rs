@@ -232,6 +232,7 @@ fn pnp_pipeline(config: &MapMergeConfig) -> Pipeline {
         early_stop_min_iterations: 0,
         early_stop_inlier_ratio: None,
         confidence: Some(0.999),
+        inlier_refits: 0,
     };
     LocalizationPipeline::with_pose_estimator(
         HammingMatcher {

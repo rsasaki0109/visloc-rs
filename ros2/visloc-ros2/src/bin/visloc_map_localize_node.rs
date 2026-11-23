@@ -66,6 +66,10 @@ PARAMETERS (--name value  or  -p name:=value):
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
+  p3p_solver             P3P solver in RANSAC: grunert, or lambda-twist (more accurate
+                         when most landmarks in view are on walls)                    [grunert]
+  inlier_refits          rounds of re-collecting the refined pose's inliers and refining
+                         again (0: refine once on the RANSAC winner's inliers)        [0]
   reprojection_threshold PnP inlier threshold in pixels                               [3.0]
   projection_radius      with a map pose, match each landmark only with keypoints this
                          close (px) to its projection from the predicted pose; on
@@ -157,6 +161,8 @@ fn run() -> Result<(), String> {
     let ratio = args.parsed_or("ratio", options.ratio.unwrap_or(0.0))?;
     options.ratio = (ratio > 0.0).then_some(ratio);
     options.ransac_iterations = args.parsed_or("ransac_iterations", options.ransac_iterations)?;
+    options.p3p_solver = args.parsed_or("p3p_solver", options.p3p_solver)?;
+    options.inlier_refits = args.parsed_or("inlier_refits", options.inlier_refits)?;
     options.reprojection_px = args.parsed_or("reprojection_threshold", options.reprojection_px)?;
     let radius = args.parsed_or(
         "projection_radius",

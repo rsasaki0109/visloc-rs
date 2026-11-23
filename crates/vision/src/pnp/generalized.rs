@@ -713,6 +713,7 @@ impl GeneralizedPnPRansac {
                 early_stop_min_iterations: 16,
                 early_stop_inlier_ratio: Some(0.9),
                 confidence: self.confidence,
+                inlier_refits: 0,
             };
             let Some(report) =
                 central.estimate(&sensor_correspondences, &rig.sensors()[sensor_index].camera)

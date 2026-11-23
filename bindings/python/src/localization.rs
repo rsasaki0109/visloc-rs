@@ -67,6 +67,7 @@ fn ransac(
         confidence,
         early_stop_min_iterations: 0,
         early_stop_inlier_ratio: None,
+        inlier_refits: 0,
     };
     if !refine {
         estimator.pose_refiner = None;
@@ -209,8 +210,9 @@ impl PyLocalizationResult {
 /// Descriptors are matched to the map with a brute-force L2 matcher and Lowe's
 /// ratio test, then the pose is estimated with PnP inside RANSAC and refined
 /// with Gauss-Newton. `pnp_solver` picks the minimal solver: `"dlt"` (the
-/// default) or `"p3p"`, which stays well-posed when the matched points are
-/// coplanar (maps dominated by walls). The GIL is released while localizing.
+/// default), `"p3p"`, which stays well-posed when the matched points are
+/// coplanar (maps dominated by walls), or `"p3p-lambda-twist"`, P3P with the
+/// Lambda Twist solver (more accurate on views of walls, and faster). The GIL is released while localizing.
 #[pyfunction]
 #[pyo3(signature = (
     camera,
@@ -380,7 +382,8 @@ impl PyPnPRansacResult {
 ///
 /// `points2d` `(N, 2)` are pixels in `camera`; `points3d` `(N, 3)` are world
 /// points. Runs PnP in RANSAC (deterministic for a given `seed`; `pnp_solver`
-/// is `"dlt"`, the default, or `"p3p"` for coplanar points) and, when
+/// is `"dlt"`, the default, `"p3p"` for coplanar points, or
+/// `"p3p-lambda-twist"`, P3P with Lambda Twist) and, when
 /// `refine` is true, Gauss-Newton refinement on the inliers. `confidence`
 /// enables COLMAP-style adaptive termination with `ransac_iterations` as the
 /// cap. Returns `None` when no pose is found.

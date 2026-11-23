@@ -155,6 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
                 confidence: None,
+                inlier_refits: 0,
             }
             .estimate(&corrs, cam)
             .filter(|r| r.inliers.len() >= MIN_INLIERS)

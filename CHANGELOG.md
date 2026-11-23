@@ -6,6 +6,50 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Selectable P3P solver for wall-heavy scenes** (`P3PSolver`, `P3P`
+  in `visloc_vision::pnp`). Adds Lambda Twist (Persson & Nordberg 2018)
+  next to Grunert. Grunert's quartic divides by terms that go through zero
+  when the camera faces a wall head-on. Lambda Twist works from the depth
+  constraints' quadratic forms, puts the longest side in the pair both
+  conics share, polishes each root with Gauss-Newton, and is closed form
+  throughout (Cardano, the known zero eigenvalue, the pose from the two
+  congruent triangles without an SVD). Over 149k noise-free triples on
+  walls tilted 0-85 degrees (`wall_scan`, an ignored test): no triple
+  without a correct pose against 4 for Grunert, camera-centre error over
+  wall distance median 4.8e-15 vs 1.7e-13 and p99 1.2e-11 vs 1.1e-7, and
+  0.9 us per solve against 6.3 us. Grunert stays the default, so
+  earlier results do not change. Choose with `p3p_solver` on
+  `visloc_map_localize_node`, `--p3p-solver` on
+  `basalt_euroc_localize_demo` and `nav_sim_drive`, and
+  `SimRobotConfig::p3p_solver`, and as `PnpMinimalSolver::P3pLambdaTwist`
+  (`--pnp-solver p3p-lambda-twist` in `localize_openloris_map` and
+  `localize_rne_map_sequence`, `pnp_solver="p3p-lambda-twist"` in Python).
+  In `nav_sim_drive --laps 2` (the
+  apartment) both reach 34/34 waypoints at 2.4-3.1 cm RMSE, but the drive
+  is not deterministic: the same settings twice gave 2.3 and 3.0 cm, so no
+  difference between the solvers shows there. On real images (TUM-VI
+  room2 localized in a map of room1, `basalt_euroc_localize_demo`) the
+  two solvers gave the same result on 2881 of 2882 images (median pose
+  difference 0): with real noise the solver is not what limits
+  localization. That map localizes room2 to only about 20 cm against the
+  motion capture with either solver, though SLAM on room1 is at 1 cm; the
+  map's OPENCV_FISHEYE fit of TUM-VI's camera is off by up to 8.7 px at
+  the image edge, a likely cause, not looked into here.
+- **`PnPRansac::inlier_refits`**: after the final refinement, re-collect
+  the refined pose's inliers and refine again (until the set stops
+  changing, a round stops improving the score, or N rounds). The RANSAC
+  winner comes from a three-point sample, and the outliers that happen to
+  sit within the threshold of that noisy pose were fitted too. On
+  synthetic scenes with 1 px noise and 30% outliers (`inlier_refit_scan`,
+  an ignored test), 3 rounds cut the camera-centre error by about 20% at
+  the median and 25% at p90, on walls and on 3D scenes alike, which brings
+  it to that of a refinement from the true pose on the true inliers. 0,
+  the default, keeps the single refinement, so earlier results do not
+  change. `inlier_refits` on `visloc_map_localize_node`, `--inlier-refits`
+  on `basalt_euroc_localize_demo` and `nav_sim_drive`.
+  On TUM-VI room2 (above), 3 rounds localized a few more images at the
+  inlier threshold (147 to 152 at 30, 371 to 375 at 20) at the same
+  accuracy.
 - **Faster search of dense maps** (`basalt_euroc_localize_demo`):
   `--fast-radius` (the radius search through the packed index;
   `BinaryLandmarkIndex::landmarks_within`, `match_among_threaded`),
