@@ -798,6 +798,17 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.full(cars, 4)])
             n += cars
         self.lane_mix = self.dir.copy()
+        # Footprints (x along, y left, radius) per agent: by kind, but a car's from its own body,
+        # seven overlapping circles as wide as it, so its sides have no waist to walk into.
+        self.foot = []
+        for k_, fig in zip(self.kind, self.figures):
+            if int(k_) == 4 and hasattr(fig, 'length'):
+                r_ = fig.width / 2
+                hl, cr = fig.length / 2, 0.3                   # and a small circle in each corner
+                self.foot.append(tuple((float(a), 0.0, r_) for a in np.linspace(-(hl - r_), hl - r_, 7))
+                                 + tuple((sa * (hl - cr), sb * (r_ - cr), cr) for sa in (-1, 1) for sb in (-1, 1)))
+            else:
+                self.foot.append(FOOT[int(k_)])
         self.cv = self.v.copy()          # a car's speed now: it speeds up and brakes gradually
         self.uturn = np.zeros(n)        # a car's progress (0 .. 1) through a U-turn at the road's end; 0: none
         # A zebra crossing with a traffic light in the middle of the road's stretch: cars stop
@@ -808,6 +819,9 @@ class Crowd:
         self.cross_home = np.zeros(n)
         self.cross_wait = np.zeros(n)
         self.cross_tried = np.zeros(n, bool)
+        self.cross_block = np.zeros(n)         # seconds a walker on the crossing has been blocked
+        self.jam = np.zeros(n)                 # seconds without moving, through turns back
+        self.squeeze = np.zeros(n, bool)       # brushing past someone head-on until clear of them
         self._decor = {}
         # Behaviour: walkers now and then stand still a while (a chat, a phone); anyone on foot
         # now and then drifts across to the other side.
@@ -934,6 +948,16 @@ class Crowd:
         yaw = math.atan2(seg[1] * self.dir[i], seg[0] * self.dir[i])
         return xy, yaw, np.array([-seg[1], seg[0]])
 
+    def _car_on_crossing(self):
+        """Whether a car is on the crossing, or coming too fast to stop before it: walkers wait."""
+        for j in range(len(self.s)):
+            if self.kind[j] != 4:
+                continue
+            ahead = self.dir[j] * (self.crossing_s - self.s[j])       # its centre to the crossing's
+            if -4.5 < ahead < 4.5 + self.cv[j] ** 2 / (2 * 3.0) + 1.0:
+                return True
+        return False
+
     def _lane_scale(self, i):
         """Route arc length per metre of car i's lane, on the segment it is on."""
         k = int(np.clip(np.searchsorted(self.cum, self.s[i]) - 1, 0, len(self.path) - 2))
@@ -956,7 +980,7 @@ class Crowd:
     def _footprint(self, i, xy, yaw):
         h = np.array([math.cos(yaw), math.sin(yaw)])
         left = np.array([-h[1], h[0]])
-        f = FOOT[int(self.kind[i])]
+        f = self.foot[i]
         return np.array([xy + a * h + b * left for a, b, _ in f]), np.array([r for _, _, r in f])
 
     def _overlap(self, i, xy, yaw, robot):
@@ -972,8 +996,8 @@ class Crowd:
         return worst
 
     def _clear(self, i, xy, yaw, robot, slack=0.02):
-        """Whether agent i standing at (xy, yaw) overlaps nobody by more than slack, and
-        stays 5 cm clear of the robot."""
+        """Whether agent i standing at (xy, yaw) overlaps nobody by more than slack (2 cm
+        always with a car or anyone going the same way), and stays 5 cm clear of the robot."""
         c, r = self._footprint(i, xy, yaw)
         # the robot is kept 5 cm clear, so it is never inside anyone when it next moves
         if (np.hypot(c[:, 0] - robot[0], c[:, 1] - robot[1]) < r + self.robot_radius + 0.05).any():
@@ -983,7 +1007,8 @@ class Crowd:
                 continue
             cj, rj = self._footprint(j, self.xy[j], self.yaw[j])
             d = np.hypot(c[:, None, 0] - cj[None, :, 0], c[:, None, 1] - cj[None, :, 1])
-            if (d < r[:, None] + rj[None, :] - slack).any():
+            sl = 0.02 if (self.kind[i] == 4 or self.kind[j] == 4 or self.dir[i] == self.dir[j]) else slack
+            if (d < r[:, None] + rj[None, :] - sl).any():
                 return False
         return True
 
@@ -1020,8 +1045,8 @@ class Crowd:
         n = len(self.s)
         self.clock += dt
         light = self.light() if self.crossing_s is not None else None
-        rad = np.array([max(abs(b) + r for _, b, r in FOOT[int(k)]) for k in self.kind])    # half-width
-        half = np.array([max(abs(a) + r for a, _, r in FOOT[int(k)]) for k in self.kind]) - rad  # length beyond
+        rad = np.array([max(abs(b) + r for _, b, r in f) for f in self.foot])    # half-width
+        half = np.array([max(abs(a) + r for a, _, r in f) for f in self.foot]) - rad  # length beyond
         heading = np.stack([np.cos(self.yaw), np.sin(self.yaw)], 1)
         vel = heading * (self.v * self.moving)[:, None] if hasattr(self, 'moving') else heading * self.v[:, None]
         moving = np.ones(n)
@@ -1054,6 +1079,7 @@ class Crowd:
             speed = self.v[i]
             hold = False                                         # a light or a crossing holds them
             cap = math.inf                                       # a car braking for the light
+            cross_want = False                                   # a walker on the crossing wants to move
             old_dodge, old_side = self.dodge[i], self.side[i]
             if car and self.uturn[i] > 0:                       # in a U-turn: on round the half circle
                 u_old, mix_old = self.uturn[i], self.lane_mix[i]
@@ -1078,16 +1104,17 @@ class Crowd:
                 continue
             if self.cross[i]:                                  # crossing the road and back
                 side = self._road_side()
-                target = (self.lane(self.crossing_s, 1.0) + LANE_HALF + side * (LANE_HALF + 1.2)
+                target = (self.lane(self.crossing_s, 1.0) + LANE_HALF + side * (LANE_HALF + 1.6)
                           if self.cross[i] in (1, 2) else self.cross_home[i])
                 step = float(np.clip(target - self.side[i], -1.2 * dt, 1.2 * dt))
                 self.side[i] += step
+                cross_want = abs(step) > 1e-6
                 hold = True
                 if self.cross[i] == 1 and not step:
                     self.cross[i], self.cross_wait[i] = 2, self.brng.uniform(4.0, 10.0)
                 elif self.cross[i] == 2:
                     self.cross_wait[i] -= dt
-                    if self.cross_wait[i] <= 0 and light == 'red':
+                    if self.cross_wait[i] <= 0 and light == 'red' and not self._car_on_crossing():
                         self.cross[i] = 3
                 elif self.cross[i] == 3 and not step:
                     self.cross[i] = 0
@@ -1101,7 +1128,7 @@ class Crowd:
                     speed *= 0.8
             if self.crossing_s is not None and self.kind[i] == 0 and not self.cross[i]:
                 near = abs(self.s[i] - self.crossing_s) < 0.4
-                if near and not self.cross_tried[i] and light == 'red':
+                if near and not self.cross_tried[i] and light == 'red' and not self._car_on_crossing():
                     self.cross_tried[i] = True
                     if self.brng.random() < 0.6:                 # most of those who reach it on red cross
                         self.cross[i], self.cross_home[i] = 1, self.side[i]
@@ -1164,9 +1191,20 @@ class Crowd:
             # Already inside someone (placed there, or the robot drove up): any step that
             # gets less deep is allowed, so nobody stays stuck inside another.
             now = self._overlap(i, self.xy[i], self.yaw[i], robot)
-            for s_try, dodge_try in ((s_new, self.dodge[i]), (self.s[i], self.dodge[i]), (s_new, old_dodge)):
+            tries = [(s_new, self.dodge[i]), (self.s[i], self.dodge[i]), (s_new, old_dodge)]
+            if self.cross[i] and self.crossing_s is not None:     # on the crossing: step along it to pass
+                tries += [(min(max(self.s[i] + e, self.crossing_s - 1.2), self.crossing_s + 1.2), self.dodge[i])
+                          for e in (0.15, -0.15)]
+            # Deadlocked head-on on a narrow pavement for 16 s: people and bikes coming the other
+            # way may brush past each other (up to 15 cm), never a car.
+            if not car and self.jam[i] > 16.0:
+                self.squeeze[i] = True
+            elif now <= 0.02:
+                self.squeeze[i] = False
+            slack = 0.15 if self.squeeze[i] else 0.02
+            for s_try, dodge_try in tries:
                 xy, yaw, normal = self._pose(i, s_try, dodge_try, self.dir[i])
-                if self._clear(i, xy, yaw, robot) or (now > 0.02 and self._overlap(i, xy, yaw, robot) < now - 1e-4):
+                if self._clear(i, xy, yaw, robot, slack) or (now > 0.02 and self._overlap(i, xy, yaw, robot) < now - 1e-4):
                     moved = s_try != self.s[i]
                     self.s[i], self.dodge[i] = s_try, dodge_try
                     self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
@@ -1174,6 +1212,13 @@ class Crowd:
             else:
                 self.dodge[i], self.side[i] = old_dodge, old_side
                 self.side_goal[i] = old_side                     # that way is taken: stay on this line
+            if self.cross[i]:                                    # blocked on the crossing 4 s: go back
+                blocked = cross_want and self.side[i] == old_side
+                self.cross_block[i] = self.cross_block[i] + dt if blocked else 0.0
+                if self.cross_block[i] > 4.0:
+                    self.cross[i] = 3 if self.cross[i] in (1, 2) else 1
+                    self.cross_block[i] = 0.0
+            self.jam[i] = 0.0 if (moved or pausing or (hold and self.side[i] != old_side)) else self.jam[i] + dt
             if moved or pausing or hold:
                 self.stuck[i] = 0.0
                 # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
@@ -1198,7 +1243,7 @@ class Crowd:
     def overlaps(self, robot_xy, robot_radius):
         """(person-person, person-robot) pairs whose footprints overlap now."""
         c, r = self.circles()
-        owner = np.concatenate([[i] * len(FOOT[int(k)]) for i, k in enumerate(self.kind)]) if len(r) else np.zeros(0, int)
+        owner = np.concatenate([[i] * len(f) for i, f in enumerate(self.foot)]) if len(r) else np.zeros(0, int)
         d = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
         hit = (d < r[:, None] + r[None, :]) & (owner[:, None] < owner[None, :])
         pp = len({(owner[a], owner[b]) for a, b in zip(*np.nonzero(hit))})

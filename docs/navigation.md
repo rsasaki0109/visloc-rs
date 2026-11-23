@@ -873,6 +873,14 @@ keeping right.
   a cabin that leans in, glass with pillars, lights, number plates,
   mirrors and five-spoke wheels. Most are white, black, grey or silver.
   Each car is about 4,500 flat gaussians, plus a soft shadow on the road.
+- **Footprint**: seven overlapping circles as wide as the car's own body,
+  plus one in each corner, so nobody can step into its side or corners.
+  Walkers start across only when no car is on the crossing or too close
+  to stop. One blocked on the crossing for 4 s goes back. People or bikes
+  deadlocked head-on on a narrow pavement for 16 s may brush past (up to
+  15 cm), never a car. Offline over 600 s with 4 seeds: no one more than
+  5 cm into a car body; nobody stood still longer than 20 s (cars 11 s,
+  a red light).
 - **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
   smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
   on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They

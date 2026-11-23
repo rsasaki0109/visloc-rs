@@ -362,6 +362,12 @@ All notable changes to `visloc-rs` will be documented here.
 - 3DGS sim cars drive along the street, not along the robot's route
   offset sideways (`people.fit_road_lines`, `gs_sim --no-road-fit`):
   where the route cut across a side street they had driven 26° off it.
+- 3DGS sim: people no longer walk into cars. A car's footprint is its body
+  (seven circles as wide as it, and its corners), not three circles with a
+  waist. Walkers wait for cars on or close to the crossing and go back if
+  blocked there; head-on deadlocks on the pavement resolve by brushing
+  past (people and bikes only). With 4 seeds over 600 s: nobody 5 cm into
+  a car, no standstill over 20 s (there had been 400 s ones).
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.
