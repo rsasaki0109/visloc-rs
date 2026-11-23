@@ -92,13 +92,15 @@ if os.path.exists(PEOPLE_CSV):
     road = meta.get('road_offset')
     road = [tuple(r) for r in road] if isinstance(road, list) else road
     CROWD = Crowd([scene['start']] + scene.get('goals', []), counts[0], _Free(), seed=args.seed,
-                  cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3], cars=counts[4], road_offset=road)
+                  cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3], cars=counts[4], road_offset=road,
+                  crossing=bool(meta.get('crossing')))
     DYN = 2500 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3] + 7000 * counts[4]
 
 def people_at(t):
     """Put the crowd where gs_sim.py recorded it at time t."""
     rows = np.array(PEOPLE[PT[min(bisect.bisect_left(PT, t), len(PT) - 1)]])
     CROWD.xy, CROWD.yaw, CROWD.phase = rows[:, :2].copy(), rows[:, 2].copy(), rows[:, 3].copy()
+    CROWD.clock = t                        # the traffic light as it was then
 
 CAM = scene['camera']
 CW, CH = CAM['width'], CAM['height']

@@ -23,7 +23,9 @@ differential drive driven by `cmd_vel`. It publishes:
   then stand still a while, and people on foot drift across to the other
   side. `--cars` drive both ways along a road beside the route, keeping
   right; the road is `--road-offset` metres to the left of the route, or
-  estimated from the splat's grey ground; They show in the camera and in the
+  estimated from the splat's grey ground (stretches whose renders are
+  blurred are left out). `--crossing` adds a zebra crossing with a traffic
+  light: cars wait unless green, walkers cross on red; They show in the camera and in the
   scan, so Nav2 has to steer round them, and they wait while the robot is
   just in front of them. In the camera they are gaussians rendered with the
   scene by default (`--people-style splat`, `gsplat_render_server
@@ -185,7 +187,8 @@ class Sim(Node):
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
-                               cars=args.cars, road_offset=road_offset, car_speed=args.car_speed)
+                               cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
+                               crossing=args.crossing)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
@@ -217,7 +220,8 @@ class Sim(Node):
         self.people = open(args.record + '.people.csv', 'w') if args.record and self.crowd else None
         if self.people:
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
-            json.dump({'road_offset': getattr(self.crowd, 'road_offset', None)},  # number or segments
+            json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
+                       'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 
     def on_cmd(self, msg):
@@ -382,6 +386,8 @@ def main():
     p.add_argument('--road', default='',
                    help='JSON [[s_start, s_end, offset or null], ...]: the road beside the route per stretch '
                         '(as estimated and logged, edited where the splat misleads the estimate)')
+    p.add_argument('--crossing', action='store_true',
+                   help='with --cars: a zebra crossing and a traffic light in the middle of the road')
     p.add_argument('--car-speed', dest='car_speed', type=float, default=6.0, help='m/s, each +-20%%')
     p.add_argument('--cyclist-speed', dest='cyclist_speed', type=float, default=4.0, help='m/s, each +-20%%')
     p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
