@@ -368,6 +368,11 @@ All notable changes to `visloc-rs` will be documented here.
   blocked there; head-on deadlocks on the pavement resolve by brushing
   past (people and bikes only). With 4 seeds over 600 s: nobody 5 cm into
   a car, no standstill over 20 s (there had been 400 s ones).
+- 3DGS sim people look and walk like people: a lofted torso (shoulders,
+  waist, hips), tapered limbs, shoes, a face left clear by the hair, and
+  everyday clothes (trousers or a skirt, a T-shirt, a top or a jacket,
+  long hair, a bun, a cap, a backpack). Knees bend in the swing, the
+  pelvis bobs, and the arms swing with a bent elbow.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.

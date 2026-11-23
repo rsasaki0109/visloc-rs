@@ -20,16 +20,88 @@ from PIL import Image, ImageDraw
 
 import robot_model as rm
 
-SKIN = [(241, 205, 175), (214, 168, 128), (168, 118, 82), (110, 76, 52)]
-SHIRT = [(200, 60, 55), (60, 110, 190), (235, 235, 230), (40, 40, 44), (90, 150, 90), (230, 180, 60), (150, 90, 160)]
-TROUSERS = [(40, 48, 70), (30, 30, 34), (150, 130, 100), (80, 85, 95), (60, 80, 120)]
-HAIR = [(30, 24, 20), (70, 48, 30), (20, 20, 22), (150, 120, 80)]
+# Street clothes: muted, mostly dark trousers and plain tops (RGB).
+SKIN = [(236, 200, 172), (222, 178, 142), (198, 148, 110), (160, 112, 78), (112, 76, 52), (84, 58, 42)]
+TOPS = [(235, 235, 230), (28, 28, 32), (120, 122, 126), (36, 48, 78), (150, 40, 44), (92, 104, 70),
+        (196, 180, 150), (70, 110, 150), (180, 150, 60), (230, 205, 200)]
+JACKETS = [(24, 24, 28), (50, 56, 66), (88, 70, 52), (36, 52, 40), (130, 110, 80), (40, 44, 70), (150, 150, 152)]
+TROUSERS = [(38, 48, 72), (28, 28, 32), (60, 66, 82), (150, 132, 104), (84, 86, 92), (52, 70, 104)]
+SKIRTS = [(28, 28, 32), (40, 46, 70), (120, 40, 50), (150, 130, 100)]
+HAIR = [(26, 22, 20), (56, 40, 28), (96, 66, 40), (150, 120, 80), (190, 170, 130), (130, 130, 130)]
+SHOES = [(26, 26, 28), (236, 236, 232), (90, 60, 40), (60, 60, 66)]
 PHASES = 12
 RADIUS = 0.25
 
 
+def _taper(p0, p1, r0, r1, col, n=10, rings=3, caps=True):
+    """A tube from p0 (radius r0) to p1 (r1) with rounded ends and smooth normals."""
+    p0, p1 = np.asarray(p0, float), np.asarray(p1, float)
+    a = p1 - p0
+    L = float(np.linalg.norm(a))
+    if L < 1e-6:
+        return
+    a /= L
+    u = np.cross(a, [0, 0, 1] if abs(a[2]) < 0.9 else [1, 0, 0])
+    u /= np.linalg.norm(u)
+    w = np.cross(a, u)
+    ang = [2 * math.pi * k / n for k in range(n + 1)]
+    # profile: (offset along a, radius, normal tilt) from the p0 cap through the tube to the p1 cap
+    prof = []
+    if caps:
+        for t in np.linspace(-math.pi / 2, 0, 3)[:-1]:
+            prof.append((r0 * math.sin(t), r0 * math.cos(t), t))
+    for t in np.linspace(0, 1, rings + 1):
+        prof.append((t * L, r0 + (r1 - r0) * t, math.atan2(r0 - r1, L)))
+    if caps:
+        for t in np.linspace(0, math.pi / 2, 3)[1:]:
+            prof.append((L + r1 * math.sin(t), r1 * math.cos(t), t))
+    P, N = [], []
+    for off, r, tilt in prof:
+        P.append([p0 + off * a + r * (math.cos(t) * u + math.sin(t) * w) for t in ang])
+        N.append([math.sin(tilt) * a + math.cos(tilt) * (math.cos(t) * u + math.sin(t) * w) for t in ang])
+    for i in range(len(prof) - 1):
+        for j in range(n):
+            q = ((i, j), (i, j + 1), (i + 1, j + 1), (i + 1, j))
+            pt = [P[x][y] for x, y in q]
+            nm = [N[x][y] for x, y in q]
+            rm._add((pt[0], pt[1], pt[2]), (nm[0], nm[1], nm[2]), col)
+            rm._add((pt[0], pt[2], pt[3]), (nm[0], nm[2], nm[3]), col)
+
+
+def _loft(sections, colfn, n=14, e=2.4):
+    """A closed body lofted through horizontal superellipse sections [(x, y, z, half depth (x),
+    half width (y))], bottom to top, capped. colfn(i) gives the colour of the band above
+    section i."""
+    ang = [2 * math.pi * k / n for k in range(n + 1)]
+    sg = lambda v, p: math.copysign(abs(v) ** p, v)  # noqa: E731
+    P = np.array([[[x + hx * sg(math.cos(t), 2 / e), y + hy * sg(math.sin(t), 2 / e), z] for t in ang]
+                  for x, y, z, hx, hy in sections])
+    du = np.gradient(P, axis=0)
+    dv = np.gradient(P, axis=1)
+    N = np.cross(dv, du)
+    N /= np.linalg.norm(N, axis=2, keepdims=True) + 1e-12
+    cen = P.mean(1, keepdims=True)
+    N *= np.sign(((P - cen) * N).sum(2, keepdims=True) + 1e-9)
+    for i in range(len(sections) - 1):
+        col = colfn(i)
+        for j in range(n):
+            q = ((i, j), (i, j + 1), (i + 1, j + 1), (i + 1, j))
+            pt = [P[x, y] for x, y in q]
+            nm = [N[x, y] for x, y in q]
+            rm._add((pt[0], pt[1], pt[2]), (nm[0], nm[1], nm[2]), col)
+            rm._add((pt[0], pt[2], pt[3]), (nm[0], nm[2], nm[3]), col)
+    for i, s_ in ((0, -1.0), (len(sections) - 1, 1.0)):
+        c = P[i].mean(0)
+        nm = np.array([0, 0, s_])
+        for j in range(n):
+            rm._add((c, P[i, j], P[i, j + 1]), (nm, nm, nm), colfn(max(0, i - 1)))
+
+
 class Figure:
-    """One pedestrian's triangles at each of PHASES gait phases (x forward, z up, feet at z = 0)."""
+    """One pedestrian's triangles at each of PHASES gait phases (x forward, z up, feet at z = 0):
+    a lofted torso, tapered limbs and a head with hair, in everyday clothes (trousers or a
+    skirt, a T-shirt, a top or a jacket, sometimes a backpack or a cap), walking with knees
+    that bend in the swing, a bobbing pelvis and arms that swing with a bent elbow."""
 
     def __init__(self, rng, extra=None):
         """extra: None, 'dog' (a dog on a lead at their right) or 'stroller' (pushed ahead)."""
@@ -43,56 +115,143 @@ class Figure:
             self.frames = self._build(rng, 1.0, same_as=self)
         self.low = self._build(rng, 0.5, same_as=self)
 
+    @staticmethod
+    def _dress(rng):
+        pick = lambda xs: xs[rng.integers(len(xs))]  # noqa: E731
+        lk = {'skin': pick(SKIN), 'hair': pick(HAIR), 'shoes': pick(SHOES), 's': rng.uniform(0.9, 1.08)}
+        lk['female'] = rng.random() < 0.5
+        lk['top'] = pick(TOPS)
+        lk['sleeves'] = ('short', 'long', 'jacket')[rng.choice(3, p=(0.35, 0.3, 0.35))]
+        lk['jacket'] = pick(JACKETS)
+        lk['skirt'] = lk['female'] and rng.random() < 0.3
+        lk['legs'] = pick(SKIRTS) if lk['skirt'] else pick(TROUSERS)
+        lk['tights'] = (40, 36, 36) if rng.random() < 0.5 else lk['skin']
+        lk['hairstyle'] = (('long', 'bun', 'short')[rng.choice(3, p=(0.55, 0.25, 0.2))] if lk['female']
+                           else ('short', 'short', 'cap', 'bald')[rng.integers(4)])
+        lk['cap'] = pick([(30, 30, 34), (40, 60, 110), (200, 200, 196), (120, 40, 40)])
+        lk['backpack'] = rng.random() < 0.25
+        lk['pack'] = pick([(30, 30, 34), (60, 70, 90), (120, 60, 40), (70, 90, 70)])
+        lk['lean'] = rng.uniform(0.02, 0.07)
+        return lk
+
     def _build(self, rng, detail, same_as=None):
         """Meshes at each gait phase; detail scales the tessellation (0.5 for people far away)."""
         if same_as is not None:
-            skin, shirt, trousers, hair, s = same_as.look
+            lk = same_as.look
         else:
-            skin, shirt = SKIN[rng.integers(len(SKIN))], SHIRT[rng.integers(len(SHIRT))]
-            trousers, hair = TROUSERS[rng.integers(len(TROUSERS))], HAIR[rng.integers(len(HAIR))]
-            s = rng.uniform(0.92, 1.08)                   # height scale (about 1.55 - 1.85 m)
-            self.look = (skin, shirt, trousers, hair, s)
+            lk = self._dress(rng)
+            self.look = lk
+        s = lk['s'] * (0.94 if lk['female'] else 1.0)
         q = lambda k: max(4, int(round(k * detail)))  # noqa: E731
+        top_col = lk['jacket'] if lk['sleeves'] == 'jacket' else lk['top']
+        thigh, shin, foot_h = 0.45 * s, 0.43 * s, 0.075
+        upper, fore = 0.30 * s, 0.27 * s
+        hw = 0.085 * s if lk['female'] else 0.075 * s   # half the hip joints' spacing
         frames = []
         for ph in range(PHASES):
-            a = math.sin(2 * math.pi * ph / PHASES)
+            phi = 2 * math.pi * ph / PHASES
             del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
-            hip, sh = 0.88 * s, 1.40 * s
-            for side, sw in ((1, a), (-1, -a)):           # legs: thigh and shin swing about the hip
-                y = 0.10 * side
-                knee = np.array([0.42 * s * math.sin(0.45 * sw), y, hip - 0.42 * s * math.cos(0.45 * sw)])
-                foot = knee + np.array([0.44 * s * math.sin(0.45 * sw - 0.15 * abs(sw)), 0,
-                                        -0.44 * s * math.cos(0.45 * sw - 0.15 * abs(sw))])
-                rm.cylinder([0, y, hip], knee, 0.075, trousers, n=q(10))
-                rm.cylinder(knee, foot, 0.06, trousers, n=q(10))
-                rm.superellipsoid(foot + np.array([0.06, 0, 0.03]), (0.12, 0.05, 0.035), 0.5, col=(35, 35, 38),
-                                  nu=q(10), nv=q(6))
-            rm.superellipsoid(np.array([0, 0, hip + 0.02]), (0.11, 0.17, 0.11), 0.8, col=trousers, nu=q(14), nv=q(8))  # hips
-            rm.superellipsoid(np.array([0, 0, hip + 0.17 * s]), (0.10, 0.16, 0.16 * s), 0.9, col=shirt,
-                              nu=q(14), nv=q(8))               # waist
-            rm.superellipsoid(np.array([0, 0, sh - 0.14 * s]), (0.12, 0.19, 0.17 * s), 0.7, col=shirt,
-                              nu=q(16), nv=q(8))               # chest and shoulders
+            legs = []
+            for side, off in ((1, 0.0), (-1, math.pi)):
+                f = phi + off
+                th = 0.09 + 0.30 * math.sin(f)                           # thigh forward of vertical
+                kn = 0.08 + 0.95 * max(0.0, math.cos(f + 0.45)) ** 2     # knee bend, mostly in the swing
+                legs.append((side, th, kn, f))
+            drop = max(thigh * math.cos(th) + shin * math.cos(th - kn) for _, th, kn, _ in legs)
+            hip_z = foot_h + drop                                       # the stance foot on the ground
+            sway = 0.018 * math.sin(phi)
+            lean = lk['lean']
+            # Legs: thigh, shin and a shoe, flat on the ground in the stance.
+            for side, th, kn, f in legs:
+                h = np.array([0.0, side * hw + sway, hip_z])
+                k = h + thigh * np.array([math.sin(th), 0, -math.cos(th)])
+                an = k + shin * np.array([math.sin(th - kn), 0, -math.cos(th - kn)])
+                leg_col = lk['tights'] if lk['skirt'] else lk['legs']
+                _taper(h, k, 0.085 * s, 0.058 * s, leg_col if not lk['skirt'] else lk['legs'] if False else leg_col,
+                       n=q(10), rings=2)
+                _taper(k, an, 0.056 * s, 0.040 * s, leg_col, n=q(9), rings=2)
+                pitch = 0.0 if an[2] < foot_h + 0.02 else -0.35 * (th - kn) - 0.2
+                toe = an + 0.15 * s * np.array([math.cos(pitch), 0, math.sin(pitch)])
+                heel = an - 0.035 * s * np.array([math.cos(pitch), 0, math.sin(pitch)])
+                _taper(heel + [0, 0, -0.04], toe + [0, 0, -0.045], 0.038, 0.032, lk['shoes'], n=q(8), rings=1)
+            # Torso: pelvis to shoulders, leaning forward a little.
+            zs = [hip_z - 0.06 * s, hip_z + 0.06 * s, hip_z + 0.20 * s, hip_z + 0.36 * s, hip_z + 0.48 * s,
+                  hip_z + 0.55 * s]
+            if lk['female']:
+                dims = [(0.11, 0.17), (0.115, 0.175), (0.095, 0.135), (0.12, 0.155), (0.10, 0.175), (0.07, 0.15)]
+            else:
+                dims = [(0.105, 0.16), (0.11, 0.165), (0.10, 0.15), (0.12, 0.175), (0.11, 0.20), (0.07, 0.17)]
+            secs = [(lean * (z - hip_z), sway, z, dx * s / s, dy * s / s) for z, (dx, dy) in zip(zs, dims)]
+            secs = [(x, y, z, dx * s, dy * s) for (x, y, z, _, _), (dx, dy) in zip(secs, dims)]
+            legcol = lk['legs']
+            _loft(secs, lambda i: legcol if i < 1 else top_col, n=q(14))
+            if lk['skirt']:                                           # a skirt flaring to the knee
+                ks = [(lean * 0.0, sway, hip_z + 0.02, 0.12 * s, 0.18 * s),
+                      (0.0, sway, hip_z - 0.18 * s, 0.17 * s, 0.22 * s),
+                      (0.0, sway, hip_z - 0.36 * s, 0.21 * s, 0.25 * s)]
+                _loft(ks, lambda i: legcol, n=q(14))
+            sh_z = hip_z + 0.52 * s
+            sh_x = lean * (sh_z - hip_z)
+            # Arms: swing against the legs, elbow a little bent; or holding the lead or the handle.
             hands = []
-            for side, sw in ((1, -a), (-1, a)):           # arms swing against the legs
-                y = 0.20 * side
-                hand = np.array([0.58 * s * math.sin(0.35 * sw), y * 1.05, sh - 0.03 - 0.58 * s * math.cos(0.35 * sw)])
-                if self.extra == 'stroller' and same_as is not None:      # both hands on the handle
-                    hand = np.array([0.42, 0.19 * side, 0.98 * s])
-                elif self.extra == 'dog' and same_as is not None and side < 0:   # the lead in the right hand
-                    hand = np.array([0.22, -0.26, 0.92 * s])
+            for side, f in ((1, phi + math.pi), (-1, phi)):
+                sh = np.array([sh_x, side * (0.19 if not lk['female'] else 0.17) * s + sway, sh_z])
+                al = 0.32 * math.sin(f)
+                el = 0.25 + 0.2 * max(0.0, math.sin(f))
+                elbow = sh + upper * np.array([math.sin(al), 0.02 * side, -math.cos(al)])
+                hand = elbow + fore * np.array([math.sin(al + el), 0.0, -math.cos(al + el)])
+                target = None
+                if self.extra == 'stroller' and same_as is not None:
+                    target = np.array([0.42, 0.19 * side, 0.98 * s])
+                elif self.extra == 'dog' and same_as is not None and side < 0:
+                    target = np.array([0.22, -0.26, 0.92 * s])
+                if target is not None:
+                    elbow = _two_link(sh, target, upper, fore, np.array([0.0, 0.3 * side, -1.0]))
+                    hand = target
                 hands.append(hand)
-                elbow = (np.array([0, y, sh - 0.03]) + hand) / 2
-                rm.cylinder([0, y, sh - 0.03], elbow, 0.048, shirt, n=q(8))
-                rm.cylinder(elbow, hand, 0.04, skin, n=q(8))
-            rm.cylinder([0, 0, sh], [0, 0, sh + 0.08 * s], 0.05, skin, n=q(8))            # neck
-            head = np.array([0.01, 0, sh + 0.19 * s])
-            rm.superellipsoid(head, (0.10 * s, 0.085 * s, 0.115 * s), 1.0, col=skin, nu=q(12), nv=q(8))
-            rm.superellipsoid(head + np.array([-0.015, 0, 0.03 * s]), (0.10 * s, 0.09 * s, 0.10 * s), 1.0, col=hair,
-                              zmin=0.0, nu=q(12), nv=q(6))
+                sleeve = lk['skin'] if lk['sleeves'] == 'short' else top_col
+                if lk['sleeves'] == 'short':
+                    mid = sh + 0.45 * (elbow - sh)
+                    _taper(sh, mid, 0.058 * s, 0.05 * s, top_col, n=q(8), rings=1)
+                    _taper(mid, elbow, 0.046 * s, 0.040 * s, lk['skin'], n=q(8), rings=1)
+                else:
+                    _taper(sh, elbow, 0.056 * s, 0.046 * s, top_col, n=q(8), rings=1)
+                _taper(elbow, hand, 0.042 * s, 0.032 * s, sleeve if lk['sleeves'] == 'jacket' else
+                       (lk['skin'] if lk['sleeves'] == 'short' else top_col), n=q(8), rings=1)
+                rm.superellipsoid(hand + (hand - elbow) / max(np.linalg.norm(hand - elbow), 1e-6) * 0.06,
+                                  (0.045 * s, 0.025 * s, 0.045 * s), 0.8, col=lk['skin'], nu=q(8), nv=q(4))
+            if lk['sleeves'] == 'jacket':                              # an open collar
+                rm.superellipsoid(np.array([sh_x - 0.01, sway, sh_z + 0.02]), (0.08 * s, 0.11 * s, 0.035 * s),
+                                  0.8, col=top_col, nu=q(10), nv=q(4))
+            # Neck and head.
+            neck = np.array([sh_x + 0.01, sway, sh_z + 0.02])
+            head = neck + np.array([0.025, 0, 0.17 * s])
+            _taper(neck, neck + [0.01, 0, 0.08 * s], 0.05 * s, 0.045 * s, lk['skin'], n=q(8), rings=1)
+            rm.superellipsoid(head, (0.095 * s, 0.078 * s, 0.112 * s), 1.0, col=lk['skin'], nu=q(14), nv=q(10))
+            rm.superellipsoid(head + np.array([0.09 * s, 0, -0.01 * s]), (0.02 * s, 0.014 * s, 0.025 * s), 1.0,
+                              col=lk['skin'], nu=6, nv=4)                                       # nose
+            hs = lk['hairstyle']
+            if hs != 'bald':                       # over the crown and the back, the face left clear
+                rm.superellipsoid(head + np.array([-0.03 * s, 0, 0.03 * s]), (0.088 * s, 0.084 * s, 0.1 * s),
+                                  1.0, col=lk['hair'], zmin=-0.15 if hs != 'short' else 0.1, nu=q(14), nv=q(8))
+            if hs == 'long':
+                rm.superellipsoid(head + np.array([-0.06 * s, 0, -0.12 * s]), (0.06 * s, 0.09 * s, 0.14 * s), 0.9,
+                                  col=lk['hair'], nu=q(10), nv=q(6))
+            elif hs == 'bun':
+                rm.superellipsoid(head + np.array([-0.08 * s, 0, 0.06 * s]), (0.045 * s, 0.045 * s, 0.045 * s), 1.0,
+                                  col=lk['hair'], nu=q(8), nv=q(5))
+            elif hs == 'cap':
+                rm.superellipsoid(head + np.array([-0.005, 0, 0.045 * s]), (0.105 * s, 0.09 * s, 0.085 * s), 1.0,
+                                  col=lk['cap'], zmin=0.0, nu=q(12), nv=q(6))
+                rm.superellipsoid(head + np.array([0.11 * s, 0, 0.05 * s]), (0.07 * s, 0.075 * s, 0.01), 0.8,
+                                  col=lk['cap'], nu=q(10), nv=q(4))                             # visor
+            if lk['backpack']:
+                rm.superellipsoid(np.array([sh_x - 0.19 * s, sway, sh_z - 0.2 * s]), (0.08 * s, 0.15 * s, 0.2 * s),
+                                  0.55, col=lk['pack'], nu=q(10), nv=q(6))
             if self.extra == 'dog' and same_as is not None:
-                _dog(np.array([0.85, -0.35, 0.0]), 2 * math.pi * ph / PHASES, self.dog_col, hands[1], q)
+                _dog(np.array([0.85, -0.35, 0.0]), phi, self.dog_col, hands[1], q)
             elif self.extra == 'stroller' and same_as is not None:
-                _stroller(np.array([0.75, 0.0, 0.0]), 2 * math.pi * ph / PHASES, self.stroller_col, q)
+                _stroller(np.array([0.75, 0.0, 0.0]), phi, self.stroller_col, q)
             m = type('Mesh', (), {})()
             m.tris, m.vn = np.array(rm._T), np.array(rm._N)
             m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
@@ -514,7 +673,7 @@ class Bike:
 
     def __init__(self, rng):
         frame_col = [(200, 30, 40), (30, 90, 180), (30, 30, 34), (230, 230, 225), (40, 140, 90)][rng.integers(5)]
-        skin, shirt = SKIN[rng.integers(len(SKIN))], SHIRT[rng.integers(len(SHIRT))]
+        skin, shirt = SKIN[rng.integers(len(SKIN))], TOPS[rng.integers(len(TOPS))]
         trousers = TROUSERS[rng.integers(len(TROUSERS))]
         helmet = [(240, 240, 240), (30, 30, 30), (230, 120, 30)][rng.integers(3)]
         self.frames = []

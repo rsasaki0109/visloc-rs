@@ -94,7 +94,7 @@ if os.path.exists(PEOPLE_CSV):
     CROWD = Crowd([scene['start']] + scene.get('goals', []), counts[0], _Free(), seed=args.seed,
                   cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3], cars=counts[4], road_offset=road, road_lines=meta.get('road_lines'),
                   crossing=bool(meta.get('crossing')))
-    DYN = 2500 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3] + 7000 * counts[4]
+    DYN = 3000 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3] + 7000 * counts[4]
 
 def people_at(t):
     """Put the crowd where gs_sim.py recorded it at time t."""

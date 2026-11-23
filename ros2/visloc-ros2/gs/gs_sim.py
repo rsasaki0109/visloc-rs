@@ -150,7 +150,7 @@ class Sim(Node):
         self.splat_people = movers > 0 and args.people_style == 'splat'
         self.renderer = Renderer(args.server, sp(scene['splat']), cam,
                                  depth=movers > 0 and not self.splat_people,
-                                 dynamic=(2500 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
+                                 dynamic=(3000 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
                                           + 5500 * args.strollers + 7000 * args.cars) if self.splat_people else 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
