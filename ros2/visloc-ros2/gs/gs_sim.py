@@ -169,6 +169,15 @@ class Sim(Node):
                 xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
                 rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
                 road_offset = estimate_road(xyz, rgb, 1 / (1 + np.exp(-ply['opacity'])), route, self.ground_z)
+                from people import check_road  # noqa: PLC0415
+
+                def grey(R_cw, t_cw):
+                    buf = self.renderer.render(R_cw, t_cw)[:cam['width'] * cam['height'] * 3]
+                    a_ = np.frombuffer(buf, np.uint8).reshape(cam['height'], cam['width'], 3).astype(float)
+                    return a_ @ [0.299, 0.587, 0.114]
+                road_offset, sharp = check_road(road_offset, route, self.ground_z, grey)
+                self.get_logger().info('cars: road views sharpness per stretch (kept at >= 4 and 40% of the sharpest): '
+                                       + ', '.join('-' if v is None else f'{v:.0f}' for v in sharp))
                 if all(o is None for _, _, o in road_offset):
                     raise SystemExit('--cars: no road found beside the route; pass --road-offset')
                 self.get_logger().info('cars: road beside the route (estimated, s from-to: offset m): ' + ', '.join(

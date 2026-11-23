@@ -208,6 +208,43 @@ def estimate_road(xyz, rgb, opacity, route, ground_z, search=(2.5, 12.0), min_sc
     return out
 
 
+def check_road(road, route, ground_z, render, min_sharpness=4.0, relative=0.4, samples=3):
+    """Drops the stretches of an estimated road where the splat is broken up: from points
+    along each stretch, it looks towards the road (camera 1.6 m up) with render(R_cw, t_cw)
+    -> grey image, and keeps the stretch only when the lower half of those views is sharp:
+    their median variance of the Laplacian at least min_sharpness and at least `relative`
+    times the sharpest stretch's (the scale depends on the camera). Returns (road,
+    sharpness per stretch)."""
+    route = np.asarray(route, float)[:, :2]
+    out, sharp = [], []
+    for k, (a, b, off) in enumerate(road):
+        if off is None:
+            out.append((a, b, None))
+            sharp.append(None)
+            continue
+        p0, p1 = route[k], route[k + 1]
+        u = (p1 - p0) / max(np.linalg.norm(p1 - p0), 1e-9)
+        n = np.array([-u[1], u[0]])
+        values = []
+        for f in (np.arange(samples) + 0.5) / samples:
+            x, y = p0 + f * (p1 - p0)
+            lx, ly = np.array([x, y]) + off * n
+            yaw = math.atan2(ly - y, lx - x)
+            c, s_ = math.cos(yaw), math.sin(yaw)
+            centre = np.array([x, y, 1.6 + ground_z(x, y)])
+            R_wc = np.array([[s_, 0, c], [-c, 0, s_], [0, -1, 0]])
+            img = np.asarray(render(R_wc.T, -R_wc.T @ centre), float)
+            half = img[img.shape[0] // 2:]
+            lap = 4 * half[1:-1, 1:-1] - half[:-2, 1:-1] - half[2:, 1:-1] - half[1:-1, :-2] - half[1:-1, 2:]
+            values.append(float(lap.var()))
+        sharp.append(float(np.median(values)))
+        out.append((a, b, off))
+    best = max((v for v in sharp if v is not None), default=0.0)
+    out = [(a, b, off if v is not None and v >= max(min_sharpness, relative * best) else None)
+           for (a, b, off), v in zip(out, sharp)]
+    return out, sharp
+
+
 # Footprints (along, left, radius) in each kind's frame: walker, cyclist, dog walker, stroller, car.
 FOOT = {0: ((0.0, 0.0, RADIUS),),
         1: ((-0.6, 0.0, 0.3), (0.0, 0.0, 0.3), (0.6, 0.0, 0.3)),
@@ -420,7 +457,8 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 
 class Crowd:
     def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
-                 dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0):
+                 dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0,
+                 crossing=False):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
@@ -511,6 +549,15 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.full(cars, 4)])
             n += cars
         self.lane_mix = self.dir.copy()
+        # A zebra crossing with a traffic light in the middle of the road's stretch: cars stop
+        # at its line while their light is not green, walkers cross while it is red.
+        self.crossing_s = (self.road_s[0] + self.road_s[1]) / 2 if (crossing and cars) else None
+        self.clock = 0.0
+        self.cross = np.zeros(n, int)          # 0 walking, 1 crossing, 2 over there, 3 back
+        self.cross_home = np.zeros(n)
+        self.cross_wait = np.zeros(n)
+        self.cross_tried = np.zeros(n, bool)
+        self._decor = {}
         # Behaviour: walkers now and then stand still a while (a chat, a phone); anyone on foot
         # now and then drifts across to the other side.
         self.brng = np.random.default_rng(seed + 2000)
@@ -531,6 +578,53 @@ class Crowd:
             for i in bad[1:] or bad:
                 self.s[i] = (self.s[i] + 1.0) % self.length
             self._place()
+
+    def light(self):
+        """The cars' light: 'green' (15 s), 'amber' (3 s), 'red' (12 s; walkers cross)."""
+        t = self.clock % 30.0
+        return 'green' if t < 15 else 'amber' if t < 18 else 'red'
+
+    def _road_side(self):
+        """+1 when the road is to the left of the route there, -1 to the right."""
+        return 1.0 if self.lane(self.crossing_s, 1.0) + LANE_HALF > 0 else -1.0
+
+    def decor(self, ground_z):
+        """The crossing's stripes and its traffic light (lit as now) as gaussians."""
+        if self.crossing_s is None:
+            return np.zeros((0, 14), np.float32)
+        state = self.light()
+        if state not in self._decor:
+            p, d = self._at(np.array([self.crossing_s]))
+            p, d = p[0], d[0]
+            n = np.array([-d[1], d[0]])
+            mid = self.lane(self.crossing_s, 1.0) + LANE_HALF      # the road's centre line offset
+            rows = []
+            for k in range(-5, 6):                                 # bars across the road, 0.5 m on, 0.5 off
+                if k % 2:
+                    continue
+                for a in np.arange(-1.4, 1.41, 0.14):            # along the road, 3 m wide crossing
+                    for b in np.arange(-0.2, 0.21, 0.14):
+                        q = p + (mid + k * 0.5 + b) * n + a * d
+                        rows.append([q[0], q[1], ground_z(*q) + 0.02, math.log(0.09), math.log(0.09),
+                                     math.log(0.004), 1, 0, 0, 0, 4.0, 0.93, 0.93, 0.9])
+            del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+            side = self._road_side()
+            base = p + (mid - side * (LANE_HALF + 1.4)) * n - 2.0 * d
+            z0 = ground_z(*base)
+            rm.cylinder([0, 0, 0], [0, 0, 2.6], 0.06, (60, 62, 66), n=10)
+            rm.superellipsoid(np.array([0.0, 0, 2.95]), (0.16, 0.16, 0.42), 0.35, col=(30, 30, 32), nu=10, nv=6)
+            lit = {'red': (255, 40, 30), 'amber': (255, 170, 20), 'green': (40, 230, 90)}
+            for z, name in ((3.25, 'red'), (2.95, 'amber'), (2.65, 'green')):
+                col = lit[name] if name == state else (55, 55, 58)
+                rm.cylinder([-0.17, 0, z], [-0.15, 0, z], 0.1, col, emissive=name == state, n=12)
+                rm.cylinder([0.15, 0, z], [0.17, 0, z], 0.1, col, emissive=name == state, n=12)
+            m = type('Mesh', (), {})()
+            m.tris, m.vn = np.array(rm._T), np.array(rm._N)
+            m.cols, m.emis = np.array(rm._C, float), np.array(rm._E)
+            del rm._T[:], rm._N[:], rm._C[:], rm._E[:]
+            pole = place_splats(mesh_splats(m), base[0], base[1], math.atan2(d[1], d[0]), z0)
+            self._decor[state] = np.concatenate([np.array(rows, np.float32), pole])
+        return self._decor[state]
 
     def lane(self, s, direction):
         """A car's side offset at arc position s going this way: the road's offset there,
@@ -572,7 +666,7 @@ class Crowd:
         p, d = p[0], d[0]
         normal = np.array([-d[1], d[0]])
         off = self.side[i] + dodge
-        while self.kind[i] != 4 and abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
+        while self.kind[i] != 4 and not self.cross[i] and abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
             off *= 0.7                            # (cars keep to their lane: the road is off the grid)
         return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
 
@@ -619,7 +713,7 @@ class Crowd:
                 self.xy[i], self.yaw[i], self.normal[i] = self._car_pose(i, self.s[i])
                 continue
             off = self.side[i] + self.dodge[i]    # shrink the side offset until the spot is free
-            while self.kind[i] != 4 and abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
+            while self.kind[i] != 4 and not self.cross[i] and abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
                 off *= 0.7
             self.xy[i] = p[i] + off * normal[i]
             self.yaw[i] = math.atan2(d[i, 1] * self.dir[i], d[i, 0] * self.dir[i])
@@ -640,6 +734,8 @@ class Crowd:
         (3 m) and so overtake walkers."""
         robot = np.asarray(robot_xy, float)
         n = len(self.s)
+        self.clock += dt
+        light = self.light() if self.crossing_s is not None else None
         rad = np.array([max(abs(b) + r for _, b, r in FOOT[int(k)]) for k in self.kind])    # half-width
         half = np.array([max(abs(a) + r for a, _, r in FOOT[int(k)]) for k in self.kind]) - rad  # length beyond
         heading = np.stack([np.cos(self.yaw), np.sin(self.yaw)], 1)
@@ -672,12 +768,29 @@ class Crowd:
                 if best is None or a < best[0]:
                     best = (a, lat, need, follow, False)
             speed = self.v[i]
+            hold = False                                         # a light or a crossing holds them
             old_dodge, old_side = self.dodge[i], self.side[i]
             if car:                                              # into its lane, 1 m/s across on a U-turn
                 step = float(np.clip(self.dir[i] - self.lane_mix[i], -dt * 1.0 / LANE_HALF, dt * 1.0 / LANE_HALF))
                 self.lane_mix[i] += step
                 if step:
                     speed *= 0.3
+            elif self.cross[i]:                                  # crossing the road and back
+                side = self._road_side()
+                target = (self.lane(self.crossing_s, 1.0) + LANE_HALF + side * (LANE_HALF + 1.2)
+                          if self.cross[i] in (1, 2) else self.cross_home[i])
+                step = float(np.clip(target - self.side[i], -1.2 * dt, 1.2 * dt))
+                self.side[i] += step
+                hold = True
+                if self.cross[i] == 1 and not step:
+                    self.cross[i], self.cross_wait[i] = 2, self.brng.uniform(4.0, 10.0)
+                elif self.cross[i] == 2:
+                    self.cross_wait[i] -= dt
+                    if self.cross_wait[i] <= 0 and light == 'red':
+                        self.cross[i] = 3
+                elif self.cross[i] == 3 and not step:
+                    self.cross[i] = 0
+                    self.side_goal[i] = self.side[i]
             elif not bike:                                       # drift across now and then
                 if self.brng.random() < dt / 90.0:
                     self.side_goal[i] = self.brng.uniform(-1.6, 1.6)
@@ -685,6 +798,18 @@ class Crowd:
                 self.side[i] += step
                 if step:
                     speed *= 0.8
+            if self.crossing_s is not None and self.kind[i] == 0 and not self.cross[i]:
+                near = abs(self.s[i] - self.crossing_s) < 0.4
+                if near and not self.cross_tried[i] and light == 'red':
+                    self.cross_tried[i] = True
+                    if self.brng.random() < 0.6:                 # most of those who reach it on red cross
+                        self.cross[i], self.cross_home[i] = 1, self.side[i]
+                elif not near:
+                    self.cross_tried[i] = False
+            if car and light in ('amber', 'red'):                # wait at the line
+                to_line = self.dir[i] * (self.crossing_s - self.s[i]) - 2.3 - 3.0
+                if 0.0 <= to_line < 2.0:
+                    hold = True
             pausing = False
             if self.pauses and self.kind[i] == 0:                # a walker stands still a while now and then
                 if self.pause[i] > 0:
@@ -709,7 +834,7 @@ class Crowd:
                     speed = 0.0
                 else:
                     speed = (0.35 if is_robot else 0.6) * self.v[i]
-            if pausing:
+            if pausing or hold:
                 speed = 0.0
             if best is None:
                 self.waited[i] = 0.0
@@ -731,7 +856,7 @@ class Crowd:
             else:
                 self.dodge[i], self.side[i] = old_dodge, old_side
                 self.side_goal[i] = old_side                     # that way is taken: stay on this line
-            if moved or pausing:
+            if moved or pausing or hold:
                 self.stuck[i] = 0.0
                 # one stride per 1.3 m on foot, one crank turn per 4.5 m on a bicycle
                 self.phase[i] = (self.phase[i] + speed * dt / (2.1 if car else 4.5 if bike else 1.3)) % 1.0
@@ -800,7 +925,8 @@ class Crowd:
                 fig.splat_frames = [mesh_splats(m) for m in fig.frames]
             rows.append(place_splats(fig.splat_frames[k], self.xy[i, 0], self.xy[i, 1], self.yaw[i],
                                      ground_z(*self.xy[i])))
-        return np.concatenate(rows) if rows else np.zeros((0, 14), np.float32)
+        rows.append(self.decor(ground_z))
+        return np.concatenate(rows)
 
     def draw(self, rgb, depth, R_wc, c_w, fx, ground_z, max_m=25.0, fast=False, only=None):
         """rgb (H x W x 3 float) with the pedestrians in front of the splat drawn over it."""
