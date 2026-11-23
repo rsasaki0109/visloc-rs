@@ -90,8 +90,17 @@ pub struct MapLocalizeOptions {
     /// gates as any; 0 turns it off (map-wide matching only until the
     /// correction is set again).
     pub reset_prior_s: f64,
-    /// Threads of the map-wide search.
+    /// Threads of the map-wide search (and of the radius search).
     pub match_threads: usize,
+    /// With a prior whose projection search fails: match only the landmarks
+    /// within this many metres of the prior's camera centre before going
+    /// map-wide (`None`: straight to map-wide). For dense maps, where the
+    /// map-wide search is slow.
+    pub prior_radius_m: Option<f64>,
+    /// With a prior, never match map-wide: the robot is near the prediction,
+    /// and a match anywhere else would be wrong. Fixes come from the
+    /// projection and radius searches only until the prior lapses.
+    pub no_global_with_prior: bool,
     /// Map-wide search: landmarks closer than this to the best one count as
     /// the same point in the ratio test
     /// (`BinaryLandmarkIndex::with_duplicate_radius`); `None` is the plain
@@ -130,6 +139,8 @@ impl Default for MapLocalizeOptions {
             projection_fresh_m: 2.0,
             reset_prior_s: 30.0,
             match_threads: 1,
+            prior_radius_m: None,
+            no_global_with_prior: false,
             duplicate_radius_m: None,
             extra_descriptors: 0,
             correction: OdomCorrectionConfig::default(),
@@ -280,6 +291,8 @@ type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRa
 pub enum Matching {
     /// Every keypoint against every map landmark.
     Global,
+    /// Every keypoint against the landmarks near the prior's camera.
+    Radius,
     /// Each landmark against the keypoints near its projection from the
     /// pose predicted by the correction and the odometry.
     Projection,
@@ -289,6 +302,7 @@ impl Matching {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Global => "global",
+            Self::Radius => "radius",
             Self::Projection => "projection",
         }
     }
@@ -353,6 +367,8 @@ pub struct MapLocalizer {
     /// correction uses weak fixes after it is set (`weak_gate_m`).
     weak_projected: bool,
     match_threads: usize,
+    prior_radius_m: Option<f64>,
+    no_global_with_prior: bool,
     pipeline: Pipeline,
 }
 
@@ -413,6 +429,8 @@ impl MapLocalizer {
                 .filter(|&weak| weak < options.min_inliers),
             weak_projected: options.correction.weak_gate_m > 0.0,
             match_threads: options.match_threads.max(1),
+            prior_radius_m: options.prior_radius_m,
+            no_global_with_prior: options.no_global_with_prior,
             pipeline: LocalizationPipeline::with_pose_estimator(
                 matcher,
                 AllLandmarksSelector,
@@ -547,8 +565,40 @@ impl MapLocalizer {
                 camera_from_body,
             )
         });
+        // Then, near the prior, the landmarks within a radius of its camera.
+        let projection = match projection {
+            Some(fix) if fix.map_from_body.is_some() => Some(fix),
+            projection => match prior.zip(self.prior_radius_m) {
+                Some((prior, radius)) => {
+                    let centre = prior.compose(&camera_from_body.inverse()).translation;
+                    let landmarks = self
+                        .index
+                        .landmarks_within(&nalgebra::Point3::from(centre), radius);
+                    let fix = self.solve(
+                        Matching::Radius,
+                        self.index.match_among_threaded(
+                            &features.keypoints,
+                            &features.descriptors,
+                            self.gates,
+                            &landmarks,
+                            self.match_threads,
+                        ),
+                        features,
+                        camera_from_body,
+                    );
+                    if fix.map_from_body.is_some() || projection.is_none() {
+                        Some(fix)
+                    } else {
+                        projection
+                    }
+                }
+                None => projection,
+            },
+        };
         let mut fix = match projection {
             Some(fix) if fix.map_from_body.is_some() => fix,
+            // Near a prior, the projection (and radius) searches have had their try.
+            Some(fix) if self.no_global_with_prior && prior.is_some() => fix,
             projection => {
                 let mut fix = self.solve(
                     Matching::Global,
@@ -1532,6 +1582,8 @@ mod tests {
         let (camera, points) = write_saved_map(&dir, &imu_from_camera);
         let map = load_basalt_map(&dir).expect("loads");
         let same_map = load_basalt_map(&dir).expect("loads");
+        let radius_map = load_basalt_map(&dir).expect("loads");
+        let near_map = load_basalt_map(&dir).expect("loads");
         // A map built from equalized images says so; a bad entry is refused.
         let summary_path = dir.join("map.json");
         let raw_summary = fs::read_to_string(&summary_path).expect("map.json");
@@ -1635,6 +1687,42 @@ mod tests {
         let fix = localizer.localize_features(&features, Some(&wrong));
         assert_eq!(fix.matching, Some(Matching::Global));
         assert!(fix.map_from_body.is_some(), "{fix:?}");
+
+        // With a prior radius, the landmarks near that prior's camera
+        // recover it before any map-wide search.
+        let with_radius = MapLocalizer::new(
+            radius_map,
+            0,
+            &MapLocalizeOptions {
+                prior_radius_m: Some(50.0),
+                match_threads: 2,
+                ..MapLocalizeOptions::default()
+            },
+        )
+        .expect("camera 0");
+        let fix = with_radius.localize_features(&features, Some(&wrong));
+        assert_eq!(fix.matching, Some(Matching::Radius));
+        let estimate = fix.map_from_body.expect("localized");
+        assert!((estimate.translation - map_from_body.translation).norm() < 1e-3);
+        // A radius holding no landmark, and no map-wide search near a prior:
+        // no fix, rather than one from anywhere in the map.
+        let near_only = MapLocalizer::new(
+            near_map,
+            0,
+            &MapLocalizeOptions {
+                prior_radius_m: Some(1e-6),
+                no_global_with_prior: true,
+                ..MapLocalizeOptions::default()
+            },
+        )
+        .expect("camera 0");
+        let fix = near_only.localize_features(&features, Some(&wrong));
+        assert_ne!(fix.matching, Some(Matching::Global));
+        assert!(fix.map_from_body.is_none(), "{fix:?}");
+        assert!(near_only
+            .localize_features(&features, None)
+            .map_from_body
+            .is_some());
 
         // Above every image's inliers, a localization is only weak, by
         // projection too when a weak gate is set.
