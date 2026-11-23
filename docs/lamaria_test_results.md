@@ -32,7 +32,8 @@ Scores are the leaderboard's means per challenge.
 | 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
 | 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
 | 10 (2026-11-12) | 69.7 | 56.8 | **54.1** | 61.1 | **47.3** | 57.8 |
-| 11 (2026-11-21) | **70.6** | **57.0** | 53.5 | **65.8** | 44.7 | **58.3** |
+| 11 (2026-11-21) | **70.6** | **57.0** | 53.5 | **65.8** | 44.7 | 58.3 |
+| 12 (2026-11-22) | **70.6** | **57.0** | 53.5 | **65.8** | 46.8 | **58.7** |
 | Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | FlexVIO (listed 2026-11-13) | 88.5 | 81.8 | 79.3 | 82.4 | 34.0 | 73.2 |
@@ -290,6 +291,10 @@ submission 10:
   (32.8 → 25.6) and 5_1 (43.4 → 37.4) lose most.
 
 The mean rises from 57.8 to 58.3, still sixth.
+
+**Submission 12.** Submission 11 with sequence_5_1, 5_5 and 5_10 restored to submission 10's estimates (bridged
+as in submission 7). The three score as before (43.4, 63.7, 32.8), the Moving platform track goes from 44.7
+to 46.8 and the mean from 58.3 to 58.7.
 
 ## Against GroundedSLAM, sequence by sequence
 
