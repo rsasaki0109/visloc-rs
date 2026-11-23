@@ -860,8 +860,10 @@ keeping right.
   there showed the splat itself broken up, not a road. So that stretch
   was set to no road by hand in a `--road FILE`, the format the estimate
   is logged in.
-- **Driving**: the cars drive the longest stretch of road and U-turn at
-  its ends, moving across to the other lane at 1 m/s.
+- **Driving**: the cars keep right and drive the longest stretch of road.
+  At its ends they U-turn in a half circle into the other lane. Held up
+  (behind a car waiting at the light), they wait; they never turn back
+  mid-road.
 - **Lanes**: the lanes are polylines mitred at the route's corners, so no
   car jumps.
 - **Traffic**: cars never swerve; they follow, or stop for, whoever is in
@@ -895,11 +897,22 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |
-| everything, the road estimated, a crossing | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
+| everything, the road estimated, a crossing (wrong-way U-turns, see below) | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
+| the same, cars keeping right | 4/4, all at the first try | 0 | 813 of 850 | 16.4 / 2.2 / 76 cm |
 
-That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. The
-corner before goal 3 gave no trouble this time, which also points to the
-run-to-run spread there. Video:
+That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
+the first run, a car held up behind another at the light counted as stuck
+after 8 s and turned back mid-road. It faced the other way at once and
+slid across to the other lane at walking pace, so for a while it drove on
+the wrong side. Offline over 600 s, cars were left of the centre line 10%
+of the time. Now they wait in the queue and U-turn only at the road's
+ends, in a half circle: offline, 0% and no mid-road turns.
+
+In the second run the error stayed above 30 cm for 20 s just past goal 3
+(300 to 320 s). There the node rejected every fix but one until a reset.
+No car or person was within 6 m in front of the robot then. It is the same
+stretch where the cars run lost track. So it is localization's
+run-to-run spread around goal 3, not the cars. Video:
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no

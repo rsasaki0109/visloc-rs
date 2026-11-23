@@ -350,6 +350,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
+  no longer turns back mid-road and drives on the wrong side while it
+  crosses over. Cars wait, keep right, and U-turn only at the road's
+  ends, in a half circle.
+
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.
   - **Cause.** `kabsch_n` converted its rotation with nalgebra's
