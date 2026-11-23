@@ -1637,6 +1637,31 @@ and on the test set (+4.7 on the track, submission 11). The two R sequences lose
 ALIKED, which the runners have no GPU for; sequence_5_11 gains 14 points, not looked into
 yet. A run takes about 2 h 40 min for the twelve at six at a time.
 This run is the reference for later ones with `PASS_ARGS`.
+
+**The gyroscope bias random walk at 3× in the pass** (`PASS_ARGS="--gyro-rw-scale 3"`, against the
+default 10×; [run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45110045079)). With the
+temperature terms taking part of the bias's change by day, a tighter walk might hold the heading on the
+one-way walks:
+
+| Sequence | Default | 3× | Change |
+|---|---:|---:|---:|
+| R_11_5cp | 88.11 | 87.49 | −0.63 |
+| R_12_10cp | 63.93 | 63.42 | −0.51 |
+| sequence_1_19 | 85.34 | 83.40 | −1.94 |
+| sequence_1_20 | 86.45 | 85.89 | −0.56 |
+| sequence_2_11 | 88.62 | 89.38 | +0.75 |
+| sequence_2_12 | 51.02 | 57.34 | +6.33 |
+| sequence_3_17 | 80.36 | 80.00 | −0.36 |
+| sequence_3_18 | 57.77 | 58.05 | +0.29 |
+| sequence_4_10 | 68.23 | 72.21 | +3.98 |
+| sequence_4_11 | 76.05 | 67.70 | −8.35 |
+| sequence_5_11 | 63.22 | 63.70 | +0.48 |
+| sequence_5_12 | 6.18 | 6.26 | +0.08 |
+
+The eleven lose 0.62, five of them gain: not kept. sequence_3_18, the drift the change was for, moves by
++0.29; sequence_2_12's +6.3 is within its ±5 between runs. The day sequences without 2_12 lose 0.42 on
+average, the two low-light ones split (+4.0, −8.4). The default chain reproduces the first run within
+0.2 except sequence_5_11 (65.54 → 63.22), so a single CI run of a sequence moves by up to about 2 points.
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
