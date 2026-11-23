@@ -11,11 +11,13 @@ All notable changes to `visloc-rs` will be documented here.
   next to Grunert. Grunert's quartic divides by terms that go through zero
   when the camera faces a wall head-on. Lambda Twist works from the depth
   constraints' quadratic forms, puts the longest side in the pair both
-  conics share, and polishes each root with Gauss-Newton. Over 200k
-  noise-free triples on walls (tilts 0-85 degrees): median camera-centre
-  error 1.7e-14 vs 1.7e-13 (relative to wall distance), 1 vs 5 triples
-  with no correct pose. On head-on walls the worst error is 3e-10 m vs
-  2e-7 m. Both take about 6 us per solve. Grunert stays the default, so
+  conics share, polishes each root with Gauss-Newton, and is closed form
+  throughout (Cardano, the known zero eigenvalue, the pose from the two
+  congruent triangles without an SVD). Over 149k noise-free triples on
+  walls tilted 0-85 degrees (`wall_scan`, an ignored test): no triple
+  without a correct pose against 4 for Grunert, camera-centre error over
+  wall distance median 4.8e-15 vs 1.7e-13 and p99 1.2e-11 vs 1.1e-7, and
+  0.9 us per solve against 6.3 us. Grunert stays the default, so
   earlier results do not change. Choose with `p3p_solver` on
   `visloc_map_localize_node`, `--p3p-solver` on
   `basalt_euroc_localize_demo` and `nav_sim_drive`, and

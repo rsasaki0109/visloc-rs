@@ -399,7 +399,7 @@ fn real_quartic_roots(a4: f64, a3: f64, a2: f64, a1: f64, a0: f64) -> Option<Vec
 /// Closed-form Kabsch on exactly three 3D-3D pairs: returns the world→camera
 /// pose `Q ≈ R·P + t`. Degenerate (collinear) triples fall out as a non-proper
 /// rotation, which the reprojection disambiguation then rejects.
-pub(crate) fn kabsch_three(world: &[Point3<f64>; 3], camera: &[Point3<f64>; 3]) -> Option<Pose> {
+fn kabsch_three(world: &[Point3<f64>; 3], camera: &[Point3<f64>; 3]) -> Option<Pose> {
     let cw = (world[0].coords + world[1].coords + world[2].coords) / 3.0;
     let cc = (camera[0].coords + camera[1].coords + camera[2].coords) / 3.0;
     let mut h = Matrix3::<f64>::zeros();
@@ -709,5 +709,96 @@ mod tests {
             Ok(P3PSolver::LambdaTwist)
         );
         assert!("kneip".parse::<P3PSolver>().is_err());
+    }
+
+    /// The wall scan behind the CHANGELOG numbers: noise-free triples on
+    /// walls tilted 0-85 degrees, shortest side at least 1% of the longest.
+    /// `cargo test --release -p visloc-vision --lib wall_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, ~3 s in release"]
+    fn wall_scan() {
+        let mut state = 12345_u64;
+        let (mut failures, mut errors) = ([0usize; 2], [Vec::new(), Vec::new()]);
+        let mut timing = [0.0_f64; 2];
+        for _ in 0..200_000 {
+            let distance = 1.0 + 9.0 * rng(&mut state);
+            let tilt = 1.48 * rng(&mut state);
+            let azimuth = std::f64::consts::TAU * rng(&mut state);
+            let normal = Vector3::new(
+                tilt.sin() * azimuth.cos(),
+                tilt.sin() * azimuth.sin(),
+                tilt.cos(),
+            );
+            let on_wall: Vec<Vector3<f64>> = (0..3)
+                .map(|_| {
+                    let ray = Vector3::new(
+                        2.0 * (rng(&mut state) - 0.5),
+                        1.5 * (rng(&mut state) - 0.5),
+                        1.0,
+                    );
+                    ray * (normal.z * distance / normal.dot(&ray))
+                })
+                .collect();
+            let true_pose = Pose::from_world_to_camera(
+                UnitQuaternion::from_scaled_axis(Vector3::new(
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                    rng(&mut state) - 0.5,
+                )),
+                Vector3::new(rng(&mut state), rng(&mut state), rng(&mut state)),
+            );
+            if on_wall.iter().any(|p| p.z <= 0.1 || p.norm() > 60.0) {
+                continue;
+            }
+            let sides = [
+                (on_wall[0] - on_wall[1]).norm_squared(),
+                (on_wall[0] - on_wall[2]).norm_squared(),
+                (on_wall[1] - on_wall[2]).norm_squared(),
+            ];
+            let longest = sides.iter().copied().fold(0.0, f64::max);
+            let area = (on_wall[1] - on_wall[0])
+                .cross(&(on_wall[2] - on_wall[0]))
+                .norm();
+            let shortest = sides.iter().copied().fold(f64::INFINITY, f64::min);
+            if area < 1.0e-3 * longest || shortest < 1.0e-4 * longest {
+                continue;
+            }
+            let camera_from_world = true_pose.world_to_camera.inverse();
+            let points =
+                [0, 1, 2].map(|i| camera_from_world.transform_point(&Point3::from(on_wall[i])));
+            let rays = [0, 1, 2].map(|i| on_wall[i].normalize());
+            let centre = camera_from_world.translation;
+            for (k, solver) in P3PSolver::ALL.into_iter().enumerate() {
+                let start = std::time::Instant::now();
+                let candidates = solver.solve(&points, &rays).unwrap_or_default();
+                timing[k] += start.elapsed().as_secs_f64();
+                let best = candidates
+                    .iter()
+                    .map(|pose| {
+                        (pose.world_to_camera.inverse().translation - centre).norm() / distance
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                if best < 1.0e-2 {
+                    errors[k].push(best);
+                } else {
+                    failures[k] += 1;
+                }
+            }
+        }
+        for (k, solver) in P3PSolver::ALL.into_iter().enumerate() {
+            let e = &mut errors[k];
+            e.sort_by(f64::total_cmp);
+            let at = |q: f64| e[((e.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "{solver}: {} triples, {} without a correct pose, centre error / distance \
+                 median {:.1e} p99 {:.1e} p99.9 {:.1e}, {:.2} us/solve",
+                e.len() + failures[k],
+                failures[k],
+                at(0.5),
+                at(0.99),
+                at(0.999),
+                1.0e6 * timing[k] / (e.len() + failures[k]) as f64
+            );
+        }
     }
 }
