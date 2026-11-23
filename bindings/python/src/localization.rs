@@ -67,6 +67,7 @@ fn ransac(
         confidence,
         early_stop_min_iterations: 0,
         early_stop_inlier_ratio: None,
+        inlier_refits: 0,
     };
     if !refine {
         estimator.pose_refiner = None;
