@@ -918,6 +918,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, cars keeping right | 4/4, all at the first try | 0 | 813 of 850 | 16.4 / 2.2 / 76 cm |
 | the same, the car bodies and braking above | 4/4, all at the first try | 0 | 821 of 850 | 4.2 / 2.5 / 31 cm |
 | the same, lanes along the fitted road line (below) | 3/4: Nav2 succeeded at all 4 at the first try, one stop 30.1 cm off | 0 | 777 of 850 | 7.4 / 2.6 / 49 cm |
+| the same, car footprints as wide as the body, no crossing deadlocks | 4/4, all at the first try | 0 | 822 of 850 | 4.3 / 2.2 / 37 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -952,8 +953,9 @@ In the fourth run Nav2 succeeded at all four goals at the first try, but
 it stopped 30.1 cm from goal 1, 1 mm past the 30 cm check. Before that,
 on the lawn, no image localized for 18 s while a cyclist and a dog walker
 passed in front of the camera, 1 to 7 m ahead. That is on the lawn before
-the road, so it is not the cars. Video (the fourth run):
-[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+the road, so it is not the cars. In the fifth run, with the car
+footprints below, nobody came more than 5 cm into a car body. Video (the
+fifth run): [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
