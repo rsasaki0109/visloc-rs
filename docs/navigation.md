@@ -840,6 +840,14 @@ street, and Nav2 "failed to make progress" for 350 s.
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |
 | 6 walkers + 2 cyclists, gaussians | 4/4, all at the first try | 0 | 814 of 850 | 3.5 / 2.5 / 19 cm |
+| 4 walkers, 2 cyclists, a dog walker, a pushchair | 4/4, all at the first try | 0 | 821 of 850 | 4.0 / 2.4 / 22 cm |
+
+`--dog-walkers` adds a dog trotting on a lead at the walker's right.
+`--strollers` adds a pushchair, held with both hands, whose wheels turn.
+Footprints are per kind (`people.FOOT`). Walkers now and then stand still
+for 8–20 s (a chat, a phone), and people on foot now and then drift across
+to the other side. Video:
+[media/gs_street_busy.mp4](media/gs_street_busy.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
