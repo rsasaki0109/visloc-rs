@@ -44,7 +44,7 @@ use visloc_localization::{
     LocalizationPipeline, OdomCorrection, OdomCorrectionConfig, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
-use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
+use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
 use visloc_vision::ransac::PnPRansac;
 
 use crate::msgs::{
@@ -72,6 +72,10 @@ pub struct MapLocalizeOptions {
     /// agreeing fixes. At or above `min_inliers`: off.
     pub weak_min_inliers: usize,
     pub ransac_iterations: usize,
+    /// The P3P solver inside RANSAC. Grunert (the default) is what every
+    /// measurement so far used; Lambda Twist is the more accurate one when
+    /// most landmarks in view lie on walls (see `P3PSolver`).
+    pub p3p_solver: P3PSolver,
     pub reprojection_px: f64,
     /// Once the odometry has a map pose: search radius around each landmark's predicted
     /// projection; `None` always matches map-wide.
@@ -124,6 +128,7 @@ impl Default for MapLocalizeOptions {
             min_inliers: 30,
             weak_min_inliers: 15,
             ransac_iterations: 1000,
+            p3p_solver: P3PSolver::Grunert,
             reprojection_px: 3.0,
             projection_radius_px: Some(20.0),
             projection_fresh_s: 5.0,
@@ -273,7 +278,7 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
     })
 }
 
-type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
+type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3P>>;
 
 /// How the 2D-3D matches of a localization attempt were found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,7 +386,7 @@ impl MapLocalizer {
             ..LocalizationConfig::default()
         };
         let ransac = PnPRansac {
-            pose_estimator: P3PGrunert,
+            pose_estimator: P3P::new(options.p3p_solver),
             pose_refiner: Some(GaussNewtonPoseRefiner::default()),
             iterations: options.ransac_iterations,
             reprojection_threshold: options.reprojection_px,

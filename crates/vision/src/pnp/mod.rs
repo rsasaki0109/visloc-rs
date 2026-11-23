@@ -6,6 +6,7 @@ mod generalized;
 mod gp3p;
 mod gr6p;
 mod gr6p_data;
+mod lambda_twist;
 mod p3p;
 pub mod p4pf;
 pub use generalized::{
@@ -24,7 +25,7 @@ pub use gr6p::{
     GeneralizedRelativePoseRansacReport, GeneralizedRelativePoseRansacResult,
     GeneralizedRelativePoseResult,
 };
-pub use p3p::P3PGrunert;
+pub use p3p::{P3PGrunert, P3PSolver, P3P};
 pub use p4pf::{
     estimate_pose_with_focal, p4pf_minimal, FocalPose, P4PfRansacConfig, P4PfRansacReport,
 };

@@ -119,13 +119,13 @@ use visloc_rs::localization::{
     OdomCorrectionConfig,
 };
 use visloc_rs::vision::matching::HammingMatcher;
-use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
+use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
 use visloc_rs::{
     AllLandmarksSelector, LocalizationConfig, LocalizationPipeline, PnPRansac,
     RadiusLandmarkSelector,
 };
 
-type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
+type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3P>>;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Args {
@@ -141,6 +141,8 @@ struct Args {
     min_inliers: usize,
     reprojection_px: f64,
     ransac_iterations: usize,
+    /// P3P solver inside RANSAC; Lambda Twist suits views of walls.
+    p3p_solver: P3PSolver,
     prior_radius_m: Option<f64>,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
@@ -193,6 +195,7 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
+         [--p3p-solver grunert|lambda-twist] \
          [--prior-radius-m M] [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
@@ -230,6 +233,7 @@ impl Args {
             min_inliers: 30,
             reprojection_px: 3.0,
             ransac_iterations: 1000,
+            p3p_solver: P3PSolver::Grunert,
             prior_radius_m: None,
             duplicate_radius_m: None,
             extra_descriptors: 0,
@@ -284,6 +288,11 @@ impl Args {
                 "--min-inliers" => args.min_inliers = number(&option, value()?)?,
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
+                "--p3p-solver" => {
+                    args.p3p_solver = value()?
+                        .parse()
+                        .map_err(|error| format!("--p3p-solver: {error}"))?;
+                }
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
                 "--extra-descriptors" => {
                     args.extra_descriptors = value()?
@@ -414,7 +423,7 @@ fn pipeline(args: &Args) -> Pipeline {
         ..LocalizationConfig::default()
     };
     let ransac = PnPRansac {
-        pose_estimator: P3PGrunert,
+        pose_estimator: P3P::new(args.p3p_solver),
         pose_refiner: Some(GaussNewtonPoseRefiner::default()),
         iterations: args.ransac_iterations,
         reprojection_threshold: args.reprojection_px,
@@ -1222,6 +1231,14 @@ mod tests {
         assert_eq!(args.prior_radius_m, Some(4.0));
         assert_eq!(args.camera, 1);
         assert_eq!(args.min_inliers, 30);
+        assert_eq!(args.p3p_solver, P3PSolver::Grunert);
+        let base = ["--map", "m", "--euroc-dir", "d", "--p3p-solver"];
+        let with = |solver: &str| parse(&[&base[..], &[solver]].concat());
+        assert_eq!(
+            with("lambda-twist").expect("parses").p3p_solver,
+            P3PSolver::LambdaTwist
+        );
+        assert!(with("kneip").is_err());
     }
 
     #[test]

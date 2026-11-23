@@ -9,7 +9,8 @@
 //!   (built in-process here), correcting the wheel odometry.
 //!
 //! ```text
-//! cargo run --release --example nav_sim_drive -- [--laps 2] [--out runs/nav_sim/drive]
+//! cargo run --release --example nav_sim_drive -- [--laps 2] [--out runs/nav_sim/drive] \
+//!     [--p3p-solver grunert|lambda-twist]
 //! ```
 //!
 //! Prints per mode: waypoints reached (true pose within 0.3 m when the robot
@@ -27,6 +28,7 @@ use visloc_rs::navigation::sim::{
 };
 use visloc_rs::navigation::sim_robot::{LocalizationMode, SimRobot, SimRobotConfig};
 use visloc_rs::types::LandmarkDescriptorStore;
+use visloc_rs::vision::pnp::P3PSolver;
 
 /// A patrol through every room of the apartment, from and back to the
 /// start: living room, bedroom 1, bedroom 2, kitchen, living room.
@@ -68,7 +70,7 @@ struct ModeResult {
     latency_ms: f64,
 }
 
-fn drive(mode: LocalizationMode, laps: usize) -> ModeResult {
+fn drive(mode: LocalizationMode, laps: usize, p3p_solver: P3PSolver) -> ModeResult {
     let world = World::apartment(1);
     let rig = CameraRig::forward(0.5);
     let run = build_map(
@@ -81,6 +83,7 @@ fn drive(mode: LocalizationMode, laps: usize) -> ModeResult {
     let start = Pose2::new(1.5, 2.5, 0.0);
     let config = SimRobotConfig {
         mode,
+        p3p_solver,
         ..SimRobotConfig::default()
     };
     let mut robot = SimRobot::new(world, rig, run.map, descriptors, start, config);
@@ -140,15 +143,22 @@ fn drive(mode: LocalizationMode, laps: usize) -> ModeResult {
 fn run() -> Result<(), String> {
     let mut laps = 1;
     let mut out: Option<PathBuf> = None;
+    let mut p3p_solver = P3PSolver::default();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--laps" => laps = value.parse().map_err(|_| format!("bad --laps {value}"))?,
             "--out" => out = Some(PathBuf::from(value)),
+            "--p3p-solver" => {
+                p3p_solver = value
+                    .parse()
+                    .map_err(|error| format!("--p3p-solver: {error}"))?;
+            }
             other => {
                 return Err(format!(
-                    "unknown argument {other}; usage: [--laps N] [--out DIR]"
+                    "unknown argument {other}; usage: [--laps N] [--out DIR] \
+                     [--p3p-solver grunert|lambda-twist]"
                 ))
             }
         }
@@ -169,7 +179,7 @@ fn run() -> Result<(), String> {
         ("odometry", LocalizationMode::Odometry),
         ("visloc", LocalizationMode::Visloc),
     ] {
-        let r = drive(mode, laps);
+        let r = drive(mode, laps, p3p_solver);
         let fixes = if mode == LocalizationMode::Visloc {
             format!("{}/{}", r.accepted, r.attempts)
         } else {

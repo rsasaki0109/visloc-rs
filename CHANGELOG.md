@@ -6,6 +6,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Selectable P3P solver for wall-heavy scenes** (`P3PSolver`, `P3P`
+  in `visloc_vision::pnp`). Adds Lambda Twist (Persson & Nordberg 2018)
+  next to Grunert. Grunert's quartic divides by terms that go through zero
+  when the camera faces a wall head-on. Lambda Twist works from the depth
+  constraints' quadratic forms, puts the longest side in the pair both
+  conics share, and polishes each root with Gauss-Newton. Over 200k
+  noise-free triples on walls (tilts 0-85 degrees): median camera-centre
+  error 1.7e-14 vs 1.7e-13 (relative to wall distance), 1 vs 5 triples
+  with no correct pose. On head-on walls the worst error is 3e-10 m vs
+  2e-7 m. Both take about 6 us per solve. Grunert stays the default, so
+  earlier results do not change. Choose with `p3p_solver` on
+  `visloc_map_localize_node`, `--p3p-solver` on
+  `basalt_euroc_localize_demo` and `nav_sim_drive`, and
+  `SimRobotConfig::p3p_solver`. In `nav_sim_drive --laps 2` (the
+  apartment) both reach 34/34 waypoints: RMSE / max 2.4 / 17 cm with
+  Grunert, 2.9 / 10.5 cm with Lambda Twist, and 616 vs 623 fixes. With
+  0.7 px pixel noise the solver's own error is lost in the noise there.
 - **`visloc_vio_node` drives on through lost tracking on wheel odometry**
   (`wheel_odom_topic`, `visloc_ros2::odom_bridge`). A lost-tracking reset
   no longer silences the outputs: the pose follows the wheel odometry until

@@ -24,14 +24,13 @@ use visloc_localization::{
     OdomCorrectionConfig, RadiusLandmarkSelector,
 };
 use visloc_vision::matching::BruteForceMatcher;
-use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
+use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
 use visloc_vision::ransac::PnPRansac;
 
 /// The localization pipeline: descriptor matching and P3P-RANSAC, as
 /// `basalt_euroc_localize_demo` localizes a robot in a saved map (a
 /// minimal solver that, unlike DLT, handles a view of a single wall).
-type Pipeline =
-    LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
+type Pipeline = LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac<P3P>>;
 
 use crate::sim::{
     CameraNoise, CameraRig, DiffDrive, DriveConfig, OdometryConfig, Pose2, ScanConfig, SimRng,
@@ -82,6 +81,9 @@ pub struct SimRobotConfig {
     /// Once localized, only landmarks this close to the predicted camera
     /// are matched.
     pub search_radius_m: f64,
+    /// The P3P solver inside RANSAC (Lambda Twist is the more accurate one
+    /// on views of walls; Grunert is the historical default).
+    pub p3p_solver: P3PSolver,
     pub correction: OdomCorrectionConfig,
     /// In [`LocalizationMode::Visloc`], turn in place (ignoring commands)
     /// until the first `map -> odom`: a robot that wakes up facing a bare
@@ -102,6 +104,7 @@ impl Default for SimRobotConfig {
             fix_inliers: 15,
             weak_fix_inliers: 8,
             search_radius_m: 8.0,
+            p3p_solver: P3PSolver::Grunert,
             correction: OdomCorrectionConfig {
                 // Wheel odometry drifts faster in heading than a VIO.
                 gate_yaw_deg: 5.0,
@@ -197,7 +200,7 @@ impl SimRobot {
             ..LocalizationConfig::default()
         };
         let ransac = PnPRansac {
-            pose_estimator: P3PGrunert,
+            pose_estimator: P3P::new(config.p3p_solver),
             pose_refiner: Some(GaussNewtonPoseRefiner::default()),
             iterations: 200,
             reprojection_threshold: localization.reprojection_threshold,
