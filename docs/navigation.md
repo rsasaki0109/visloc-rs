@@ -975,6 +975,26 @@ map. That is the first real cross-session localization here. It localized
 9% of the images, enough to correct wheel odometry every few metres, not to
 run on alone.
 
+**Keep every landmark.** `tum_rgbd_save_map` keeps a landmark only when two
+keyframes saw it (`--min-observations 2`). With real photos and the
+splat's depth, tracks between keyframes break easily, so this map kept
+about 20 landmarks per keyframe. With `--min-observations 1`, every
+keypoint with a depth becomes a landmark. The table uses smoothing +
+CLAHE, a 10 m prior and retrieval. The second walk was queried at every
+6th image (300).
+
+| Map | Held-out real photos (898) | Renders (898) | Second walk, 12 min later (300) | Fit residual, median / p90 | Time per image | Map size |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| 2 observations (19k landmarks) | 524 | 169 | 35 (12%) | 21 / 59 cm | 0.2 s | 34 MB |
+| 1 observation, 400 points per keyframe (290k) | | | 111 (37%) | 17 / 45 cm | 0.4 s | 169 MB |
+| **1 observation, 1000 points (681k)** | **870** | **401** | **175 (58%)** | **19 / 46 cm** | 1.3 s | 397 MB |
+
+All the second walk's fixes fit its SfM by one similarity, every time. So
+the denser map localizes 58% of another walk's images, 12 minutes later.
+It costs 6 times the search time and 12 times the size. For a robot that
+localizes every few images, 1.3 s is enough. On a long route, the map
+should be split by area.
+
 Smoothing and CLAHE nearly double the real fixes. They raise the renders
 from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza
 they had not rescued the renders or the second walk, so nearby structure
