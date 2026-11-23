@@ -28,7 +28,9 @@ use visloc_core::types::{
 };
 use visloc_vision::features::{FeatureExtractor, FeatureSet};
 use visloc_vision::matching::{BruteForceMatcher, Matcher};
-use visloc_vision::pnp::{estimate_pose_with_focal, Correspondence2D3D, P4PfRansacConfig};
+use visloc_vision::pnp::{
+    estimate_pose_with_focal, Correspondence2D3D, P4PfRansacConfig, PnpMinimalSolver,
+};
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 
 pub use binary_index::{BinaryLandmarkIndex, BinaryMatchGates, PackedDescriptors};
@@ -57,6 +59,35 @@ pub struct LocalizationConfig {
     pub max_mean_reprojection_error: Option<f64>,
     pub max_median_reprojection_error: Option<f64>,
     pub max_reprojection_error: Option<f64>,
+    /// Minimal PnP solver inside RANSAC. [`PnpMinimalSolver::Dlt`] (the
+    /// default) is degenerate when the matched landmarks are coplanar; set
+    /// [`PnpMinimalSolver::P3p`] for scenes dominated by walls or façades.
+    ///
+    /// Read when the pipeline is built ([`LocalizationPipeline::default`],
+    /// [`LocalizationPipeline::new`],
+    /// [`LocalizationPipeline::with_candidate_selector`]); to change the
+    /// solver of a built pipeline use [`LocalizationPipeline::set_pnp_solver`].
+    /// A pipeline built with [`LocalizationPipeline::with_pose_estimator`]
+    /// uses the estimator it was given and ignores this field.
+    pub pnp_solver: PnpMinimalSolver,
+}
+
+/// The RANSAC PnP estimator of the default [`LocalizationPipeline`]: its
+/// minimal solver is chosen at run time by [`LocalizationConfig::pnp_solver`].
+pub type LocalizationRansac = PnPRansac<PnpMinimalSolver>;
+
+fn localization_ransac(config: &LocalizationConfig) -> LocalizationRansac {
+    let defaults = PnPRansac::default();
+    PnPRansac {
+        pose_estimator: config.pnp_solver,
+        pose_refiner: defaults.pose_refiner,
+        iterations: config.ransac_iterations,
+        reprojection_threshold: config.reprojection_threshold,
+        seed: defaults.seed,
+        early_stop_min_iterations: defaults.early_stop_min_iterations,
+        early_stop_inlier_ratio: defaults.early_stop_inlier_ratio,
+        confidence: defaults.confidence,
+    }
 }
 
 impl Default for LocalizationConfig {
@@ -70,6 +101,7 @@ impl Default for LocalizationConfig {
             max_mean_reprojection_error: None,
             max_median_reprojection_error: None,
             max_reprojection_error: None,
+            pnp_solver: PnpMinimalSolver::default(),
         }
     }
 }
@@ -500,14 +532,18 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct LocalizationPipeline<M = BruteForceMatcher, S = AllLandmarksSelector, E = PnPRansac> {
+pub struct LocalizationPipeline<
+    M = BruteForceMatcher,
+    S = AllLandmarksSelector,
+    E = LocalizationRansac,
+> {
     pub matcher: M,
     pub candidate_selector: S,
     pub pose_estimator: E,
     pub config: LocalizationConfig,
 }
 
-impl Default for LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac> {
+impl Default for LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac> {
     fn default() -> Self {
         let config = LocalizationConfig::default();
         Self {
@@ -515,18 +551,13 @@ impl Default for LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, P
                 ratio: config.ratio,
             },
             candidate_selector: AllLandmarksSelector,
-            pose_estimator: PnPRansac {
-                pose_estimator: Default::default(),
-                iterations: config.ransac_iterations,
-                reprojection_threshold: config.reprojection_threshold,
-                ..PnPRansac::default()
-            },
+            pose_estimator: localization_ransac(&config),
             config,
         }
     }
 }
 
-impl<M> LocalizationPipeline<M, AllLandmarksSelector, PnPRansac>
+impl<M> LocalizationPipeline<M, AllLandmarksSelector, LocalizationRansac>
 where
     M: Matcher + Clone,
 {
@@ -534,18 +565,13 @@ where
         Self {
             matcher,
             candidate_selector: AllLandmarksSelector,
-            pose_estimator: PnPRansac {
-                pose_estimator: Default::default(),
-                iterations: config.ransac_iterations,
-                reprojection_threshold: config.reprojection_threshold,
-                ..PnPRansac::default()
-            },
+            pose_estimator: localization_ransac(&config),
             config,
         }
     }
 }
 
-impl<M, S> LocalizationPipeline<M, S, PnPRansac>
+impl<M, S> LocalizationPipeline<M, S, LocalizationRansac>
 where
     M: Matcher + Clone,
     S: CandidateSelector + Clone,
@@ -558,14 +584,26 @@ where
         Self {
             matcher,
             candidate_selector,
-            pose_estimator: PnPRansac {
-                pose_estimator: Default::default(),
-                iterations: config.ransac_iterations,
-                reprojection_threshold: config.reprojection_threshold,
-                ..PnPRansac::default()
-            },
+            pose_estimator: localization_ransac(&config),
             config,
         }
+    }
+}
+
+impl<M, S> LocalizationPipeline<M, S, LocalizationRansac> {
+    /// Switches the RANSAC minimal solver (and [`LocalizationConfig::pnp_solver`]
+    /// with it) on a built pipeline, e.g. to [`PnpMinimalSolver::P3p`] for a
+    /// map dominated by walls.
+    pub fn set_pnp_solver(&mut self, solver: PnpMinimalSolver) {
+        self.config.pnp_solver = solver;
+        self.pose_estimator.pose_estimator = solver;
+    }
+
+    /// Builder form of [`Self::set_pnp_solver`].
+    #[must_use]
+    pub fn with_pnp_solver(mut self, solver: PnpMinimalSolver) -> Self {
+        self.set_pnp_solver(solver);
+        self
     }
 }
 
@@ -1551,17 +1589,17 @@ where
 }
 
 pub fn localize(query: QueryImage, map: VisualMap) -> LocalizationResult {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize(&query, &map)
 }
 
 pub fn localize_frame(frame: Frame, map: VisualMap) -> LocalizationResult {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize_frame(&frame, &map)
 }
 
 pub fn localize_frames(frames: Vec<Frame>, map: VisualMap) -> Vec<FrameLocalizationResult> {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize_frames(&frames, &map)
 }
 
@@ -1570,7 +1608,7 @@ pub fn localize_with_descriptor_store(
     map: VisualMap,
     descriptor_store: LandmarkDescriptorStore,
 ) -> LocalizationResult {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize_with_descriptor_store(&query, &map, &descriptor_store)
 }
 
@@ -1579,7 +1617,7 @@ pub fn localize_frame_with_descriptor_store(
     map: VisualMap,
     descriptor_store: LandmarkDescriptorStore,
 ) -> LocalizationResult {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize_frame_with_descriptor_store(&frame, &map, &descriptor_store)
 }
 
@@ -1588,7 +1626,7 @@ pub fn localize_frames_with_descriptor_store(
     map: VisualMap,
     descriptor_store: LandmarkDescriptorStore,
 ) -> Vec<FrameLocalizationResult> {
-    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default()
+    LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>::default()
         .localize_frames_with_descriptor_store(&frames, &map, &descriptor_store)
 }
 

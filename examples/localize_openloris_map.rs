@@ -8,7 +8,11 @@
 //!     --map-dir <model/model/0> \
 //!     --landmark-descriptors <out/landmark_descriptors.txt> \
 //!     --query-features <out/query_features/cam1_000001.txt> \
-//!     [--camera-id 1]
+//!     [--camera-id 1] [--pnp-solver dlt|p3p]
+//!
+//! `--pnp-solver p3p` uses the P3P minimal solver instead of the 6-point DLT
+//! (the default); P3P stays well-posed when the matched landmarks are
+//! coplanar, so prefer it for maps dominated by walls.
 //!
 //! Prints one line: either
 //!   `SUCCESS inliers=<n> matches=<n> corr=<n> reproj=<f> t=<x> <y> <z> q=<w> <i> <j> <k>`
@@ -21,7 +25,10 @@ use visloc_rs::core::types::QueryImage;
 use visloc_rs::io::colmap::read_colmap_text_model;
 use visloc_rs::io::descriptors::read_landmark_descriptors_txt;
 use visloc_rs::io::query_features::read_query_features_txt;
-use visloc_rs::{AllLandmarksSelector, BruteForceMatcher, LocalizationPipeline, PnPRansac};
+use visloc_rs::{
+    AllLandmarksSelector, BruteForceMatcher, LocalizationPipeline, LocalizationRansac,
+    PnpMinimalSolver,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flags: HashMap<String, String> = HashMap::new();
@@ -92,8 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("provide --query-features or --query-features-dir".into());
     }
 
-    let mut pipeline =
-        LocalizationPipeline::<BruteForceMatcher, AllLandmarksSelector, PnPRansac>::default();
+    let pnp_solver: PnpMinimalSolver = match flags.get("pnp-solver") {
+        Some(value) => value.parse()?,
+        None => PnpMinimalSolver::default(),
+    };
+    let mut pipeline = LocalizationPipeline::<
+        BruteForceMatcher,
+        AllLandmarksSelector,
+        LocalizationRansac,
+    >::default()
+    .with_pnp_solver(pnp_solver);
     // `LocalizationConfig::min_inliers` defaults to 0, so a degenerate pose
     // with no inliers is reported as success; require a real floor unless the
     // caller overrides it.

@@ -5,7 +5,7 @@
 //! store (`<landmark_id> <descriptor floats>` per line, as written by
 //! `scripts/export_openloris_localization_map.py`) provides the matching
 //! descriptors, and `LocalizationPipeline::<BruteForceMatcher,
-//! AllLandmarksSelector, PnPRansac>` estimates the pose. The only difference
+//! AllLandmarksSelector, LocalizationRansac>` estimates the pose. The only difference
 //! is that query features are extracted here from the incoming image with
 //! the repository's pure-Rust SIFT, instead of being read from a text file.
 //!
@@ -22,10 +22,11 @@ use visloc_core::types::{
 };
 use visloc_io::colmap::{read_colmap_binary_model, read_colmap_text_model};
 use visloc_io::descriptors::read_landmark_descriptors_txt;
-use visloc_localization::{AllLandmarksSelector, LocalizationConfig, LocalizationPipeline};
+use visloc_localization::{
+    AllLandmarksSelector, LocalizationConfig, LocalizationPipeline, LocalizationRansac,
+};
 use visloc_vision::features::sift::{extract_sift_features, GrayImage, SiftConfig};
 use visloc_vision::matching::BruteForceMatcher;
-use visloc_vision::ransac::PnPRansac;
 
 use crate::image::LumaImage;
 use crate::msgs::{
@@ -84,7 +85,7 @@ pub struct LocalizeCore {
     map: VisualMap,
     descriptors: LandmarkDescriptorStore,
     default_camera: Camera,
-    pipeline: LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, PnPRansac>,
+    pipeline: LocalizationPipeline<BruteForceMatcher, AllLandmarksSelector, LocalizationRansac>,
     options: LocalizeOptions,
 }
 

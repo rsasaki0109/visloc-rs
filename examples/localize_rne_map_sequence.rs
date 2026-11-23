@@ -9,9 +9,14 @@
 //! ```text
 //! cargo run --release --example localize_rne_map_sequence -- \
 //!   --out-dir <dir> [--radius-m 5.0] [--min-inliers 6] [--projection-px 30] [--motion-model] [--gpu] \
+//!   [--pnp-solver dlt|p3p] \
 //!   <colmap_text_dir> <landmark_descriptors.txt> <camera_id> \
 //!   <query_features.txt> [query_features_2.txt ...]
 //! ```
+//!
+//! `--pnp-solver p3p` swaps the RANSAC minimal solver from the 6-point DLT
+//! (the default) to P3P, which stays well-posed when the matched landmarks
+//! are coplanar -- use it for maps dominated by walls or façades.
 //!
 //! Query filenames are expected to be `<timestamp_ns>.txt`; the timestamp is
 //! carried into `localization.tum` (seconds).
@@ -27,8 +32,8 @@ use visloc_rs::io::colmap::ColmapMapProvider;
 use visloc_rs::io::query_features::read_query_features_txt;
 use visloc_rs::{
     AllLandmarksSelector, BruteForceMatcher, DescriptorMatch, DescriptorProvider,
-    LocalizationConfig, LocalizationPipeline, MapProvider, Matcher, PnPRansac,
-    RadiusLandmarkSelector,
+    LocalizationConfig, LocalizationPipeline, LocalizationRansac, MapProvider, Matcher,
+    PnpMinimalSolver, RadiusLandmarkSelector,
 };
 
 /// CPU brute force, or (feature `gpu`, `--gpu`) the wgpu matcher: the same
@@ -51,7 +56,7 @@ impl Matcher for AnyMatcher {
     }
 }
 
-type Pipeline = LocalizationPipeline<AnyMatcher, AllLandmarksSelector, PnPRansac>;
+type Pipeline = LocalizationPipeline<AnyMatcher, AllLandmarksSelector, LocalizationRansac>;
 
 fn parse_flag(args: &mut Vec<String>, name: &str) -> Option<String> {
     let index = args.iter().position(|arg| arg == name)?;
@@ -171,6 +176,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     let out_dir = parse_flag(&mut args, "--out-dir").map(PathBuf::from);
     let ratio_flag = parse_flag(&mut args, "--ratio");
+    let pnp_solver: PnpMinimalSolver = match parse_flag(&mut args, "--pnp-solver") {
+        Some(value) => value.parse()?,
+        None => PnpMinimalSolver::default(),
+    };
     let radius_m: f64 = parse_flag(&mut args, "--radius-m")
         .map(|value| value.parse())
         .transpose()?
@@ -249,7 +258,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         query_paths.len(),
     );
 
-    let mut config = LocalizationConfig::default();
+    let mut config = LocalizationConfig {
+        pnp_solver,
+        ..LocalizationConfig::default()
+    };
     if let Some(r) = ratio_flag {
         // Lowe ratio for the descriptor search; "none" disables the test.
         config.ratio = if r == "none" { None } else { Some(r.parse()?) };

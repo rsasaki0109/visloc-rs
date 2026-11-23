@@ -119,9 +119,9 @@ pub use visloc_localization::{
     CorrespondenceBuilder, CorrespondenceSet, DescriptorProvider, FixedLandmarkSelector,
     FixedLandmarkSubmapSelector, FrameLocalizationResult, ImageLocalizer, InMemoryMapProvider,
     IntersectCandidateSelector, LocalizationConfig, LocalizationPipeline, LocalizationPrior,
-    MapProvider, MapProviderStats, PriorSubmapSelector, ProjectionCorrespondenceBuilder,
-    RadiusLandmarkSelector, RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
-    UnknownFocalLocalization,
+    LocalizationRansac, MapProvider, MapProviderStats, PriorSubmapSelector,
+    ProjectionCorrespondenceBuilder, RadiusLandmarkSelector, RadiusSubmapSelector,
+    SelectableMapProvider, SubmapSelector, UnknownFocalLocalization,
 };
 pub use visloc_mapping::{
     build_stereo_metric_points, build_stereo_replenish_candidates, AppliedMapUpdate,
@@ -253,7 +253,8 @@ pub use visloc_vision::matching::{
 pub use visloc_vision::pnp::{
     Correspondence2D3D, DltPnP, GaussNewtonPoseRefiner, GeneralizedCameraRig,
     GeneralizedCorrespondence2D3D, GeneralizedDltPoseEstimator, GeneralizedGaussNewtonPoseRefiner,
-    GeneralizedPnPRansac, GeneralizedRansacReport, PoseEstimator, PoseRefiner, RigSensor,
+    GeneralizedPnPRansac, GeneralizedRansacReport, P3PGrunert, PnpMinimalSolver, PoseEstimator,
+    PoseRefiner, RigSensor,
 };
 pub use visloc_vision::ransac::{PnPRansac, RansacReport, RobustPoseEstimator};
 pub use visloc_vision::stereo::triangulate_stereo_pixel;
