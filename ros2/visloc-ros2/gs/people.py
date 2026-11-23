@@ -549,6 +549,7 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.full(cars, 4)])
             n += cars
         self.lane_mix = self.dir.copy()
+        self.uturn = np.zeros(n)        # a car's progress (0 .. 1) through a U-turn at the road's end; 0: none
         # A zebra crossing with a traffic light in the middle of the road's stretch: cars stop
         # at its line while their light is not green, walkers cross while it is red.
         self.crossing_s = (self.road_s[0] + self.road_s[1]) / 2 if (crossing and cars) else None
@@ -647,7 +648,11 @@ class Crowd:
         return self.path[k] + t[:, None] * (self.path[k + 1] - self.path[k]), d
 
     def _car_pose(self, i, s):
-        """A car at route arc position s, in its lane (blended while it changes lanes)."""
+        """A car at route arc position s, in its lane. In a U-turn (at the road's end) it drives a
+        half circle from its old lane into the other: on past s, across, and back."""
+        u = self.uturn[i]
+        if u > 0:
+            s = min(max(s - self.dir[i] * LANE_HALF * math.sin(math.pi * u), 0.0), self.length)
         k = int(np.clip(np.searchsorted(self.cum, s) - 1, 0, len(self.path) - 2))
         t = (s - self.cum[k]) / max(self.cum[k + 1] - self.cum[k], 1e-9)
         w = (self.lane_mix[i] + 1) / 2                       # 1: the +1 lane, 0: the -1 lane
@@ -655,6 +660,10 @@ class Crowd:
         xy = w * pts[1.0] + (1 - w) * pts[-1.0]
         seg = w * (self.lanes[1.0][k + 1] - self.lanes[1.0][k]) + (1 - w) * (self.lanes[-1.0][k + 1] - self.lanes[-1.0][k])
         seg /= np.linalg.norm(seg) + 1e-12
+        if u > 0:   # turning left (traffic keeps right) from the old heading through 180 degrees
+            yaw = math.atan2(-seg[1] * self.dir[i], -seg[0] * self.dir[i]) + math.pi * u
+            yaw = math.atan2(math.sin(yaw), math.cos(yaw))
+            return xy, yaw, np.array([-math.sin(yaw), math.cos(yaw)])
         yaw = math.atan2(seg[1] * self.dir[i], seg[0] * self.dir[i])
         return xy, yaw, np.array([-seg[1], seg[0]])
 
@@ -729,7 +738,8 @@ class Crowd:
         coming the other way, they stop only just before touching. No move
         ever makes two footprints (or one and the robot's) overlap by more
         than 2 cm: a step that would is not taken. Whoever cannot move at all
-        for 8 s turns back, as people do in a lane too narrow to pass. Once
+        for 8 s turns back, as people do in a lane too narrow to pass (cars
+        wait, and turn only at the road's ends, in a half circle). Once
         past, they drift back to their own line. Cyclists look further ahead
         (3 m) and so overtake walkers."""
         robot = np.asarray(robot_xy, float)
@@ -770,12 +780,23 @@ class Crowd:
             speed = self.v[i]
             hold = False                                         # a light or a crossing holds them
             old_dodge, old_side = self.dodge[i], self.side[i]
-            if car:                                              # into its lane, 1 m/s across on a U-turn
-                step = float(np.clip(self.dir[i] - self.lane_mix[i], -dt * 1.0 / LANE_HALF, dt * 1.0 / LANE_HALF))
-                self.lane_mix[i] += step
-                if step:
-                    speed *= 0.3
-            elif self.cross[i]:                                  # crossing the road and back
+            if car and self.uturn[i] > 0:                       # in a U-turn: on round the half circle
+                u_old, mix_old = self.uturn[i], self.lane_mix[i]
+                turn_v = min(self.v[i], 2.5)
+                self.uturn[i] = min(1.0, u_old + turn_v * dt / (math.pi * LANE_HALF))
+                self.lane_mix[i] = -self.dir[i] * math.cos(math.pi * self.uturn[i])
+                xy, yaw, normal = self._car_pose(i, self.s[i])
+                if self._clear(i, xy, yaw, robot):
+                    self.xy[i], self.yaw[i], self.normal[i] = xy, yaw, normal
+                    self.phase[i] = (self.phase[i] + turn_v * dt / 2.1) % 1.0
+                    moving[i] = turn_v / max(self.v[i], 1e-6)
+                    if self.uturn[i] >= 1.0:
+                        self.uturn[i], self.lane_mix[i] = 0.0, self.dir[i]
+                else:                                            # someone in the way: wait
+                    self.uturn[i], self.lane_mix[i] = u_old, mix_old
+                    moving[i] = 0.0
+                continue
+            if self.cross[i]:                                  # crossing the road and back
                 side = self._road_side()
                 target = (self.lane(self.crossing_s, 1.0) + LANE_HALF + side * (LANE_HALF + 1.2)
                           if self.cross[i] in (1, 2) else self.cross_home[i])
@@ -865,8 +886,13 @@ class Crowd:
                 speed = 0.0
             moving[i] = speed / max(self.v[i], 1e-6)
             lo, hi = self.road_s if car else (0.0, self.length)
-            if (self.s[i] <= lo and self.dir[i] < 0) or (self.s[i] >= hi and self.dir[i] > 0) or self.stuck[i] > 8.0:
-                self.dir[i] *= -1                            # the end of the route, or no way through: turn back
+            # The end of the route, or (on foot) no way through: turn back. Cars only turn at the
+            # road's ends; held up (in a queue at the light), they wait.
+            if (self.s[i] <= lo and self.dir[i] < 0) or (self.s[i] >= hi and self.dir[i] > 0) or \
+                    (self.stuck[i] > 8.0 and not car):
+                self.dir[i] *= -1
+                if car:
+                    self.uturn[i] = 1e-6
                 self.stuck[i] = 0.0
                 self.waited[i] = 0.0
         self.moving = moving
