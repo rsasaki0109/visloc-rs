@@ -1604,6 +1604,39 @@ over the eleven take about eleven hours on the 8 GB GPU PC; the pass's
 ALIKED on R_12_10cp (50 minutes a run) and the first five (75 minutes a
 seed) take most of it.
 
+
+### The twelve on Actions
+
+The [`lamaria_training_eval`](../.github/workflows/lamaria_training_eval.yml) workflow runs the twelve
+through the submission driver on GitHub Actions, one job each, and scores them with the official
+evaluator. With `PASS_ARGS` set, each job also runs the default chain from the same VIO, online windows and
+first matching (`--ba-compare`, `--ba-pass-args`), and the table pairs the two and applies the rule above. The
+first run ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45087869339), commit `17da711`) is
+the chain as the driver runs it now: SIFT everywhere (the R sequences had ALIKED in the pass above, on a
+GPU), the temperature terms by day, the low-light pass with the gyroscope matrix, the rematch:
+
+| Sequence | As it ran above | Actions | Change |
+|---|---:|---:|---:|
+| R_11_5cp | 97.02 | 88.11 | −8.91 (SIFT for ALIKED) |
+| R_12_10cp | 79.31 | 63.75 | −15.56 (SIFT for ALIKED) |
+| sequence_1_19 | 82.25 | 85.32 | +3.07 |
+| sequence_1_20 | 88.65 | 86.44 | −2.21 |
+| sequence_2_11 | 89.25 | 88.62 | −0.63 |
+| sequence_2_12 | 51.97 | 51.02 | −0.95 |
+| sequence_3_17 | 79.87 | 80.38 | +0.51 |
+| sequence_3_18 | 54.27 | 57.77 | +3.50 |
+| sequence_4_10 | 59.80 | 68.23 | +8.43 |
+| sequence_4_11 | 71.07 | 76.05 | +4.98 |
+| sequence_5_11 | 51.46 | 65.54 | +14.08 |
+| sequence_5_12 | 5.80 | 6.41 | +0.61 |
+| **Mean of eleven (not 2_12)** | 68.98 | **69.69** | +0.71 |
+
+Per track on Actions: Short 80.91, Medium 69.82, Long 69.07, Low light 72.14, Moving platform 35.97 (mean of
+twelve 68.14). The low-light pass with the gyroscope matrix shows on both low-light sequences (+8.4, +5.0)
+and on the test set (+4.7 on the track, submission 11). The two R sequences lose 9 and 16 points without
+ALIKED, which the runners have no GPU for; sequence_5_11 gains 14 points from the Moving track's changes
+since (both cameras' features in the VIO). A run takes about 2 h 40 min for the twelve at six at a time.
+This run is the reference for later ones with `PASS_ARGS`.
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
