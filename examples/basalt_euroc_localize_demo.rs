@@ -25,6 +25,8 @@
 //!   through up to N images that do not localize, instead of dropping it
 //!   after one, which sent the next image to the map-wide search.
 //! - `--threads N` runs the index searches on N threads.
+//! - `--no-global-with-prior` skips the map-wide search while a prior is
+//!   held: the radius search and retrieval have had their try.
 //!
 //! ```text
 //! # 1. Map a sequence and save the map.
@@ -161,6 +163,9 @@ struct Args {
     /// Threads for the index searches (radius with `--fast-radius`,
     /// retrieval, map-wide).
     threads: usize,
+    /// Skip the map-wide search while a prior is held (the robot is near
+    /// its last fix; a match anywhere else in the map would be wrong).
+    no_global_with_prior: bool,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
     /// Extra descriptors per landmark to match (the map's
@@ -212,7 +217,7 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--prior-radius-m M [--fast-radius] [--prior-hold N]] [--threads N] \
+         [--prior-radius-m M [--fast-radius] [--prior-hold N] [--no-global-with-prior]] [--threads N] \
          [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
@@ -254,6 +259,7 @@ impl Args {
             fast_radius: false,
             prior_hold: 0,
             threads: 1,
+            no_global_with_prior: false,
             duplicate_radius_m: None,
             extra_descriptors: 0,
             retrieval_keyframes: None,
@@ -311,6 +317,7 @@ impl Args {
                 "--fast-radius" => args.fast_radius = true,
                 "--prior-hold" => args.prior_hold = number(&option, value()?)?,
                 "--threads" => args.threads = number(&option, value()?)?,
+                "--no-global-with-prior" => args.no_global_with_prior = true,
                 "--extra-descriptors" => {
                     args.extra_descriptors = value()?
                         .parse()
@@ -540,6 +547,7 @@ struct Localizer {
     fast_radius: bool,
     prior_hold: usize,
     threads: usize,
+    no_global_with_prior: bool,
     /// Images since `previous` last localized.
     previous_age: usize,
     projection_radius_px: Option<f64>,
@@ -619,6 +627,7 @@ impl Localizer {
             fast_radius: args.fast_radius,
             prior_hold: args.prior_hold,
             threads: args.threads.max(1),
+            no_global_with_prior: args.no_global_with_prior,
             previous_age: 0,
             projection_radius_px: args.projection_radius_px,
             weak_projected: args.weak_gate_m > 0.0,
@@ -732,6 +741,11 @@ impl Localizer {
                     Some(result) => {
                         matching = "retrieval";
                         result
+                    }
+                    // Near a held prior, the radius search has had its try.
+                    None if self.no_global_with_prior && prior_result.is_some() => {
+                        matching = "radius";
+                        prior_result.clone().expect("checked")
                     }
                     None => self.pipeline.localize_correspondences(
                         &self.camera,

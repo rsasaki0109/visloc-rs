@@ -995,6 +995,58 @@ It costs 6 times the search time and 12 times the size. For a robot that
 localizes every few images, 1.3 s is enough. On a long route, the map
 should be split by area.
 
+**Searching a dense map faster.** Most of the 1.3 s went to two things.
+When an image did not localize, the demo dropped its prior, so the next
+image searched the whole map. And the radius search went through a
+generic matcher. `basalt_euroc_localize_demo` has four options for that:
+
+- `--fast-radius` matches the radius search's landmarks through the packed
+  descriptor index, as retrieval does. It finds the same matches.
+- `--prior-hold N` keeps the last fix as the prior through N failed
+  images.
+- `--threads N` runs the searches on N threads.
+- `--no-global-with-prior` skips the map-wide search while a prior is
+  held.
+
+The same 300 images of the second walk, on the 681k-landmark map, with 4
+threads:
+
+| Options | Localized | Residual median / p90 | Total time | Per image |
+| --- | ---: | --- | ---: | ---: |
+| as above | 175 | 19 / 46 cm | 564 s | 1.9 s |
+| `--fast-radius --threads 4` | 175 (the same) | 19 / 46 cm | 309 s | 1.0 s |
+| + `--prior-hold 30` | 180 | 20 / 46 cm | 270 s | 0.9 s |
+| + `--no-global-with-prior` | 169 | 20 / 46 cm | **150 s** | **0.5 s** |
+
+A robot with odometry always has a prior, so the last row is its setting.
+It is 3.8 times as fast as before and loses 6 of the 175 fixes.
+
+**On a real robot's own depth camera (OpenLORIS-Scene).** The same test runs
+on data with real depth: OpenLORIS-Scene's office, a wheeled robot with a
+D435i (848 × 480 colour and aligned depth) and motion capture.
+`scripts/openloris_to_tum_rgbd.py` turns a sequence into a TUM RGB-D
+sequence with the colour camera's motion-capture poses, and a query set.
+A map of office1-1 (`tum_rgbd_save_map`, smoothing + CLAHE, depth to 5 m)
+is queried with every 3rd image of the other sessions, one image at a time
+with no odometry (`--prior-radius-m 3 --fast-radius --prior-hold 15
+--retrieval-keyframes 10`). The error is against motion capture.
+
+| Queries | 2 observations (7.4k landmarks) | 1 observation (22.4k) |
+| --- | ---: | ---: |
+| office1-1 itself (270) | 270, median 0.6 cm | |
+| office1-6, 2.8 days later, furniture moved, same direction (360) | 208 (58%), 2.2 cm median, 9.8 cm p90 | **228 (63%)**, 2.4 cm, 9.2 cm |
+| office1-2, same evening, opposite direction (300) | 0 | 0 |
+| office1-7, 2.8 days later, opposite direction (381) | 0 | 0 |
+| office1-4, daylight, lights off (290) | 0 | 0 |
+
+With a real depth camera, landmarks are tracked across keyframes better
+than with a splat's depth. Keeping single observations still adds 5 points
+and gives every fix within 50 cm. A map from one direction cannot
+localize the other: the camera sees the other side of the room. A
+daylight session against a night map stays at 0 for single images. The
+[OpenLORIS page](openloris_map_localization.md) gets some of it back by
+correcting the VIO with weak fixes.
+
 Smoothing and CLAHE nearly double the real fixes. They raise the renders
 from 4% to 19% and the second walk's fixes from 48 to 163. In the plaza
 they had not rescued the renders or the second walk, so nearby structure
