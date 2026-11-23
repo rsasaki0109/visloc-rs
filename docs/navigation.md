@@ -909,6 +909,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | everything, the road estimated, a crossing (wrong-way U-turns, see below) | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
 | the same, cars keeping right | 4/4, all at the first try | 0 | 813 of 850 | 16.4 / 2.2 / 76 cm |
 | the same, the car bodies and braking above | 4/4, all at the first try | 0 | 821 of 850 | 4.2 / 2.5 / 31 cm |
+| the same, lanes along the fitted road line (below) | 3/4: Nav2 succeeded at all 4 at the first try, one stop 30.1 cm off | 0 | 777 of 850 | 7.4 / 2.6 / 49 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -924,7 +925,26 @@ No car or person was within 6 m in front of the robot then. It is the same
 stretch where the cars run lost track. So it is localization's
 run-to-run spread around goal 3, not the cars. The third run, with the
 new car bodies and their braking, went through that stretch at 4.2 cm
-RMSE. Video (the third run):
+RMSE.
+
+**Lanes along the road itself.** The lanes had been the route offset
+sideways, so where the route cut across a side street, the lanes bent
+with it and the cars drove up to 26° off the street.
+`people.fit_road_lines` now finds each road run's own straight centre
+line in the splat. Its direction is the one along which the ground
+gaussians beside it (kerbs, building lines) line up best: the sharpest
+histogram across it, within 30° of the route. It runs down the middle of
+the band between the pavements, where the asphalt's ground gaussians are
+under a tenth as dense as the pavement's. On this street the road heads
+−8.9° against the route's −17.9°, and the cars' heading is now 0° off it
+(it was 25.6° at the 90th percentile). The crossing and its light are
+square to that line. `gs_sim --no-road-fit` keeps the old lanes.
+
+In the fourth run Nav2 succeeded at all four goals at the first try, but
+it stopped 30.1 cm from goal 1, 1 mm past the 30 cm check. Before that,
+on the lawn, no image localized for 18 s while a cyclist and a dog walker
+passed in front of the camera, 1 to 7 m ahead. That is on the lawn before
+the road, so it is not the cars. Video (the fourth run):
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
