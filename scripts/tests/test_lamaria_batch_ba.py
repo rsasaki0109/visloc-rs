@@ -106,6 +106,80 @@ class ReprojectionJacobianTest(unittest.TestCase):
                 np.testing.assert_allclose(jl[o, :, d], num, rtol=1e-4, atol=1e-3)
 
 
+class FisheyeTest(unittest.TestCase):
+    K = [-0.0248, 0.0963, -0.0633, 0.0062, 0.0035, -0.0007]  # sequence_3_17's cam0, factory
+
+    def test_distortion_matches_the_radial_model_and_its_derivative(self):
+        kc = np.r_[240.0, 240.0, 320.0, 240.0, 1.0, self.K]
+        for a, b in ((0.3, -0.2), (1.2, 0.9), (1e-8, 0.0)):
+            sv, q = lb._fish(a, b, kc)
+            rho = np.hypot(a, b)
+            th = np.arctan(rho)
+            r = th + sum(k * th ** (2 * i + 3) for i, k in enumerate(self.K))
+            self.assertAlmostEqual(sv, r / rho if rho > 1e-6 else 1.0, places=9)
+            eps = 1e-7
+            for d, (da, db) in enumerate(((eps, 0.0), (0.0, eps))):
+                s2, _ = lb._fish(a + da, b + db, kc)
+                num = (np.array([s2 * (a + da), s2 * (b + db)]) - sv * np.array([a, b])) / eps
+                want = sv * np.eye(2)[d] + q * np.array([a, b]) * (a, b)[d]
+                np.testing.assert_allclose(num, want, rtol=1e-5, atol=1e-5)
+        self.assertEqual(lb._fish(0.5, 0.5, np.r_[kc[:4], 0.0, self.K]), (1.0, 0.0))
+
+    def test_kernel_and_jacobians_with_a_fisheye(self):
+        cams = two_cameras()
+        for c in cams:
+            c["fisheye_k"] = np.array(self.K)
+        rng = np.random.default_rng(5)
+        r_wi = np.array([rot(rng, 0.3) for _ in range(3)])
+        t_wi = rng.normal(size=(3, 3))
+        r_ic = np.array([c["R_ic"] for c in cams])
+        t_ic = np.array([c["t_ic"] for c in cams])
+        obs_kf, obs_cam, obs_lm, pts = [], [], [], np.zeros((6, 3))
+        for j in range(6):
+            k, c = j % 3, j % 2
+            pts[j] = (r_wi[k] @ t_ic[c] + t_wi[k]) + r_wi[k] @ r_ic[c] @ np.array([1.5 * rng.normal(), 0.8, 2.0])
+            for kk in range(3):
+                obs_kf.append(kk)
+                obs_cam.append(c)
+                obs_lm.append(j)
+        obs_z = rng.uniform(200, 400, size=(len(obs_kf), 2))
+        rp = lb.Reprojection(np.array(obs_kf), np.array(obs_cam), np.array(obs_lm), obs_z, 6, cams, [0, 1], 1.3,
+                             1e9, 64, numpy_pairs=True, est_focal=True)
+        rp.set_focal([0.01, -0.02])
+        res, jx, jl, w = rp.linearize(r_wi, t_wi, r_ic, t_ic, pts)
+        valid = rp._project(r_wi, t_wi, r_ic, t_ic, pts)[5]
+        self.assertGreater(valid.sum(), 6)
+        eps = 1e-6
+        for o in range(len(rp.kf)):
+            if not valid[o]:  # behind the camera: no weight
+                continue
+            k, c, j = rp.kf[o], rp.cam[o], rp.lm[o]
+            for d in range(3):
+                p2 = pts.copy()
+                p2[j, d] += eps
+                num = (rp._project(r_wi, t_wi, r_ic, t_ic, p2)[-1][o] - res[o]) / eps
+                np.testing.assert_allclose(jl[o, :, d], num, rtol=1e-4, atol=1e-4)
+            foc = rp.foc.copy()
+            rp.set_focal(foc + eps * (np.arange(2) == c))
+            num = (rp._project(r_wi, t_wi, r_ic, t_ic, pts)[-1][o] - res[o]) / eps
+            rp.set_focal(foc)
+            np.testing.assert_allclose(jx[o, :, -1], num, rtol=1e-4, atol=1e-4)
+        rp._project(r_wi, t_wi, r_ic, t_ic, pts)
+        n_o, nx = len(rp.kf), 6 + rp.n_par
+        got = [np.zeros((n_o, nx, nx)), np.zeros((n_o, nx, 3)), np.zeros((n_o, nx)), np.zeros((n_o, 3, 3)),
+               np.zeros((6, 3, 3)), np.zeros((6, 3))]
+        lb._normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam,
+                       rp.est_rot, rp.est_trans, rp.est_foc, rp.active, rp.sigma, rp.huber, *got)
+        res, jx, jl, w = rp.linearize(r_wi, t_wi, r_ic, t_ic, pts)
+        wjx = jx * w[:, None, None]
+        np.testing.assert_allclose(got[0], np.einsum("nki,nkj->nij", wjx, jx), rtol=1e-10, atol=1e-8)
+        np.testing.assert_allclose(got[2], np.einsum("nki,nk->ni", wjx, res), rtol=1e-10, atol=1e-8)
+        e = np.zeros(n_o)
+        cost = lb._reproj_cost(r_wi, t_wi, r_ic, t_ic, pts, rp.kf, rp.cam, rp.lm, rp.z, rp.kcam, rp.active,
+                               rp.sigma, rp.huber, e)
+        self.assertAlmostEqual(cost, rp._robust(res, valid)[2].sum(), delta=1e-9 * max(cost, 1))
+
+
 class NormalEquationsTest(unittest.TestCase):
     def test_one_pass_loop_matches_linearize(self):
         for focal in (False, True):

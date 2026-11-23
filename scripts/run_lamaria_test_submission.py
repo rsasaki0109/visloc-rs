@@ -603,6 +603,9 @@ def main() -> int:
     parser.add_argument("--ba-stereo-paper-priors", action="store_true",
                         help="with --ba-stereo-reference, use SLAM Dunk's 1 mrad rotation and "
                              "0.035 px focal-length random walks")
+    parser.add_argument("--ba-fisheye-model", action="store_true",
+                        help="in the experimental batch pass, solve on each camera's factory fisheye model, the focal "
+                             "lengths the fisheye's (downloads LaMAria's aria_calibrations json)")
     parser.add_argument("--ba-pass-args", default="",
                         help="--ba-chain: extra options of the experimental batch pass's solves (one string, e.g. "
                              "\"--est-gyro-m\"); with --ba-compare the default pass runs next to it")
@@ -674,6 +677,7 @@ def main() -> int:
         parser.error("--ba-fuse-accelerometers requires --ba-chain and --imu-rectify")
     if args.ba_compare and not (args.ba_chain and args.log_dir
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m or args.ba_pass_args
+                                     or args.ba_fisheye_model
                                      or args.ba_fuse_accelerometers)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
     if args.ba_compare_camera_gyro and not (
@@ -835,6 +839,10 @@ def main() -> int:
             if args.ba_chain:
                 imu = inner / "mav0" / "imu0" / "data.csv"
                 sequence_pass_args = list(pass_args)
+                if args.ba_fisheye_model:  # the published factory fisheye calibration of the recording
+                    fisheye = calib_dir / f"{seq}_aria_fisheye.json"
+                    download(f"{BASE_URL}/aria_calibrations/{args.split}/{seq}.json", fisheye)
+                    sequence_pass_args += ["--fisheye-model", fisheye]
                 if args.ba_fuse_accelerometers:
                     if not imu_rectified:
                         raise RuntimeError("dual accelerometer fusion needs a rectified right IMU")

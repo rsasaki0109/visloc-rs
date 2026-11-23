@@ -1090,6 +1090,31 @@ def _schur_add(m_o, h_xl, h_xx, g_x, g_l, kf, slot, lm, lm_start, band, nb, ab, 
 _schur_add_jit = njit(nogil=True)(_schur_add) if njit is not None else None
 
 
+def _fish(a, b, kc):
+    """The projection's distortion at the normalized point (a, b) = (X/Z, Y/Z): (s, q) with the image point
+    f s (a, b) + c and d(s (a, b))/d(a, b) = s I + q (a, b)(a, b)^T. A pinhole camera (kc[4] == 0) has s = 1,
+    q = 0; a fisheye (kc[4] == 1) the factory radial model r(theta) = theta + k0 theta^3 + ... + k5 theta^13
+    (kc[5:11]), s = r(atan rho) / rho with rho = |(a, b)|."""
+    if kc[4] == 0.0:
+        return 1.0, 0.0
+    rho2 = a * a + b * b
+    if rho2 < 1e-12:
+        return 1.0, 2.0 * (kc[5] - 1.0 / 3.0)
+    rho = np.sqrt(rho2)
+    th = np.arctan(rho)
+    t2 = th * th
+    r, dr, tp = th, 1.0, th
+    for i in range(6):
+        tp = tp * t2  # theta^(2i+3)
+        r += kc[5 + i] * tp
+        dr += kc[5 + i] * (2 * i + 3) * tp / th
+    sv = r / rho
+    return sv, (dr / (1.0 + rho2) - sv) / rho2
+
+
+_fish_jit = njit(nogil=True)(_fish) if njit is not None else _fish
+
+
 def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_trans, est_foc, active, sigma, huber,
                 h_xx, h_xl, g_x, h_ll_o, h_ll, g_l, o0=0, o1=-1):
     """Reprojection.linearize and its normal equations in one pass (plain loops, for numba).
@@ -1115,12 +1140,18 @@ def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_
         if not active[o] or p_c[2] <= 0.05:
             continue
         zs, sg = p_c[2], sigma[o]
-        res0 = (kcam[c, 0] * p_c[0] / zs + kcam[c, 2] - z[o, 0]) / sg
-        res1 = (kcam[c, 1] * p_c[1] / zs + kcam[c, 3] - z[o, 1]) / sg
+        na, nb_ = p_c[0] / zs, p_c[1] / zs
+        sv, q = _fish_jit(na, nb_, kcam[c])
+        ga, gb = sv * na, sv * nb_
+        res0 = (kcam[c, 0] * ga + kcam[c, 2] - z[o, 0]) / sg
+        res1 = (kcam[c, 1] * gb + kcam[c, 3] - z[o, 1]) / sg
         e = np.sqrt(res0 * res0 + res1 * res1)
         w = (1.0 if e <= huber else huber / max(e, 1e-12)) if huber > 0 else 1.0 / (1.0 + (e / huber) ** 2)
-        jpi[0, 0], jpi[0, 1], jpi[0, 2] = kcam[c, 0] / zs / sg, 0.0, -kcam[c, 0] * p_c[0] / zs ** 2 / sg
-        jpi[1, 0], jpi[1, 1], jpi[1, 2] = 0.0, kcam[c, 1] / zs / sg, -kcam[c, 1] * p_c[1] / zs ** 2 / sg
+        # d(g)/d(a, b) times d(a, b)/d(p_c) = [[1, 0, -a], [0, 1, -b]] / Z, scaled by f / sigma
+        m00, m01, m11 = sv + q * na * na, q * na * nb_, sv + q * nb_ * nb_
+        f0, f1 = kcam[c, 0] / zs / sg, kcam[c, 1] / zs / sg
+        jpi[0, 0], jpi[0, 1], jpi[0, 2] = f0 * m00, f0 * m01, -f0 * (m00 * na + m01 * nb_)
+        jpi[1, 0], jpi[1, 1], jpi[1, 2] = f1 * m01, f1 * m11, -f1 * (m01 * na + m11 * nb_)
         for r in range(2):
             for b in range(3):  # jr = jpi R_ic^T
                 jr[r, b] = jpi[r, 0] * r_ic[c, b, 0] + jpi[r, 1] * r_ic[c, b, 1] + jpi[r, 2] * r_ic[c, b, 2]
@@ -1140,7 +1171,7 @@ def _normal_eqs(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, est_rot, est_
                 for b in range(3):
                     jx[r, 9 + b] = -jr[r, b] if est_trans[c] else 0.0
             if nx == 10 or nx == 13:
-                jx[r, nx - 1] = kcam[c, r] * p_c[r] / zs / sg if est_foc[c] else 0.0
+                jx[r, nx - 1] = kcam[c, r] * (ga if r == 0 else gb) / sg if est_foc[c] else 0.0
             for b in range(3):
                 jl[r, b] = jr[r, 0] * r_wi[k, b, 0] + jr[r, 1] * r_wi[k, b, 1] + jr[r, 2] * r_wi[k, b, 2]
         for i in range(nx):
@@ -1174,8 +1205,9 @@ def _reproj_cost(r_wi, t_wi, r_ic, t_ic, pts, kf, cam, lm, z, kcam, active, sigm
         zc = r_ic[c, 0, 2] * d[0] + r_ic[c, 1, 2] * d[1] + r_ic[c, 2, 2] * d[2]
         valid = zc > 0.05
         zs = zc if valid else 1.0
-        r0 = (kcam[c, 0] * x / zs + kcam[c, 2] - z[o, 0]) / sigma[o]
-        r1 = (kcam[c, 1] * y / zs + kcam[c, 3] - z[o, 1]) / sigma[o]
+        sv, _ = _fish_jit(x / zs, y / zs, kcam[c])
+        r0 = (kcam[c, 0] * sv * x / zs + kcam[c, 2] - z[o, 0]) / sigma[o]
+        r1 = (kcam[c, 1] * sv * y / zs + kcam[c, 3] - z[o, 1]) / sigma[o]
         e[o] = np.sqrt(r0 * r0 + r1 * r1)
         if valid and active[o]:
             if huber < 0:  # Cauchy at scale -huber
@@ -1243,7 +1275,9 @@ class Reprojection:
         self.active = np.ones(len(self.kf), bool)  # observations not rejected as outliers
         for name, i, j in (("fx", 0, 0), ("fy", 1, 1), ("cx", 0, 2), ("cy", 1, 2)):
             setattr(self, name, np.array([c["K"][i, j] for c in cams])[self.cam])
-        self.kcam = np.array([[c["K"][0, 0], c["K"][1, 1], c["K"][0, 2], c["K"][1, 2]] for c in cams])
+        # fx, fy, cx, cy, then 1 and the radial coefficients k0..k5 for a fisheye ("fisheye_k"), else 0
+        self.kcam = np.array([[c["K"][0, 0], c["K"][1, 1], c["K"][0, 2], c["K"][1, 2],
+                               1.0 if "fisheye_k" in c else 0.0, *c.get("fisheye_k", np.zeros(6))] for c in cams])
         self.kcam0 = self.kcam.copy()
         self.ext_slot = np.full(len(cams), -1)
         for i, c in enumerate(est_cams):
@@ -1316,8 +1350,12 @@ class Reprojection:
         p_c = np.einsum("nij,nj->ni", rci, p_i - t_ic[self.cam])
         valid = p_c[:, 2] > 0.05
         zs = np.where(valid, p_c[:, 2], 1.0)
-        res = np.stack([self.fx * p_c[:, 0] / zs + self.cx - self.z[:, 0],
-                        self.fy * p_c[:, 1] / zs + self.cy - self.z[:, 1]], 1) / self.sigma[:, None]
+        nab = p_c[:, :2] / zs[:, None]
+        sq = np.array([_fish(na, nb_, self.kcam[c]) for (na, nb_), c in zip(nab, self.cam)]).reshape(-1, 2)
+        self._sq = sq
+        g = nab * sq[:, :1]
+        res = np.stack([self.fx * g[:, 0] + self.cx - self.z[:, 0],
+                        self.fy * g[:, 1] + self.cy - self.z[:, 1]], 1) / self.sigma[:, None]
         return rw, p_i, rci, p_c, zs, valid, res
 
     def _robust(self, res, valid):
@@ -1344,12 +1382,13 @@ class Reprojection:
 
     def linearize(self, r_wi, t_wi, r_ic, t_ic, pts):
         rw, p_i, rci, p_c, zs, valid, res = self._project(r_wi, t_wi, r_ic, t_ic, pts)
+        na, nb_ = p_c[:, 0] / zs, p_c[:, 1] / zs
+        sv, q = self._sq[:, 0], self._sq[:, 1]
+        m00, m01, m11 = sv + q * na * na, q * na * nb_, sv + q * nb_ * nb_
+        f0, f1 = self.fx / zs / self.sigma, self.fy / zs / self.sigma
         jpi = np.zeros((len(zs), 2, 3))
-        jpi[:, 0, 0] = self.fx / zs
-        jpi[:, 0, 2] = -self.fx * p_c[:, 0] / zs ** 2
-        jpi[:, 1, 1] = self.fy / zs
-        jpi[:, 1, 2] = -self.fy * p_c[:, 1] / zs ** 2
-        jpi /= self.sigma[:, None, None]
+        jpi[:, 0, 0], jpi[:, 0, 1], jpi[:, 0, 2] = f0 * m00, f0 * m01, -f0 * (m00 * na + m01 * nb_)
+        jpi[:, 1, 0], jpi[:, 1, 1], jpi[:, 1, 2] = f1 * m01, f1 * m11, -f1 * (m01 * na + m11 * nb_)
         jr = jpi @ rci
         jx = np.zeros((len(zs), 2, 6 + self.n_par))
         jx[:, :, 0:3] = jr @ skew(p_i)          # pose rotation
@@ -1359,8 +1398,8 @@ class Reprojection:
         if self.n_par >= 6:
             jx[:, :, 9:12] = -jr * self.est_trans[self.cam, None, None]
         if self.n_par in (4, 7):
-            jx[:, 0, -1] = self.fx * p_c[:, 0] / zs / self.sigma * self.est_foc[self.cam]
-            jx[:, 1, -1] = self.fy * p_c[:, 1] / zs / self.sigma * self.est_foc[self.cam]
+            jx[:, 0, -1] = self.fx * sv * na / self.sigma * self.est_foc[self.cam]
+            jx[:, 1, -1] = self.fy * sv * nb_ / self.sigma * self.est_foc[self.cam]
         jl = jr @ np.transpose(rw, (0, 2, 1))   # landmark
         _, w, _ = self._robust(res, valid)
         return res, jx, jl, w
@@ -1628,6 +1667,38 @@ def fisheye_corrected(xy, offsets, cams, aria_calib, eps):
     return xy
 
 
+def to_fisheye(cams, n_seg, obs_cam, z, sigma, aria_calib):
+    """The observations of the rectified pinhole images on each camera's factory fisheye model (LaMAria's
+    aria_calibrations json: fx, fy, cx, cy, k0..k5, ...): a keypoint's ray from the pinhole K, projected with
+    the radial model r(theta) = theta + k0 theta^3 + ... + k5 theta^13; its sigma scaled by the local
+    magnification (the geometric mean of the radial and the tangential one). The cameras (per time segment,
+    camera c in segment s at c * n_seg + s) take the fisheye's K and coefficients, so their focal lengths are
+    the fisheye's (SLAM Dunk's camera model, without the tangential and thin-prism terms)."""
+    calib = json.load(open(aria_calib))
+    z, sigma = z.astype(np.float64).copy(), np.asarray(sigma, np.float64).copy()
+    phys = obs_cam // n_seg
+    out = []
+    for c in range(2):
+        fp = np.asarray(calib[f"cam{c}"]["params"], np.float64)
+        kd = fp[4:10]
+        kp = cams[c * n_seg]["K"]
+        sel = phys == c
+        ab = (z[sel] - kp[:2, 2]) / np.diag(kp)[:2]
+        rho = np.maximum(np.linalg.norm(ab, axis=1), 1e-12)
+        th = np.arctan(rho)
+        pw = 2 * np.arange(6) + 3
+        r = th + (kd[None] * th[:, None] ** pw[None]).sum(1)
+        dr = 1.0 + (kd[None] * pw[None] * th[:, None] ** (pw[None] - 1)).sum(1)
+        sv = np.where(rho > 1e-6, r / rho, 1.0)
+        z[sel] = fp[None, 2:4] + fp[None, 0:2] * sv[:, None] * ab
+        f_ratio = np.sqrt(fp[0] * fp[1] / (kp[0, 0] * kp[1, 1]))
+        sigma[sel] *= f_ratio * np.sqrt(sv * dr / (1.0 + rho ** 2))
+        kf_ = np.array([[fp[0], 0.0, fp[2]], [0.0, fp[1], fp[3]], [0.0, 0.0, 1.0]])
+        out += [dict(cams[c * n_seg + s_], K=kf_, fisheye_k=kd.copy()) for s_ in range(n_seg)]
+    print(f"  observations on the fisheye model: sigma median {np.median(sigma):.2f} px", flush=True)
+    return out, z, sigma
+
+
 def camera_segments(kf_ns, count, seconds=0.0, time_chunks=False):
     """Return the segment count and each keyframe's camera segment."""
     n = len(kf_ns)
@@ -1770,7 +1841,10 @@ def cmd_solve(a):
     fixed_rot_cams = [c * n_seg + s for c in sorted(fixed_phys) for s in range(n_seg)]
     trans_cams = [] if reference is None or fixed is not None or fix_translation else list(
         range((1 - reference) * n_seg, (2 - reference) * n_seg))
-    rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
+    obs_zc = np.concatenate(obs_z)
+    if getattr(a, "fisheye_model", ""):  # observations and focal lengths on the factory fisheye model
+        cams, obs_zc, obs_sigma = to_fisheye(cams, n_seg, obs_cam, obs_zc, obs_sigma, a.fisheye_model)
+    rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], obs_zc, len(pts), cams, est_cams,
                       obs_sigma, a.huber, a.band, est_focal=a.est_focal,
                       fixed_rotations=fixed_rot_cams, translation_cams=trans_cams)
     omega = [float(v) for v in a.omega_coriolis.split(",")] if a.omega_coriolis else None
@@ -2716,6 +2790,9 @@ def main():
                        help="EPS0,EPS1: correct the keypoints for fisheye focal lengths (1 + EPS) times the factory's "
                             "(needs --fisheye-calib)")
         s.add_argument("--fisheye-calib", default="", help="the Aria factory calibration json for --focal-fisheye")
+        s.add_argument("--fisheye-model", default="",
+                       help="LaMAria's aria_calibrations json: solve on each camera's factory fisheye model, its "
+                            "focal lengths (--est-focal) the fisheye's")
         s.add_argument("--focal-temp-coef", type=float, default=0.0,
                        help="relative focal length change per degree Celsius, about the recording's median")
         s.add_argument("--est-accel-m", action="store_true",

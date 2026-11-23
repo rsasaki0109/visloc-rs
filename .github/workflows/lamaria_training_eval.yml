@@ -1,11 +1,11 @@
-# The twelve LaMAria training sequences through the submission driver, each scored with the official
-# control-point evaluator, and one table over all of them.
+# The thirteen LaMAria training recordings with control points through the submission driver, each scored with
+# the official control-point evaluator, and one table over all of them.
 #
-# PASS_ARGS empty: the chain as the driver runs it. PASS_ARGS set: each job also runs the default chain from
-# the same VIO, online windows and first matching (--ba-compare) and the table pairs the two per sequence.
+# PASS_ARGS and EXPERIMENT_ARGS empty: the chain as the driver runs it. Either set: each job also runs the default
+# chain from the same VIO, online windows and first matching (--ba-compare) and the table pairs the two.
 # The decision follows docs/lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds: the mean of the
 # eleven sequences other than sequence_2_12 (which moves by ±5 for nothing) and how many of them gain.
-# A push that changes this file starts a run; edit PASS_ARGS / DRIVER_ARGS below to test a change.
+# A push that changes this file starts a run; edit PASS_ARGS / EXPERIMENT_ARGS / DRIVER_ARGS below to test a change.
 name: LaMAria training evaluation
 
 on:
@@ -20,7 +20,9 @@ permissions:
 env:
   SPLIT: training
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
-  PASS_ARGS: "--gyro-rw-scale 3"
+  PASS_ARGS: ""
+  # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
+  EXPERIMENT_ARGS: "--ba-fisheye-model --ba-stereo-reference 0 --ba-stereo-paper-priors --ba-est-gyro-m --ba-est-accel-m"
   # further driver options for both chains, e.g. "--no-ba-temperature"
   DRIVER_ARGS: ""
 
@@ -58,7 +60,7 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        sequence: [R_11_5cp, R_12_10cp, sequence_1_19, sequence_1_20, sequence_2_11, sequence_2_12,
+        sequence: [R_11_5cp, R_12_10cp, R_13_15cp, sequence_1_19, sequence_1_20, sequence_2_11, sequence_2_12,
                    sequence_3_17, sequence_3_18, sequence_4_10, sequence_4_11, sequence_5_11, sequence_5_12]
     env:
       SEQUENCE: ${{ matrix.sequence }}
@@ -98,6 +100,7 @@ jobs:
           chmod +x bin/basalt_euroc_vio_demo
           compare=()
           if [ -n "$PASS_ARGS" ]; then compare=(--ba-compare --ba-pass-args="$PASS_ARGS"); fi
+          if [ -n "$EXPERIMENT_ARGS" ]; then compare+=(--ba-compare $EXPERIMENT_ARGS); fi
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
@@ -123,7 +126,7 @@ jobs:
 
           labels=(main)
           cp "out/slam/$SEQUENCE.txt" "$results/main_estimate.txt"
-          if [ -n "$PASS_ARGS" ]; then labels+=(baseline); fi
+          if [ -n "$PASS_ARGS$EXPERIMENT_ARGS" ]; then labels+=(baseline); fi
           for label in "${labels[@]}"; do
             log="$results/cp_$label.log"
             python "$evaluator/evaluate_wrt_control_points.py" --estimate "$results/${label}_estimate.txt" \
@@ -136,7 +139,7 @@ jobs:
           from pathlib import Path
           results, labels = Path(sys.argv[1]), sys.argv[2:]
           out = {"sequence": os.environ["SEQUENCE"], "pass_args": os.environ["PASS_ARGS"],
-                 "driver_args": os.environ["DRIVER_ARGS"]}
+                 "experiment_args": os.environ["EXPERIMENT_ARGS"], "driver_args": os.environ["DRIVER_ARGS"]}
           for label in labels:
               log = (results / f"cp_{label}.log").read_text()
               out[label] = {"cp_score": float(re.search(r"CP Score: ([\d.]+)", log).group(1)),
@@ -177,14 +180,15 @@ jobs:
 
           rows = {json.loads(p.read_text())["sequence"]: json.loads(p.read_text())
                   for p in Path("scores").rglob("score/*.json")}
-          order = ["R_11_5cp", "R_12_10cp", "sequence_1_19", "sequence_1_20", "sequence_2_11", "sequence_2_12",
+          order = ["R_11_5cp", "R_12_10cp", "R_13_15cp", "sequence_1_19", "sequence_1_20", "sequence_2_11", "sequence_2_12",
                    "sequence_3_17", "sequence_3_18", "sequence_4_10", "sequence_4_11", "sequence_5_11",
                    "sequence_5_12"]
           track = lambda s: 1 if s.startswith("R_") else int(s.split("_")[1])
           paired = any("baseline" in r for r in rows.values())
           some = next(iter(rows.values()), {})
           print("### LaMAria training evaluation\n")
-          print(f"PASS_ARGS `{some.get('pass_args', '')}`, DRIVER_ARGS `{some.get('driver_args', '')}`\n")
+          print(f"PASS_ARGS `{some.get('pass_args', '')}`, EXPERIMENT_ARGS `{some.get('experiment_args', '')}`, "
+                f"DRIVER_ARGS `{some.get('driver_args', '')}`\n")
           if paired:
               print("| Sequence | Default CP | With PASS_ARGS | Change | Recall at 1 m, default → with (%) |")
               print("|---|---:|---:|---:|---:|")
