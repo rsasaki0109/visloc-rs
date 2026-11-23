@@ -87,10 +87,13 @@ if os.path.exists(PEOPLE_CSV):
     PT = sorted(PEOPLE)
     class _Free:
         def hits(self, x, y, r): return False
-    counts = [sum(1 for k in KIND.values() if k == kind) for kind in range(4)]
+    counts = [sum(1 for k in KIND.values() if k == kind) for kind in range(5)]
+    meta = json.load(open(f'{args.run}.sim.csv.people.json')) if os.path.exists(f'{args.run}.sim.csv.people.json') else {}
+    road = meta.get('road_offset')
+    road = [tuple(r) for r in road] if isinstance(road, list) else road
     CROWD = Crowd([scene['start']] + scene.get('goals', []), counts[0], _Free(), seed=args.seed,
-                  cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3])
-    DYN = 2500 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3]
+                  cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3], cars=counts[4], road_offset=road)
+    DYN = 2500 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3] + 7000 * counts[4]
 
 def people_at(t):
     """Put the crowd where gs_sim.py recorded it at time t."""
