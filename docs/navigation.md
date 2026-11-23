@@ -1050,6 +1050,24 @@ threads:
 A robot with odometry always has a prior, so the last row is its setting.
 It is 3.8 times as fast as before and loses 6 of the 175 fixes.
 
+The ROS 2 node has two of these too.
+
+- `visloc_map_localize_node prior_radius:=10`: when the projection search
+  near the odometry's prediction fails, it first matches the landmarks
+  within 10 m of the predicted camera.
+- `no_global_with_prior:=true`: while there is a prediction, the node never
+  matches map-wide.
+
+On the 360° street with 4 walkers and 2 cyclists (`match_threads 2`),
+Nav2 reached 4/4 goals at the first try with 0 contacts, at 10.4 cm RMSE,
+63 cm max. 847 of the 850 images matched by projection, so on this render
+map the two options seldom came into play. The error exceeded 20 cm for
+15 s, at the corner before goal 3. The cars run, without these options,
+was off at the same spot and the same time. The two runs start the same
+walkers and cyclists in the same places, so these runs cannot tell
+whether someone was in view there or the corner itself is hard. The runs
+before them had stayed under 22 cm.
+
 **On a real robot's own depth camera (OpenLORIS-Scene).** The same test runs
 on data with real depth: OpenLORIS-Scene's office, a wheeled robot with a
 D435i (848 × 480 colour and aligned depth) and motion capture.
@@ -1072,7 +1090,24 @@ With a real depth camera, landmarks are tracked across keyframes better
 than with a splat's depth. Keeping single observations still adds 5 points
 and gives every fix within 50 cm. A map from one direction cannot
 localize the other: the camera sees the other side of the room. A
-daylight session against a night map stays at 0 for single images. The
+daylight session against a night map stays at 0 for single images.
+
+A map of three sessions together: office1-1, office1-2 (the opposite
+direction) and office1-4 (daylight). They share the motion-capture frame,
+so their frames can simply be put in one sequence: 2,578 frames, 60k
+landmarks. It did not help:
+
+| Queries | office1-1's map | Three-session map |
+| --- | ---: | ---: |
+| office1-6, 2.8 days later, same direction | 228 (63%) | 214 (59%) |
+| office1-7, 2.8 days later, opposite direction | 0 | 1 |
+| office1-5, dawn, lights off | 0 | 0 |
+| office1-2 itself (in the map) | | 300 (100%), 0.5 cm |
+
+office1-7 against office1-2's map alone localizes 9 of 381. So it is not
+the direction: office1-7 and office1-2 see the same side of the room. That
+side changed with the furniture moved between them, while the side
+office1-6 sees stayed. And no ORB map of the night copes with dawn light. The
 [OpenLORIS page](openloris_map_localization.md) gets some of it back by
 correcting the VIO with weak fixes.
 
