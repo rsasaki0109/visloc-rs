@@ -920,6 +920,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, lanes along the fitted road line (below) | 3/4: Nav2 succeeded at all 4 at the first try, one stop 30.1 cm off | 0 | 777 of 850 | 7.4 / 2.6 / 49 cm |
 | the same, car footprints as wide as the body, no crossing deadlocks | 4/4, all at the first try | 0 | 822 of 850 | 4.3 / 2.2 / 37 cm |
 | the same, the new people (below) | 4/4, all at the first try | 0 | 825 of 850 | 3.6 / 2.2 / 22 cm |
+| the same, Nav2 kept to a lane along the walk (below) | 4/4, all at the first try | 0 | 795 of 800 | 4.1 / 1.8 / 25 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -965,7 +966,21 @@ sometimes with a backpack. In the walk the thigh swings from −12° to 22°
 and the knee bends in the swing. The stance foot stays on the ground, so
 the pelvis bobs, and the arms swing with a bent elbow. That is up to about
 2,700 gaussians a person. The sixth run, with them, went at 3.6 cm RMSE.
-Video (the sixth run):
+
+
+**Keeping to the pavement.** Nav2 planned on the whole occupancy map, so
+the robot cut across the lawn and wandered off the walked line: 0.37 m
+median and 2.5 m at most from the 360 camera's track. `gs/lane_map.py`
+writes Nav2's map free only within 1 m of the walk, which is the pavement
+the video was walked along. It also clears lone stray map points there.
+`gs_nav.launch.py occupancy:=` takes that map, and `real2sim.py` builds it
+and uses it by default (`--lane-half-width`, 0 for the whole map). In the
+seventh run the robot stayed 0.20 m median and 0.55 m at most from the
+walk, against 0.37 and 2.50 m in the sixth.
+
+<p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
+
+Video (the seventh run):
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no

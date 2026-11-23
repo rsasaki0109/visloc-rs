@@ -373,6 +373,12 @@ All notable changes to `visloc-rs` will be documented here.
   everyday clothes (trousers or a skirt, a T-shirt, a top or a jacket,
   long hair, a bun, a cap, a backpack). Knees bend in the swing, the
   pelvis bobs, and the arms swing with a bent elbow.
+- `gs/lane_map.py`: Nav2's map free only within 1 m of the walk the 360
+  video was taken on, so the robot keeps to that pavement
+  (`gs_nav.launch.py occupancy:=`; `real2sim.py` by default,
+  `--lane-half-width`). On the street, the robot's distance from the walk
+  went from 0.37 m median / 2.5 m max to 0.20 / 0.55 m; 4/4 goals, 4.1 cm
+  RMSE.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.
