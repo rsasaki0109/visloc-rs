@@ -21,7 +21,10 @@ All notable changes to `visloc-rs` will be documented here.
   earlier results do not change. Choose with `p3p_solver` on
   `visloc_map_localize_node`, `--p3p-solver` on
   `basalt_euroc_localize_demo` and `nav_sim_drive`, and
-  `SimRobotConfig::p3p_solver`. In `nav_sim_drive --laps 2` (the
+  `SimRobotConfig::p3p_solver`, and as `PnpMinimalSolver::P3pLambdaTwist`
+  (`--pnp-solver p3p-lambda-twist` in `localize_openloris_map` and
+  `localize_rne_map_sequence`, `pnp_solver="p3p-lambda-twist"` in Python).
+  In `nav_sim_drive --laps 2` (the
   apartment) both reach 34/34 waypoints at 2.4-3.1 cm RMSE, but the drive
   is not deterministic: the same settings twice gave 2.3 and 3.0 cm, so no
   difference between the solvers shows there. On real images (TUM-VI

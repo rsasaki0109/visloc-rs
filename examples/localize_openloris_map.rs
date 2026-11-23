@@ -8,7 +8,7 @@
 //!     --map-dir <model/model/0> \
 //!     --landmark-descriptors <out/landmark_descriptors.txt> \
 //!     --query-features <out/query_features/cam1_000001.txt> \
-//!     [--camera-id 1] [--pnp-solver dlt|p3p]
+//!     [--camera-id 1] [--pnp-solver dlt|p3p|p3p-lambda-twist]
 //!
 //! `--pnp-solver p3p` uses the P3P minimal solver instead of the 6-point DLT
 //! (the default); P3P stays well-posed when the matched landmarks are

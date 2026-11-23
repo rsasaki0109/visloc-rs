@@ -234,11 +234,12 @@ def localize(
     max_median_reprojection_error: Optional[float] = None,
     max_reprojection_error: Optional[float] = None,
     seed: int = 7,
-    pnp_solver: Literal["dlt", "p3p"] = "dlt",
+    pnp_solver: Literal["dlt", "p3p", "p3p-lambda-twist"] = "dlt",
 ) -> LocalizationResult:
     """Localize ``(N, 2)`` keypoints with ``(N, D)`` descriptors against a
     reconstruction whose 3-D points carry descriptors (PnP + RANSAC).
-    ``pnp_solver="p3p"`` suits maps dominated by walls (coplanar points)."""
+    ``pnp_solver="p3p"`` suits maps dominated by walls (coplanar points);
+    ``"p3p-lambda-twist"`` is P3P with the Lambda Twist solver."""
 
 def estimate_pose_pnp_ransac(
     camera: Camera,
@@ -250,10 +251,11 @@ def estimate_pose_pnp_ransac(
     seed: int = 7,
     refine: bool = True,
     confidence: Optional[float] = None,
-    pnp_solver: Literal["dlt", "p3p"] = "dlt",
+    pnp_solver: Literal["dlt", "p3p", "p3p-lambda-twist"] = "dlt",
 ) -> Optional[PnPRansacResult]:
     """World-to-camera pose from ``(N, 2)`` pixels and ``(N, 3)`` world points.
-    ``pnp_solver="p3p"`` stays well-posed on coplanar points (walls)."""
+    ``pnp_solver="p3p"`` stays well-posed on coplanar points (walls);
+    ``"p3p-lambda-twist"`` is P3P with the Lambda Twist solver."""
 
 class SimilarityTransform:
     @property
