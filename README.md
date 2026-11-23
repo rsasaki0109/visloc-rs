@@ -540,8 +540,10 @@ odometry alone, and replans around an obstacle missing from the map. In
 Gazebo, with rendered stereo images and the real robot nodes
 (`visloc_vio_node`, `visloc_map_localize_node`) on a map from visloc's own
 SLAM, it reaches 5/5 goals at 1.6 cm pose RMSE, also around an unmapped
-box, and stops when the VIO loses tracking (cameras blacked out) until it
-relocalizes. Not yet tried on a real robot. See [docs/navigation.md](docs/navigation.md).
+box. When the VIO loses tracking (cameras blacked out), it either stops until
+it relocalizes or, given wheel odometry (`wheel_odom_topic`), drives on and
+reaches all goals at the first try. Not yet tried on a real robot. See
+[docs/navigation.md](docs/navigation.md).
 
 <p align="center">
   <img src="docs/assets/hero_nav2_depot.gif" alt="A camera-only robot driven by Nav2 through the public Depot warehouse in Gazebo. Top left: the robot's stereo camera. Top right: the colour 3D Gaussian splat of the map, rendered at the camera's pose. Bottom: visloc's occupancy grid built from the visual map, with the robot's path in red, visloc's estimate as a cyan ring and five goals turning green as they are reached. Midway the cameras black out for 5 s: visloc reports tracking lost and Nav2 stops the robot, which then spins in place, relocalizes on the map and goes on to reach all five goals." width="640"><br>
@@ -552,6 +554,21 @@ relocalizes. Not yet tried on a real robot. See [docs/navigation.md](docs/naviga
   <img src="docs/assets/hero_real2sim_street.gif" alt="Real to sim. First, a real 360-degree video frame of a town street above the same spot rendered from a 3D Gaussian splat that visloc-rs's own SfM and 3DGS built from that video. Then a third-person view inside the splat: a small delivery robot with a camera mast drives the street with Nav2. Green rays run from its camera to the map features visloc matched in its latest image, an inset shows that image with the matched features circled, a cyan ring marks where visloc puts the robot, and a minimap shows goals turning green." width="640"><br>
   <sub>Real to sim: a public 360° street walk rebuilt by visloc-rs's SfM + 3DGS on a CPU, and a robot localizing in it with visloc while Nav2 drives: 4/4 goals over 121 m, camera 1.2 m up, 97% of its images localized. Green: the map features it matched (<a href="docs/navigation.md#real-to-sim-a-simulator-made-of-a-3d-gaussian-splat-of-real-photos">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
 </p>
+
+<p align="center">
+  <img src="docs/assets/real2sim_crowd.gif" alt="The same street with people: a third-person view behind the delivery robot as cyclists and walkers, made of 3D Gaussians like the street itself, pass and overtake it while it drives with Nav2 and localizes with visloc." width="480"><br>
+  <sub>The same street with walkers and cyclists, gaussians rendered with the scene. They keep clear of the robot and of each other, and the robot reaches 4/4 goals at the first try at 3.5 cm pose RMSE, with no contacts (<a href="docs/navigation.md#with-people-walking-the-street">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
+</p>
+
+**A 360° video to a busy simulator in one command.** `real2sim.py` runs every
+step on a CPU: SfM in metres from the camera's IMU, 3DGS, the robot's map,
+and Nav2 with people on the street. It took about 1 h 45 min for a 121 m
+walk on 4 cores.
+
+```bash
+python3 ros2/visloc-ros2/gs/real2sim.py --insv walk.insv --out runs/street \
+  --nav --pedestrians 4 --cyclists 2 --dog-walkers 1 --strollers 1 --video
+```
 
 ## More results
 

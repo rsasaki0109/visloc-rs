@@ -882,6 +882,20 @@ plaza in Bangkok, 300 frames, 121 m), on 4 CPU cores with no GPU, it took:
 
 That is about 1 h 45 min from the video to a simulator with its map.
 
+More options:
+
+- `--nav --pedestrians 4 --cyclists 2 --dog-walkers 1 --strollers 1` drives
+  the goals with people on the street.
+- `--video` then renders `chase.mp4` behind the robot.
+- **On a machine with a GPU**, build the examples with `--features gpu`
+  (`cargo build --release -p visloc-gsplat-train --features gpu --examples`,
+  and `cargo build --release --examples` for the rest), then pass `--gpu`.
+  - `--gpu` moves SfM's matching to wgpu.
+  - `gsplat_train` and `gsplat_render_server` use a GPU whenever wgpu finds
+    one, and fall back to the CPU rasterizer on a software adapter.
+  - Not timed here (no GPU in this environment). The 3DGS step, the longest
+    here, is the one a GPU shortens most.
+
 ### Appearance change, and real photos as queries
 
 **In the simulator.** `gs/perturb_replay.py` copies the street replay of
