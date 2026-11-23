@@ -631,6 +631,9 @@ def main() -> int:
     parser.add_argument("--ba-pass-args", default="",
                         help="--ba-chain: extra options of the experimental batch pass's solves (one string, e.g. "
                              "\"--est-gyro-m\"); with --ba-compare the default pass runs next to it")
+    parser.add_argument("--ba-est-time-offsets", action="store_true",
+                        help="estimate the IMU's clock against the cameras' and the accelerometer's against the "
+                             "gyroscope's in the experimental batch pass")
     parser.add_argument("--ba-est-accel-m", action="store_true",
                         help="estimate the full accelerometer response matrix in the experimental batch pass")
     parser.add_argument("--ba-focal-seg-seconds", type=float, default=0.0,
@@ -699,7 +702,7 @@ def main() -> int:
         parser.error("--ba-fuse-accelerometers requires --ba-chain and --imu-rectify")
     if args.ba_compare and not (args.ba_chain and args.log_dir
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m or args.ba_pass_args
-                                     or args.ba_fisheye_model
+                                     or args.ba_fisheye_model or args.ba_est_time_offsets
                                      or args.ba_fuse_accelerometers)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
     if args.ba_compare_camera_gyro and not (
@@ -742,6 +745,8 @@ def main() -> int:
         pass_args.append("--est-gyro-m")
     if args.ba_est_accel_m:
         pass_args.append("--est-accel-m")
+    if args.ba_est_time_offsets:
+        pass_args.append("--est-time-offsets")
     pass_args += args.ba_pass_args.split()
     if args.ba_focal_seg_seconds > 0:
         pass_args += ["--focal-seg-seconds", str(args.ba_focal_seg_seconds), "--focal-seg-sigma-px", "0.035"]

@@ -3,8 +3,8 @@
 #
 # PASS_ARGS and EXPERIMENT_ARGS empty: the chain as the driver runs it. Either set: each job also runs the default
 # chain from the same VIO, online windows and first matching (--ba-compare) and the table pairs the two.
-# The decision follows docs/lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds: the mean of the
-# eleven sequences other than sequence_2_12 (which moves by ±5 for nothing) and how many of them gain.
+# The decision: the mean change over all the recordings and how many gain (the chain repeats within about 0.3
+# between runs on Actions, docs/lamaria_slam_dunk_comparison.md#the-fisheye-model-alone).
 # A push that changes this file starts a run; edit PASS_ARGS / EXPERIMENT_ARGS / DRIVER_ARGS below to test a change.
 name: LaMAria training evaluation
 
@@ -22,7 +22,7 @@ env:
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
   PASS_ARGS: ""
   # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
-  EXPERIMENT_ARGS: "--ba-fisheye-model"
+  EXPERIMENT_ARGS: "--ba-est-time-offsets"
   # further driver options for both chains, e.g. "--no-ba-temperature"
   DRIVER_ARGS: ""
 
@@ -224,8 +224,9 @@ jobs:
                     f"mean of {len(eleven)} without sequence_2_12 "
                     f"{mean([rows[s][label]['cp_score'] for s in eleven]):.2f}; per track "
                     + ", ".join(f"{t}: {v:.2f}" for t, v in tracks.items()))
-          if paired and eleven:
-              d = [rows[s]["main"]["cp_score"] - rows[s]["baseline"]["cp_score"] for s in eleven]
+          if paired and done:
+              # the chain repeats within about 0.3 on Actions, sequence_2_12 included: all of them decide
+              d = [rows[s]["main"]["cp_score"] - rows[s]["baseline"]["cp_score"] for s in done]
               gain, up = mean(d), sum(x > 0 for x in d)
               keep = gain >= 0.4 and up > len(d) / 2
               print(f"\nChange over the {len(d)}: {gain:+.2f}, {up} of {len(d)} gain. "
