@@ -919,6 +919,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, the car bodies and braking above | 4/4, all at the first try | 0 | 821 of 850 | 4.2 / 2.5 / 31 cm |
 | the same, lanes along the fitted road line (below) | 3/4: Nav2 succeeded at all 4 at the first try, one stop 30.1 cm off | 0 | 777 of 850 | 7.4 / 2.6 / 49 cm |
 | the same, car footprints as wide as the body, no crossing deadlocks | 4/4, all at the first try | 0 | 822 of 850 | 4.3 / 2.2 / 37 cm |
+| the same, the new people (below) | 4/4, all at the first try | 0 | 825 of 850 | 3.6 / 2.2 / 22 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -954,8 +955,18 @@ it stopped 30.1 cm from goal 1, 1 mm past the 30 cm check. Before that,
 on the lawn, no image localized for 18 s while a cyclist and a dog walker
 passed in front of the camera, 1 to 7 m ahead. That is on the lawn before
 the road, so it is not the cars. In the fifth run, with the car
-footprints below, nobody came more than 5 cm into a car body. Video (the
-fifth run): [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+footprints below, nobody came more than 5 cm into a car body.
+
+**People.** Each pedestrian is a lofted torso (shoulders, waist, hips),
+tapered limbs, shoes, and a head with a nose and hair that leaves the
+face clear. They wear everyday clothes in street colours: trousers or a
+skirt, a T-shirt, a top or a jacket, and long hair, a bun or a cap,
+sometimes with a backpack. In the walk the thigh swings from −12° to 22°
+and the knee bends in the swing. The stance foot stays on the ground, so
+the pelvis bobs, and the arms swing with a bent elbow. That is up to about
+2,700 gaussians a person. The sixth run, with them, went at 3.6 cm RMSE.
+Video (the sixth run):
+[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody

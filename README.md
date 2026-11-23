@@ -562,7 +562,7 @@ reaches all goals at the first try. Not yet tried on a real robot. See
 
 <p align="center">
   <img src="docs/assets/real2sim_cars.gif" alt="The same street with cars, a cyclist and walkers, all made of 3D Gaussians: a car overtakes the delivery robot on the road beside the pavement, cars drive both ways, and the robot passes a zebra crossing with a traffic light while it drives with Nav2 and localizes with visloc." width="480"><br>
-  <sub>Add cars on a road the sim finds in the splat by itself, and a zebra crossing with a traffic light. Cars drive along the street's own line, keep right, and brake and pull away smoothly. 4/4 goals at the first try, 4.3 cm pose RMSE, no contacts, and nobody walks into a car (<a href="docs/navigation.md#with-people-walking-the-street">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
+  <sub>Add cars on a road the sim finds in the splat by itself, and a zebra crossing with a traffic light. Cars drive along the street's own line, keep right, and brake and pull away smoothly. 4/4 goals at the first try, 3.6 cm pose RMSE, no contacts, and nobody walks into a car (<a href="docs/navigation.md#with-people-walking-the-street">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
 </p>
 
 **A 360° video to a busy simulator in one command.** `real2sim.py` runs every
