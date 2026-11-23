@@ -75,6 +75,18 @@ def done(path):
     return os.path.exists(path)
 
 
+def goals_along(path, n):
+    """n goals spread along a 2D path by length, the last 2 m short of its end, facing along it."""
+    s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+    goals = []
+    for k in range(1, n + 1):
+        i = min(int(np.searchsorted(s, s[-1] * k / n - (2.0 if k == n else 0))), len(path) - 1)
+        a, b = path[max(i - 3, 0)], path[min(i + 3, len(path) - 1)]
+        goals.append([round(float(path[i, 0]), 3), round(float(path[i, 1]), 3),
+                      round(math.atan2(b[1] - a[1], b[0] - a[0]), 3)])
+    return goals
+
+
 def mask_faces(src_images, src_model, out):
     """Copy the model and make each face's near-black pixels transparent (RGBA)."""
     from PIL import Image  # noqa: PLC0415
@@ -193,19 +205,11 @@ def main():
              os.path.join(level, 'sparse', '0'), '--out', scene_json, '--camera', FACE,
              '--camera-height', args.camera_height, '--camera-forward', 0, f'--start={start}', '--terrain',
              '--fence-m', args.fence_m, '--min-opacity', 0.3, '--max-scale', 0.3])
-        # goals spread along the walk, the last near its end, facing along it
-        s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))]
-        goals = []
-        for k in range(1, args.goals + 1):
-            i = int(np.searchsorted(s, s[-1] * k / args.goals - (2.0 if k == args.goals else 0)))
-            i = min(i, len(path) - 1)
-            a, b = path[max(i - 3, 0), :2], path[min(i + 3, len(path) - 1), :2]
-            goals.append([round(float(path[i, 0]), 3), round(float(path[i, 1]), 3),
-                          round(math.atan2(b[1] - a[1], b[0] - a[0]), 3)])
+        goals = goals_along(path[:, :2], args.goals)
         sc = json.load(open(scene_json))
         sc['goals'] = goals
         json.dump(sc, open(scene_json, 'w'), indent=1)
-        print(f'walk {s[-1]:.0f} m, goals {goals}')
+        print(f'goals {goals}')
     step('scene', scene)
 
     mapd = os.path.join(out, 'map')
@@ -245,6 +249,12 @@ def main():
         if args.lane_half_width > 0:            # keep the robot to the pavement the video was walked on
             run([sys.executable, os.path.join(HERE, 'lane_map.py'), '--occupancy', os.path.join(mapd, 'occupancy.yaml'),
                  '--walk', traj, '--out', os.path.join(mapd, 'occupancy_lane'), '--half-width', args.lane_half_width])
+            lane_walk = os.path.join(mapd, 'occupancy_lane_walk.txt')
+            if os.path.exists(lane_walk):        # goals on the lane (the walk's detours cut)
+                sc = json.load(open(scene_json))
+                sc['goals'] = goals_along(np.loadtxt(lane_walk, ndmin=2), args.goals)
+                json.dump(sc, open(scene_json, 'w'), indent=1)
+                print(f"goals on the lane {sc['goals']}")
     step('map', build_map)
 
     if args.nav:

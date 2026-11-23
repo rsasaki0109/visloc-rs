@@ -15,9 +15,12 @@ cells there (fewer than two occupied neighbours, stray map points) are
 cleared too.
 
 `--walk` is a TUM trajectory (`t x y z qx qy qz qw`, e.g. `real2sim.py`'s
-`faces.tum`); only x and y are used. Writes OUT.pgm and OUT.yaml (the
-original's resolution and origin); pass OUT.yaml to `gs_nav.launch.py` as
-`occupancy:=`.
+`faces.tum`); only x and y are used. Where the walk wanders off and comes
+back (a walker crossing a side street halfway down it rather than at its
+mouth), the lane follows the straight line instead (`--detour-ratio`,
+`--max-chord`); that walk is written to OUT_walk.txt, so goals can be put
+on it. Writes OUT.pgm and OUT.yaml (the original's resolution and origin);
+pass OUT.yaml to `gs_nav.launch.py` as `occupancy:=`.
 """
 
 import argparse
@@ -57,12 +60,45 @@ def lane_mask(shape, res, origin, walk, half_width):
     return near
 
 
+def straighten(walk, blocked, ratio=1.6, max_chord=20.0, step=0.25):
+    """The walk with its detours cut: wherever it wanders off and comes back (the arc between
+    two points at least `ratio` times the straight line between them, the line at most
+    `max_chord` m and clear of blocked(x, y) cells), the straight line instead. A walker
+    crossing a side street halfway down it, or stepping round something, becomes a straight
+    crossing at the street's mouth."""
+    s = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(walk, axis=0), axis=1))]
+    out, i = [walk[0]], 0
+    while i < len(walk) - 1:
+        best = None
+        for j in range(i + 2, len(walk)):
+            if s[j] - s[i] > max_chord * ratio * 2:
+                break
+            chord = float(np.linalg.norm(walk[j] - walk[i]))
+            if chord > max_chord or s[j] - s[i] < ratio * max(chord, 1e-6) or s[j] - s[i] < 3.0:
+                continue
+            n = max(2, int(chord / step))
+            pts = walk[i] + np.linspace(0, 1, n)[:, None] * (walk[j] - walk[i])
+            if not any(blocked(x, y) for x, y in pts):
+                best = (j, pts)
+        if best is None:
+            out.append(walk[i + 1])
+            i += 1
+        else:
+            j, pts = best
+            out.extend(pts[1:])
+            i = j
+    return np.array(out)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--occupancy', required=True, help="the map's occupancy.yaml")
     p.add_argument('--walk', required=True, help='TUM trajectory of the walk')
     p.add_argument('--out', required=True, help='output prefix (writes OUT.pgm and OUT.yaml)')
     p.add_argument('--half-width', type=float, default=1.0, help='m either side of the walk kept free')
+    p.add_argument('--detour-ratio', type=float, default=1.6,
+                   help='cut a detour whose length is at least this many times the straight line (0: keep the walk)')
+    p.add_argument('--max-chord', type=float, default=20.0, help='longest straight line that replaces a detour (m)')
     args = p.parse_args()
     from PIL import Image  # noqa: PLC0415
     meta = read_yaml(args.occupancy)
@@ -72,9 +108,21 @@ def main():
     walk = np.loadtxt(args.walk, ndmin=2)[:, 1:3]
     keep = np.r_[True, np.linalg.norm(np.diff(walk, axis=0), axis=1) > 0.05]   # drop repeats
     walk = walk[keep]
-    near = lane_mask(img.shape, res, origin, walk, args.half_width)
     negate = int(float(meta.get('negate', 0)))
     occupied = (img < 100) if not negate else (img > 155)
+    if args.detour_ratio > 0:
+        h = img.shape[0]
+
+        def blocked(x, y):
+            c = int((x - origin[0]) / res)
+            r = h - 1 - int((y - origin[1]) / res)
+            r0, r1, c0, c1 = max(r - 3, 0), min(r + 4, h), max(c - 3, 0), min(c + 4, img.shape[1])
+            return occupied[r0:r1, c0:c1].sum() >= 3          # a wall within 15 cm, not a stray point
+        n0 = len(walk)
+        walk = straighten(walk, blocked, args.detour_ratio, args.max_chord)
+        np.savetxt(args.out + '_walk.txt', walk, fmt='%.3f', header='x y: the walk with its detours cut')
+        print(f'walk: {n0} points, detours cut -> {len(walk)} ({args.out}_walk.txt)')
+    near = lane_mask(img.shape, res, origin, walk, args.half_width)
     # A lone occupied cell is a stray map point, not a wall: on a 2 m lane, inflated, it
     # would narrow the way for nothing.
     pad = np.pad(occupied, 1)
