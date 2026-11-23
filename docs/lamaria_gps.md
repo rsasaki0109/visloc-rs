@@ -167,6 +167,28 @@ the way, to 44–69 from 0–9; over the ramp itself the bridged trajectory is a
 straight line at constant speed. The eight trajectories as they are come out
 unchanged.
 
+## A smooth GPS correction: a negative result
+
+The bridging moves the trajectory only at jumps of 25 m or more. sequence_5_12's ride is folded rather
+than jumped ([The rides, again](lamaria_batch_ba.md#the-rides-again)), so a smooth correction was tried:
+en ≈ c R xy + T(t), with T piecewise linear over knots every 30, 60 or 120 s, a second-difference prior of
+2 or 10 m per knot and the same Cauchy loss (5 m) against the fixes of 10 m or better. The trajectory's x, y
+then move by (c R)⁻¹ (T(t) − mean T). On the Actions estimates of the two training Moving sequences
+([The twelve on Actions](lamaria_batch_ba.md#the-twelve-on-actions)):
+
+| Knots | Prior | sequence_5_11 (65.54 as run) | sequence_5_12 (6.41 as run) |
+|---:|---:|---:|---:|
+| 30 s | 2 m | 7.14 | 7.61 |
+| 30 s | 10 m | 5.35 | 4.42 |
+| 60 s | 2 m | 17.32 | 3.07 |
+| 60 s | 10 m | 14.69 | 4.51 |
+| 120 s | 2 m | 31.69 | 5.62 |
+| 120 s | 10 m | 22.59 | 6.10 |
+
+The fit leaves 1.1–2.6 m at the median, but the fixes' slow errors of a few metres move the trajectory
+where it was right: sequence_5_11 falls from 65.5 to 5–32, and sequence_5_12 stays where it was. The GPS
+can bridge tens of metres, not correct metres.
+
 ## A rotation per piece: not measurable
 
 The model gives the pieces one rotation. Whether the heading also steps
