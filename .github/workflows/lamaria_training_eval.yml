@@ -96,6 +96,7 @@ jobs:
           path: bin
 
       - name: Run the chain
+        shell: bash
         run: |
           chmod +x bin/basalt_euroc_vio_demo
           compare=()
@@ -104,8 +105,11 @@ jobs:
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
-            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs "${compare[@]}" $DRIVER_ARGS
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs "${compare[@]}" $DRIVER_ARGS \
+            2>&1 | tee driver.log
           test -s "out/slam/$SEQUENCE.txt"
+          # a run on the raw IMU (the .vrs head not fetched) is not the chain being measured
+          if grep -q "IMU rectification failed" driver.log; then echo "::error::IMU rectification failed"; exit 1; fi
 
       - name: Score control points
         shell: bash
@@ -114,7 +118,7 @@ jobs:
           git init -q "$evaluator"
           git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
           git -C "$evaluator" checkout -q --detach FETCH_HEAD
-          python -m pip install --quiet --disable-pip-version-check \
+          python -m pip install --quiet --disable-pip-version-check --retries 10 --timeout 60 \
             --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
 
           results="out/logs/$SEQUENCE"

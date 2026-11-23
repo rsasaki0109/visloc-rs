@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest import mock
 import argparse
 import sys
 import tempfile
@@ -60,6 +61,27 @@ class EstimatorCommandTests(unittest.TestCase):
 
 
 class TrackTests(unittest.TestCase):
+    def test_a_network_error_is_retried(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return b"ok"
+
+        with mock.patch.object(submission.time, "sleep") as sleep:
+            self.assertEqual(submission.retried(flaky, "test"), b"ok")
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(sleep.call_count, 2)
+
+            def down():
+                raise ConnectionResetError(104, "Connection reset by peer")
+
+            with self.assertRaises(ConnectionResetError):
+                submission.retried(down, "test")
+            self.assertEqual(sleep.call_count, 2 + len(submission.RETRY_DELAYS_S))
+
     def test_sequence_track(self):
         self.assertEqual(submission.sequence_track("sequence_4_10"), 4)
         self.assertEqual(submission.sequence_track("sequence_1_19"), 1)

@@ -111,7 +111,7 @@ jobs:
           git init -q "$evaluator"
           git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
           git -C "$evaluator" checkout -q --detach FETCH_HEAD
-          python -m pip install --quiet --disable-pip-version-check \
+          python -m pip install --quiet --disable-pip-version-check --retries 10 --timeout 60 \
             --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ \
             pycolmap==3.13.0.dev0 pyceres==2.6 tqdm==4.67.3
           echo "EVALUATOR=$evaluator" >> "$GITHUB_ENV"

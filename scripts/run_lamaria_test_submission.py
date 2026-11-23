@@ -144,6 +144,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -199,6 +200,21 @@ def run(cmd, **kwargs):
     return subprocess.run([str(c) for c in cmd], **kwargs)
 
 
+RETRY_DELAYS_S = (5, 15, 45, 120)  # the ETH server resets connections now and then
+
+
+def retried(fetch, what: str):
+    """fetch() again after each of RETRY_DELAYS_S on a network error; the last error propagates."""
+    for delay in (*RETRY_DELAYS_S, None):
+        try:
+            return fetch()
+        except (OSError, urllib.error.URLError) as error:
+            if delay is None:
+                raise
+            log(f"WARN {what}: {error!r}; retrying in {delay} s")
+            time.sleep(delay)
+
+
 def download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
@@ -213,7 +229,9 @@ def download(url: str, dest: Path) -> None:
         if result.returncode == 0 and dest.exists():
             return
     log(f"aria2c unavailable/failed; falling back to urllib for {url}")
-    urllib.request.urlretrieve(url, dest)
+    part = dest.with_name(dest.name + ".part")
+    retried(lambda: urllib.request.urlretrieve(url, part), f"download {url}")
+    part.replace(dest)
 
 
 def download_head(url: str, dest: Path, nbytes: int) -> None:
@@ -221,9 +239,13 @@ def download_head(url: str, dest: Path, nbytes: int) -> None:
     if dest.is_file() and dest.stat().st_size > 0:
         return
     request = urllib.request.Request(url, headers={"Range": f"bytes=0-{nbytes - 1}"})
-    with urllib.request.urlopen(request, timeout=300) as response:
-        # read(nbytes) also bounds a server that ignores Range and answers 200.
-        dest.write_bytes(response.read(nbytes))
+
+    def fetch():
+        with urllib.request.urlopen(request, timeout=300) as response:
+            # read(nbytes) also bounds a server that ignores Range and answers 200.
+            return response.read(nbytes)
+
+    dest.write_bytes(retried(fetch, f"download the head of {url}"))
 
 
 def rectify_imu(seq: str, inner: Path, work: Path, calib_dir: Path,

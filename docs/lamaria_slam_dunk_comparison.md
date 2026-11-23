@@ -135,6 +135,10 @@ gap to the paper is not in how the calibration varies over time. Both runs put s
 the same pass both times: its default chain is the one that varies (51 here and in every run so far against
 61 with either model).
 
-The default chain also moved on sequence_3_18 between the two runs, from 57.78 to 38.86 with the same commit
-of the chain: like sequence_2_12, it is not stable from one run to the next on Actions, and a single paired run
-cannot weigh a change there.
+The default chain's sequence_3_18 fell from 57.78 to 38.86 in this run because its IMU was not rectified:
+fetching the head of the `.vrs` hit "Connection reset by peer" and the driver went on with the raw IMU
+(both chains of the pair share it, so the pair still compares like with like). Apart from that, the chain is
+reproducible on Actions: across four runs the default chain repeats within about 0.3 on most recordings
+(sequence_2_12 at 51.02 every time; sequence_5_11 moves by up to 2.3). The driver now retries its downloads
+(5, 15, 45 and 120 s apart), and the training evaluation fails a job that ran on the raw IMU instead of scoring
+it; the evaluator's packages are fetched with retries too.
