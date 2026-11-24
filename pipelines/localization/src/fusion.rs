@@ -667,8 +667,8 @@ mod tests {
             }
         }
         let expected = dense.lu().solve(&rhs).expect("solves");
-        for i in 0..n {
-            assert!((x[i] - expected.rows(4 * i, 4)).norm() < 1e-9);
+        for (i, xi) in x.iter().enumerate() {
+            assert!((xi - expected.rows(4 * i, 4)).norm() < 1e-9);
         }
     }
 }
