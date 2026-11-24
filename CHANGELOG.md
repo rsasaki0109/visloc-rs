@@ -379,6 +379,11 @@ All notable changes to `visloc-rs` will be documented here.
   `--lane-half-width`). On the street, the robot's distance from the walk
   went from 0.37 m median / 2.5 m max to 0.20 / 0.55 m; 4/4 goals, 4.1 cm
   RMSE.
+- `lane_map.py` cuts the walk's detours (a walker crossing a side street
+  halfway down it), so the robot crosses on the crossing at the street's
+  mouth. Off the lane is very costly rather than lethal, small clumps of
+  stray map points on it are cleared, `make_gs_scene.py --open-path` opens
+  the sim's fence along the lane, and `real2sim.py` puts the goals on it.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.

@@ -921,6 +921,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, car footprints as wide as the body, no crossing deadlocks | 4/4, all at the first try | 0 | 822 of 850 | 4.3 / 2.2 / 37 cm |
 | the same, the new people (below) | 4/4, all at the first try | 0 | 825 of 850 | 3.6 / 2.2 / 22 cm |
 | the same, Nav2 kept to a lane along the walk (below) | 4/4, all at the first try | 0 | 795 of 800 | 4.1 / 1.8 / 25 cm |
+| the same, the side street crossed at its mouth (below) | 4/4, all at the first try | 0 | 727 of 800 | 6.9 / 2.5 / 41 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -977,6 +978,30 @@ the video was walked along. It also clears lone stray map points there.
 and uses it by default (`--lane-half-width`, 0 for the whole map). In the
 seventh run the robot stayed 0.20 m median and 0.55 m at most from the
 walk, against 0.37 and 2.50 m in the sixth.
+
+That lane still followed the walker off the pavement in one place. They
+crossed a side street in a U, halfway down it over the cobbles, rather
+than on the crossing at its mouth, and the robot did the same, down the
+kerb and back up. So `lane_map.py` now cuts the walk's detours: an arc at
+least 1.6 times the straight line between its ends, with that line at
+most 20 m and clear of walls, becomes the straight line. Here that is
+across the mouth, on the crossing, in line with both pavements.
+
+Three more things made the robot keep to it:
+
+- **Goals.** `real2sim.py` puts the goals on the cut walk.
+- **Fence.** The sim's fence is opened along it (`make_gs_scene.py
+  --open-path`); before, the scan showed a wall across the mouth.
+- **Off the lane.** Cells off the lane are now very costly (about 234 of
+  254) rather than lethal, so a robot nudged off it can plan back. Small
+  clumps of stray map points on the lane (under 0.1 m²) are cleared
+  (`--max-clump`).
+
+In the eighth run the robot crossed the side street on the crossing at
+its mouth: it went no lower than y = 8.2 m there, where the walk went
+down to 1.5 m. It left the lane only once, by up to 2.4 m, to make way
+for a cyclist and a pushchair coming along it before goal 1. It waited
+10 s while the cyclist was 0.6 m in front of it.
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
 
