@@ -282,7 +282,7 @@ def main():
 source /opt/ros/jazzy/setup.bash
 export RCUTILS_COLORIZED_OUTPUT=0
 for attempt in 1 2 3; do
-  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}record:={sim}/nav.sim.csv \\
+  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}robot_radius:=0.45 record:={sim}/nav.sim.csv \\
     "sim_args:={sim_args}" "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
   LP=$!; ok=0
   for t in $(seq 1 60); do sleep 5; grep -q "lifecycle_manager_navigation\\]: .*Managed nodes are active" {sim}/nav.launch.log && {{ ok=1; break; }}; done
@@ -314,7 +314,7 @@ kill -INT $LP; sleep 8
     print(f'done: splat {splat}, scene {scene_json}, map {mapd}')
     print('timing (s):', {k: round(v) for k, v in times.items()})
     if not args.nav:
-        print(f'drive it: ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} sim_args:=--mono '
+        print(f'drive it: ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} robot_radius:=0.45 sim_args:=--mono '
               f'"localize_args:={" ".join(TUNED)}"')
 
 
