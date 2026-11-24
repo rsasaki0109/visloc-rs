@@ -82,6 +82,23 @@
 //!   --config configs/basalt/variants/official_euroc_ds/euroc_config.json
 //! ```
 //!
+//! Coupling the map and other odometries into the estimate
+//! (docs/odometry_fusion.md has the measurements):
+//!
+//! - `--vio-map-prior`: every fix the correction accepts also goes into the
+//!   VIO's own sliding window as a pose prior (in the VIO frame, through the
+//!   correction), so the map corrects the VIO's velocity and biases, not
+//!   only its output.
+//! - `--vio-wheel-velocity` (with `--vio --odometry FILE --imu-from-body`):
+//!   the body velocity of `FILE` (a wheel odometry) goes into the VIO window
+//!   on every frame.
+//! - `--fusion`: the map pose comes from `visloc_localization::MapFusion`, a
+//!   sliding-window pose graph over the odometries and the accepted fixes,
+//!   instead of the single rigid correction. With `--vio --odometry FILE`
+//!   both odometries are fused (`--odometry-noise wheel|legged` picks the
+//!   second one's drift model), so the other carries the pose where one
+//!   fails; `--drop-vio-s START:END` drops the VIO for a stretch to test it.
+//!
 //! Outputs, under `--out-dir`:
 //!
 //! - `localization.tum`: IMU poses of the localized images in the map's world
