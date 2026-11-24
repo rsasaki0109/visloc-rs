@@ -396,6 +396,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- The README's street GIFs credit OverMaps360 (OverTheReality), CC BY-NC
+  4.0 in every frame, and show the latest drive: the hero no longer has
+  the robot down the side street, and the cars GIF shows what its caption
+  says (cars passing, the crossing and its light). The chase camera skips
+  the splat within 1.5 m (`--near`, new in `gsplat_render_server` and
+  `Renderer::set_near_plane`), so a sign it passes no longer fills the frame.
+
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it
   crosses over. Cars wait, keep right, and U-turn only at the road's

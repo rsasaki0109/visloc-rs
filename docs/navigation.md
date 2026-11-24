@@ -672,11 +672,15 @@ localizations, 692 were by projection.
 
 Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). A 12 s GIF of it:
 [assets/hero_real2sim_street.gif](assets/hero_real2sim_street.gif). Both show
-OverMaps360 footage (CC BY-NC 4.0). First, the
+OverMaps360 footage (CC BY-NC 4.0), credited in every frame. First, the
 real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a 3D model of a delivery robot drawn into the
-render, hidden where the splat's depth is in front of it.
+render, hidden where the splat's depth is in front of it. Both now show the
+latest drive (the tenth run below: walkers, cyclists, cars, the lane, posts
+and kerbs), not this table's. The chase camera skips the splat within 1.5 m
+of it (`gsplat_render_server --near`, `chase_video.py --near`), so a street
+sign it passes close by does not fill the frame.
 
 The overlays show the localization itself:
 
