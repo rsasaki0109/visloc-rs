@@ -89,6 +89,11 @@
 //!   VIO's own sliding window as a pose prior (in the VIO frame, through the
 //!   correction), so the map corrects the VIO's velocity and biases, not
 //!   only its output.
+//!   `--map-prior-sigma M,YAW_DEG,TILT_DEG` sets its 1-sigma (default
+//!   0.03,1,1; with `--mono` and no `--vio-wheel-velocity`, 0.03,1,0: no
+//!   roll/pitch prior).
+//! - `--mono`: monocular-inertial VIO on cam0 + IMU instead of stereo
+//!   (`docs/mono_inertial_vio.md`).
 //! - `--vio-wheel-velocity` (with `--vio --odometry FILE --imu-from-body`):
 //!   the body velocity of `FILE` (a wheel odometry) goes into the VIO window
 //!   on every frame.
@@ -220,6 +225,15 @@ struct Args {
     /// Feed `--odometry`'s body velocity into the VIO window on every frame
     /// (wheel-inertial odometry).
     vio_wheel_velocity: bool,
+    /// 1-sigma of `--vio-map-prior`: position (m), yaw and roll/pitch (deg;
+    /// 0 leaves roll/pitch to the IMU). By default 0.03 m, 1 deg, 1 deg, and
+    /// no roll/pitch for `--mono` without `--vio-wheel-velocity`: there a
+    /// roll/pitch prior that disagrees with the IMU's gravity by a degree
+    /// can make the VIO's velocity run away (docs/odometry_fusion.md).
+    map_prior_sigma: Option<(f64, f64, f64)>,
+    /// With `--vio`: monocular-inertial VIO on cam0 + IMU
+    /// (`docs/mono_inertial_vio.md`) instead of stereo.
+    mono: bool,
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
     /// ... and every N-th until the odometry has a map pose,
@@ -260,7 +274,8 @@ impl Args {
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--fusion [--odometry-noise wheel|legged] \
-         [--drop-vio-s START:END]] [--vio-map-prior] [--vio-wheel-velocity] \
+         [--drop-vio-s START:END]] [--vio-map-prior [--map-prior-sigma M,YAW_DEG,TILT_DEG]] \
+         [--vio-wheel-velocity] [--mono] \
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
@@ -316,6 +331,8 @@ impl Args {
             drop_vio_s: None,
             vio_map_prior: false,
             vio_wheel_velocity: false,
+            mono: false,
+            map_prior_sigma: None,
             localize_every: 1,
             initial_localize_every: 1,
             initial_window_s: 30.0,
@@ -404,6 +421,21 @@ impl Args {
                 "--fusion" => args.fusion = true,
                 "--vio-map-prior" => args.vio_map_prior = true,
                 "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
+                "--mono" => args.mono = true,
+                "--map-prior-sigma" => {
+                    let text = value()?;
+                    let parts = text
+                        .split(',')
+                        .map(|part| number::<f64>(&option, part.to_owned()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let [m, yaw, tilt] = parts[..] else {
+                        return Err("--map-prior-sigma: M,YAW_DEG,TILT_DEG".into());
+                    };
+                    if !(m > 0.0 && yaw > 0.0 && tilt >= 0.0) {
+                        return Err("--map-prior-sigma: M and YAW_DEG > 0, TILT_DEG >= 0".into());
+                    }
+                    args.map_prior_sigma = Some((m, yaw, tilt));
+                }
                 "--odometry-noise" => {
                     args.odometry_noise = match value()?.as_str() {
                         "wheel" => OdometryNoise::WHEEL,
@@ -461,6 +493,12 @@ impl Args {
         }
         if args.vio_wheel_velocity && !(args.vio && args.odometry.is_some()) {
             return Err("--vio-wheel-velocity needs --vio and --odometry".into());
+        }
+        if args.mono && !args.vio {
+            return Err("--mono needs --vio".into());
+        }
+        if args.mono && args.camera != 0 {
+            return Err("--mono runs on cam0; use --camera 0".into());
         }
         if args.vio_map_prior && !args.vio {
             return Err("--vio-map-prior needs --vio".into());
@@ -1320,7 +1358,11 @@ impl CorrectedRun {
 fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::error::Error>> {
     let calibration = args.calibration.as_ref().expect("checked by Args::parse");
     let config = args.config.as_ref().expect("checked by Args::parse");
-    let dataset = EurocSensorDataset::open(&args.euroc_dir, calibration, config)?;
+    let dataset = if args.mono {
+        EurocSensorDataset::open_monocular(&args.euroc_dir, calibration, config)?
+    } else {
+        EurocSensorDataset::open(&args.euroc_dir, calibration, config)?
+    };
     let mut adapter =
         BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
     adapter.estimator.set_lean_marg_data(true);
@@ -1404,14 +1446,13 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
                     frame_id,
                     measurement: ExternalMeasurement::PosePrior {
                         world_from_imu: map_from_odom.inverse().compose(map_from_imu),
-                        sqrt_information: Vector6::new(
-                            1.0 / 0.03,
-                            1.0 / 0.03,
-                            1.0 / 0.03,
-                            1.0 / 1f64.to_radians(),
-                            1.0 / 1f64.to_radians(),
-                            1.0 / 1f64.to_radians(),
-                        ),
+                        sqrt_information: map_prior_information(args.map_prior_sigma.unwrap_or(
+                            if args.mono && !args.vio_wheel_velocity {
+                                (0.03, 1.0, 0.0)
+                            } else {
+                                (0.03, 1.0, 1.0)
+                            },
+                        )),
                         huber: 2.0,
                     },
                 });
@@ -1519,6 +1560,27 @@ fn read_tum_ns(path: &std::path::Path) -> Result<Vec<(i64, SE3)>, Box<dyn std::e
     }
     poses.sort_by_key(|(timestamp_ns, _)| *timestamp_ns);
     Ok(poses)
+}
+
+/// Square-root information of a map pose prior on `world_from_imu`, on
+/// Basalt's chart (position, then a left rotation increment in the world
+/// frame): `sigma` is position (m), yaw and roll/pitch (deg). The rotation
+/// rows are the world axes, so yaw is the z row and roll/pitch x and y.
+fn map_prior_information(sigma: (f64, f64, f64)) -> Vector6<f64> {
+    let (m, yaw, tilt) = sigma;
+    let tilt = if tilt > 0.0 {
+        1.0 / tilt.to_radians()
+    } else {
+        0.0
+    };
+    Vector6::new(
+        1.0 / m,
+        1.0 / m,
+        1.0 / m,
+        tilt,
+        tilt,
+        1.0 / yaw.to_radians(),
+    )
 }
 
 /// A body's velocity in its own frame at `timestamp_ns`, from its poses

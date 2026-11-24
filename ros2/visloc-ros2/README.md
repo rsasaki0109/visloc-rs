@@ -104,7 +104,8 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `wheel_velocity` | `false` | feed `wheel_odom_topic`'s twist into the estimator as a body velocity on every frame; its `child_frame_id` is placed relative to `body_frame` by `/tf_static` |
 | `wheel_velocity_stddev` | `0.02` m/s | 1-sigma of that velocity, plus 2% of the speed |
 | `map_prior` | `false` | feed each fix `visloc_map_localize_node` used (`odom_fix`) into the estimator as a pose prior on its frame |
-| `map_prior_stddev_m`, `map_prior_stddev_deg` | `0.03`, `1.0` | 1-sigma of such a prior |
+| `map_prior_stddev_m`, `map_prior_stddev_deg` | `0.03`, `1.0` | 1-sigma position and yaw of such a prior |
+| `map_prior_tilt_stddev_deg` | `1.0`; `0` with `mono` and no `wheel_velocity` | 1-sigma roll/pitch of such a prior (`0`: none); a monocular VIO without wheel velocity can run away under a roll/pitch prior that is a degree off its gravity |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 

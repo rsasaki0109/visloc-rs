@@ -128,7 +128,9 @@ PARAMETERS (--name value  or  -p name:=value):
   map_prior              feed each fix visloc_map_localize_node used (odom_fix) into
                          the estimator as a pose prior on its frame               [false]
   map_prior_stddev_m     1-sigma position of such a prior (m)                     [0.03]
-  map_prior_stddev_deg   1-sigma orientation of such a prior (deg)                [1.0]
+  map_prior_stddev_deg   1-sigma yaw of such a prior (deg)                        [1.0]
+  map_prior_tilt_stddev_deg  1-sigma roll/pitch of such a prior (deg; 0: none)
+                         [1.0; 0 with mono and no wheel_velocity]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -353,6 +355,16 @@ fn run() -> Result<(), String> {
     let external_noise = ExternalNoise {
         fix_position_m: args.parsed_or("map_prior_stddev_m", 0.03f64)?,
         fix_orientation_rad: args.parsed_or("map_prior_stddev_deg", 1.0f64)?.to_radians(),
+        fix_tilt_rad: args
+            .parsed_or(
+                "map_prior_tilt_stddev_deg",
+                if mono_camera.is_some() && !wheel_velocity {
+                    0.0f64
+                } else {
+                    1.0
+                },
+            )?
+            .to_radians(),
         velocity_m_s: args.parsed_or("wheel_velocity_stddev", 0.02f64)?,
         ..ExternalNoise::default()
     };

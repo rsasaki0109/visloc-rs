@@ -146,14 +146,14 @@ IFB=-0.0314,-0.8938,-0.2587,-0.5059,-0.5042,-0.4958,0.4940
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
   --euroc-dir $D/office1-6 --out-dir runs/o16_ac --vio \
   --calibration $D/office1-6/calibration.json --config $C --localize-every 5 \
-  --odometry $D/office1-6/odom.tum --imu-from-body=$IFB \
+  --odometry $D/office1-6/odom.tum --imu-from-body $IFB \
   --vio-map-prior --vio-wheel-velocity
 
 # B, VIO + wheels
 target/release/examples/basalt_euroc_localize_demo --map runs/o12_map \
   --euroc-dir $D/office1-7 --out-dir runs/o17_fusion --vio \
   --calibration $D/office1-7/calibration.json --config $C --localize-every 5 \
-  --odometry $D/office1-7/odom.tum --imu-from-body=$IFB --fusion
+  --odometry $D/office1-7/odom.tum --imu-from-body $IFB --fusion
 
 # D: a synthetic legged odometry for MH_02, fused with the VIO through a
 # 30 s VIO outage

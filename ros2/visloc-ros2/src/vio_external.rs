@@ -15,9 +15,13 @@ use visloc_core::geometry::SE3;
 /// Noise of the external measurements.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalNoise {
-    /// 1-sigma position (m) and orientation (rad) of a map fix.
+    /// 1-sigma position (m) and yaw (rad) of a map fix.
     pub fix_position_m: f64,
     pub fix_orientation_rad: f64,
+    /// 1-sigma roll/pitch (rad) of a map fix; 0 leaves them to the IMU.
+    /// A monocular VIO without wheel velocity needs 0: a roll/pitch prior
+    /// a degree off the IMU's gravity can make its velocity run away.
+    pub fix_tilt_rad: f64,
     /// Huber threshold on a fix's whitened residual.
     pub fix_huber: f64,
     /// 1-sigma body velocity (m/s), plus this fraction of the speed.
@@ -30,6 +34,7 @@ impl Default for ExternalNoise {
         Self {
             fix_position_m: 0.03,
             fix_orientation_rad: 1f64.to_radians(),
+            fix_tilt_rad: 1f64.to_radians(),
             fix_huber: 2.0,
             velocity_m_s: 0.02,
             velocity_per_speed: 0.02,
@@ -97,12 +102,19 @@ pub fn map_prior_factor(
         .compose(odom_from_out)
         .compose(out_from_imu);
     let p = 1.0 / noise.fix_position_m;
-    let r = 1.0 / noise.fix_orientation_rad;
+    let yaw = 1.0 / noise.fix_orientation_rad;
+    let tilt = if noise.fix_tilt_rad > 0.0 {
+        1.0 / noise.fix_tilt_rad
+    } else {
+        0.0
+    };
     ExternalFactor {
         frame_id,
         measurement: ExternalMeasurement::PosePrior {
             world_from_imu: vio_from_imu,
-            sqrt_information: Vector6::new(p, p, p, r, r, r),
+            // The rotation rows are world axes (a left increment): x and y
+            // tilt, z yaw.
+            sqrt_information: Vector6::new(p, p, p, tilt, tilt, yaw),
             huber: noise.fix_huber,
         },
     }
