@@ -624,12 +624,15 @@ def _loop_worker(task, m=None):
         return task, empty, 0
     pa = (np.c_[xya[m[:, 0]], np.ones(len(m))] @ np.linalg.inv(_G["cams"][ca]["K"]).T)[:, :2]
     pb = (np.c_[xyb[m[:, 1]], np.ones(len(m))] @ np.linalg.inv(_G["cams"][cb]["K"]).T)[:, :2]
-    e, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999,
-                                   threshold=1.0 / _G["cams"][cb]["K"][0, 0])
-    if e is None or mask is None or e.shape != (3, 3) or mask.sum() < _G["min_inliers"]:
+    try:  # a degenerate pair (e.g. matches piled on a few pixels) can fail OpenCV's polynomial solver
+        e, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999,
+                                       threshold=1.0 / _G["cams"][cb]["K"][0, 0])
+        if e is None or mask is None or e.shape != (3, 3) or mask.sum() < _G["min_inliers"]:
+            return task, empty, 0
+        mask = mask.ravel().astype(bool)
+        _, r_est, _, _ = cv2.recoverPose(e, pa[mask], pb[mask], np.eye(3))
+    except cv2.error:  # test sequence_5_11, cam0 only: no revisit from this pair, as with too few inliers
         return task, empty, 0
-    mask = mask.ravel().astype(bool)
-    _, r_est, _, _ = cv2.recoverPose(e, pa[mask], pb[mask], np.eye(3))
     r_ba = _cam_pose(kb, cb)[0].T @ _cam_pose(ka, ca)[0]
     angle = np.degrees(np.arccos(np.clip((np.trace(r_est.T @ r_ba) - 1) / 2, -1, 1)))
     if angle > _G["max_rot"]:
@@ -1927,11 +1930,14 @@ def pnp_body_pose(p3, p2, kmat, r_ic, t_ic, r_wb0, t_wb0, min_inliers):
     r_wc = r_wb0 @ r_ic
     c_w = r_wb0 @ t_ic + t_wb0
     rvec, tvec = cv2.Rodrigues(r_wc.T)[0], (-r_wc.T @ c_w).reshape(3, 1)
-    found, rvec, tvec, inl = cv2.solvePnPRansac(p3, p2, kmat, None, rvec, tvec, useExtrinsicGuess=True,
-                                                iterationsCount=200, reprojectionError=3.0, confidence=0.999)
-    if not found or inl is None or len(inl) < min_inliers:
+    try:  # degenerate points can fail OpenCV's minimal solvers (as findEssentialMat in _loop_worker)
+        found, rvec, tvec, inl = cv2.solvePnPRansac(p3, p2, kmat, None, rvec, tvec, useExtrinsicGuess=True,
+                                                    iterationsCount=200, reprojectionError=3.0, confidence=0.999)
+        if not found or inl is None or len(inl) < min_inliers:
+            return None
+        rvec, tvec = cv2.solvePnPRefineLM(p3[inl[:, 0]], p2[inl[:, 0]], kmat, None, rvec, tvec)
+    except cv2.error:
         return None
-    rvec, tvec = cv2.solvePnPRefineLM(p3[inl[:, 0]], p2[inl[:, 0]], kmat, None, rvec, tvec)
     r_wc = cv2.Rodrigues(rvec)[0].T
     r_wb = r_wc @ r_ic.T
     return r_wb, -r_wc @ tvec.ravel() - r_wb @ t_ic
