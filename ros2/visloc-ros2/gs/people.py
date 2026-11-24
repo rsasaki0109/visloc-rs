@@ -609,6 +609,45 @@ def fit_road_lines(xyz, opacity, route, ground_z, road, max_turn_deg=30.0):
     return out
 
 
+def pavement_edges(xyz, rgb, opacity, route, ground_z, road, step=1.0, scan_m=4.0, warm=8.0):
+    """Where the pavement ends on the road side, along the route: [[s, edge]], edge the signed
+    offset (m, + left) of the kerb, from the splat's colours (warm flags, then grey or no
+    ground: the asphalt is too plain to have many gaussians). Only where `road`
+    (estimate_road's stretches) has a road beside the route; people keep to this side of it."""
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+    route = np.asarray(route, float)[:, :2]
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+    gz = np.array([ground_z(x, y) for x, y in xyz[:, :2]])
+    m = (np.abs(xyz[:, 2] - gz) < 0.35) & (opacity > 0.2)
+    P, C = xyz[m, :2], rgb[m] * 255.0
+    tree = cKDTree(P)
+    out = []
+    for a, b, o in road:
+        if o is None:
+            continue
+        side = 1.0 if o > 0 else -1.0
+        for s_ in np.arange(a, b + 1e-9, step):
+            k = int(np.clip(np.searchsorted(cum, s_) - 1, 0, len(route) - 2))
+            d = route[k + 1] - route[k]
+            d /= max(np.linalg.norm(d), 1e-9)
+            p = route[k] + d * (s_ - cum[k])
+            n = side * np.array([-d[1], d[0]])
+            edge, missing = 0.0, 0
+            for off in np.arange(0.0, scan_m + 1e-9, 0.25):
+                idx = tree.query_ball_point(p + off * n, 0.35)
+                if len(idx) < 4:
+                    missing += 1
+                    if missing >= 3:            # 0.75 m without ground: the asphalt
+                        break
+                    continue
+                c = np.median(C[idx], 0)
+                if c[0] - c[2] < warm:            # grey: the road
+                    break
+                missing, edge = 0, off
+            out.append([round(float(s_), 2), round(float(side * (edge + 0.15)), 2)])
+    return out
+
+
 def check_road(road, route, ground_z, render, min_sharpness=4.0, relative=0.4, samples=3):
     """Drops the stretches of an estimated road where the splat is broken up: from points
     along each stretch, it looks towards the road (camera 1.6 m up) with render(R_cw, t_cw)
@@ -860,7 +899,7 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 class Crowd:
     def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
                  dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0, road_lines=None,
-                 crossing=False):
+                 crossing=False, pavement=None):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
@@ -957,6 +996,8 @@ class Crowd:
             self.kind = np.concatenate([self.kind, np.full(cars, 4)])
             n += cars
         self.lane_mix = self.dir.copy()
+        # The kerb on the road side along the route (pavement_edges): people keep inside it.
+        self.pavement = np.array(pavement, float) if pavement else None
         # Footprints (x along, y left, radius) per agent: by kind, but a car's from its own body,
         # seven overlapping circles as wide as it, so its sides have no waist to walk into.
         self.foot = []
@@ -1132,6 +1173,10 @@ class Crowd:
         p, d = p[0], d[0]
         normal = np.array([-d[1], d[0]])
         off = self.side[i] + dodge
+        if self.pavement is not None and not self.cross[i] and \
+                self.pavement[0, 0] - 0.5 <= s <= self.pavement[-1, 0] + 0.5:
+            edge = float(np.interp(s, self.pavement[:, 0], self.pavement[:, 1]))
+            off = min(off, edge - RADIUS) if edge > 0 else max(off, edge + RADIUS)   # not onto the road
         while self.kind[i] != 4 and not self.cross[i] and abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
             off *= 0.7                            # (cars keep to their lane: the road is off the grid)
         return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
@@ -1179,11 +1224,8 @@ class Crowd:
             if self.kind[i] == 4:
                 self.xy[i], self.yaw[i], self.normal[i] = self._car_pose(i, self.s[i])
                 continue
-            off = self.side[i] + self.dodge[i]    # shrink the side offset until the spot is free
-            while self.kind[i] != 4 and not self.cross[i] and abs(off) > 0.05 and self.grid.hits(*(p[i] + off * normal[i]), RADIUS):
-                off *= 0.7
-            self.xy[i] = p[i] + off * normal[i]
-            self.yaw[i] = math.atan2(d[i, 1] * self.dir[i], d[i, 0] * self.dir[i])
+            # on the pavement, the side offset shrunk until the spot is free (as _pose)
+            self.xy[i], self.yaw[i], _ = self._pose(i, self.s[i], self.dodge[i], self.dir[i])
 
     def step(self, dt, robot_xy):
         """Walk (or ride) on, keeping clear of the robot and of each other.

@@ -885,6 +885,15 @@ keeping right.
   15 cm), never a car. Offline over 600 s with 4 seeds: no one more than
   5 cm into a car body; nobody stood still longer than 20 s (cars 11 s,
   a red light).
+- **Pavement**: people and bikes keep to the pavement. Where it is
+  narrow, their side offsets (±1.6 m from the walk, plus dodging) took
+  them up to 1.6 m onto the road. `people.pavement_edges` scans out from
+  the walk, every metre along the road stretches, and puts the kerb where
+  the warm flags end (grey, or 0.75 m with no ground: plain asphalt has
+  few gaussians). Here it is 0.15 to 2.9 m from the walk. Only on the
+  crossing do they step past it. Offline, 3 seeds × 400 s: from 20-40%
+  of samples past the edge to none, and nobody stood still longer than
+  before (24 s, at the crossing).
 - **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
   smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
   on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They

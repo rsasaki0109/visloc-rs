@@ -402,6 +402,14 @@ All notable changes to `visloc-rs` will be documented here.
   says (cars passing, the crossing and its light). The chase camera skips
   the splat within 1.5 m (`--near`, new in `gsplat_render_server` and
   `Renderer::set_near_plane`), so a sign it passes no longer fills the frame.
+- 3DGS sim people keep off the road. Their side offsets (±1.6 m from the
+  walk, plus dodging) took them up to 1.6 m onto the road where the
+  pavement is narrow. `people.pavement_edges` finds where the pavement
+  ends on the road side, along the route, from the splat's colours (warm
+  flags until grey or no ground). `gs_sim.py` hands it to the crowd, and
+  people and bikes, except on the crossing, stay on their side of it.
+  Offline, 3 seeds × 400 s: from 20-40% of samples past the edge (up to
+  1.6 m) to none, and nobody stood still longer than before (24 s).
 
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it

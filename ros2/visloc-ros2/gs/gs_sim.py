@@ -172,9 +172,9 @@ class Sim(Node):
                 ply = read_ply(sp(scene['splat']))
                 xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
                 opacity = 1 / (1 + np.exp(-ply['opacity']))
+                rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
             if args.cars and road_offset is None:
                 from people import estimate_road  # noqa: PLC0415
-                rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
                 road_offset = estimate_road(xyz, rgb, opacity, route, self.ground_z)
                 from people import check_road  # noqa: PLC0415
 
@@ -195,11 +195,20 @@ class Sim(Node):
                 for s0, s1, px, py, ux, uy in road_lines:
                     self.get_logger().info(f'cars: road centre line {s0:.0f}-{s1:.0f}: through ({px:.1f}, {py:.1f}), '
                                            f'heading {math.degrees(math.atan2(uy, ux)):.1f} deg')
+            pavement = None
+            if args.cars and not np.isscalar(road_offset):
+                # where the pavement ends on the road side: people keep off the road
+                from people import pavement_edges  # noqa: PLC0415
+                pavement = pavement_edges(xyz, rgb, opacity, route, self.ground_z, road_offset)
+                if pavement:
+                    e = np.abs([v for _, v in pavement])
+                    self.get_logger().info(f'people: pavement edge on the road side at s {pavement[0][0]:.0f}-'
+                                           f'{pavement[-1][0]:.0f}: {e.min():.2f}-{e.max():.2f} m (median {np.median(e):.2f})')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
                                cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
-                               road_lines=road_lines,
+                               road_lines=road_lines, pavement=pavement,
                                crossing=args.crossing)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.radius = scene.get('robot_radius', 0.2)
@@ -234,6 +243,7 @@ class Sim(Node):
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
             json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
                        'road_lines': getattr(self.crowd, 'road_lines', None),
+                       'pavement': None if self.crowd.pavement is None else self.crowd.pavement.tolist(),
                        'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 
