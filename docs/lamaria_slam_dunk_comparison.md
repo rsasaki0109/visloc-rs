@@ -215,3 +215,32 @@ the longer and the low-light recordings lose up to 7.6. The noise is half of the
 paper's also has bias states per 5 s chunk with an absolute prior and fixed whitening with additive floors,
 which GTSAM's preintegrated factors here do not have, so this run does not yet put the paper's camera terms in
 the paper's objective.
+
+## The paper's IMU model: biases per 5 s chunk
+
+`solve --bias-chunk-seconds 5` holds the biases nearly constant within 5 s chunks and lets them step by the
+paper's sigmas between them (0.005 m/s², 2×10⁻⁵ rad/s; a thousandth of that inside a chunk), through the
+per-factor bias covariance of the combined IMU factors. With the paper's noise densities as above
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45384406106), commit `39841c6`):
+
+| Recording | Default | Paper's IMU model | Change | Noise only (above) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 88.16 | 82.05 | −6.12 | −4.63 |
+| R_12_10cp | 63.74 | 69.45 | +5.71 | +2.90 |
+| R_13_15cp | 78.10 | 77.58 | −0.52 | −1.11 |
+| sequence_1_19 | 85.34 | 90.66 | +5.32 | +6.00 |
+| sequence_1_20 | 86.69 | 85.35 | −1.35 | +4.27 |
+| sequence_2_11 | 88.47 | 87.46 | −1.02 | −4.37 |
+| sequence_2_12 | 51.02 | 41.10 | −9.92 | −7.57 |
+| sequence_3_17 | 80.35 | 80.27 | −0.07 | −0.38 |
+| sequence_3_18 | 57.76 | 59.35 | +1.58 | −0.98 |
+| sequence_4_10 | 68.23 | 63.45 | −4.78 | −3.57 |
+| sequence_4_11 | 76.06 | 73.21 | −2.84 | −3.92 |
+| sequence_5_11 | 65.44 | 67.54 | +2.10 | −2.52 |
+| sequence_5_12 | 6.11 | 6.54 | +0.43 | +0.26 |
+| Mean of thirteen | 68.88 | 68.00 | −0.88 | −1.20 |
+
+Five of thirteen gain: not kept, but the closest of the paper's terms so far. Without the two low-light
+recordings (whose pass has its own settings) and sequence_2_12, the ten gain 0.61 on average, five of them.
+sequence_2_12 loses 7.6–9.9 under every run with the paper's noise; R_12_10cp, sequence_1_19 and 3_18
+gain with the chunked biases.
