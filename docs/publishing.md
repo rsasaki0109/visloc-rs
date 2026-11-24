@@ -126,8 +126,10 @@ settings → Danger Zone → Change visibility → Public), so that
 ## Publishing to crates.io and PyPI
 
 The `visloc` Python package is on PyPI from 0.4.0
-(<https://pypi.org/project/visloc/>). No `visloc-*` crate is on crates.io
-yet: that needs the `CARGO_REGISTRY_TOKEN` secret below. The release
+(<https://pypi.org/project/visloc/>), and the Rust crates are on crates.io
+from 0.4.0 (`cargo add visloc-rs`). `visloc-navigation` is not in 0.4.0: it
+was added after the `v0.4.0` tag, and the release workflow publishes the
+tag's code, so it first appears with the next version. The release
 workflow publishes both, but only when run by hand
 (Actions → release → Run workflow, with an existing tag and **publish**
 ticked); a tag push never publishes. That run adds these jobs:
