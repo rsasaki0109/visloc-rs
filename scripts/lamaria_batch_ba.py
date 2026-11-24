@@ -1427,7 +1427,7 @@ class Reprojection:
 
 def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_rw_scale=1.0, gyro_rw_scale=1.0,
                prior_rot_sigma=1e-4, omega_coriolis=None, init=None, warmup=(1.0, 300.0, None), gyro_m=None, accel_m=None,
-               temp=None, gyro_temp=None, time_offsets=None):
+               temp=None, gyro_temp=None, time_offsets=None, bias_chunk=None):
     """GTSAM values and factors for poses, velocities, biases, the IMU and the gauge priors.
 
     The first keyframe's position is pinned (1e-4 m); its rotation gets prior_rot_sigma (rad). Gravity
@@ -1442,7 +1442,9 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
     axis's scale change per degree s) make the rate (I + M) w + dT (s * w) - dT c, less the bias.
     time_offsets (2, seconds): the IMU's clock against the cameras' (a sample stamped t was taken at t + d0) and
     the accelerometer's against the gyroscope's (its reading at t is the one stamped t + d1, linearly
-    interpolated).
+    interpolated). bias_chunk (seconds, accelerometer sigma, gyroscope sigma) holds the biases nearly constant
+    within chunks of that many seconds from the first keyframe and lets them step by the sigmas between chunks
+    (SLAM Dunk's bias per 5 s chunk), in place of the calibration's continuous walk and its warm-up.
     """
     import gtsam
     from gtsam.symbol_shorthand import B, V, X
@@ -1480,6 +1482,21 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
     warm_t0 = kf_ns[0] if warm_t0 is None else warm_t0
     by_scale = {1.0: make_params(gyro_rw_scale)}
 
+    by_rw = {}
+
+    def chunk_params(ta, tb):  # the bias walk of a factor that stays inside a chunk or crosses into the next
+        sec, s_acc, s_gyr = bias_chunk
+        dt = max((tb - ta) * 1e-9, 1e-3)
+        step = int((tb - kf_ns[0]) // round(sec * 1e9)) != int((ta - kf_ns[0]) // round(sec * 1e9))
+        f = 1.0 if step else 1e-3  # inside a chunk: a thousandth of the step's sigma
+        key = (round(f * s_acc / np.sqrt(dt), 12), round(f * s_gyr / np.sqrt(dt), 14))
+        if key not in by_rw:
+            params = make_params(1.0)
+            params.setBiasAccCovariance(np.eye(3) * key[0] ** 2)
+            params.setBiasOmegaCovariance(np.eye(3) * key[1] ** 2)
+            by_rw[key] = params
+        return by_rw[key]
+
     def factor_params(t_ns):  # the gyro bias random walk of the warm-up at t_ns, rounded to share the params
         f = max(round(1.0 + (warm_scale - 1.0) * np.exp(-(t_ns - warm_t0) * 1e-9 / warm_s), 2), 1.0)
         if f not in by_scale:
@@ -1510,7 +1527,8 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
                 np.array([0.1, 0.1, 0.1, 1e-3, 1e-3, 1e-3]))))
     for k in range(n - 1):
         ta, tb = kf_ns[k], kf_ns[k + 1]
-        pim = gtsam.PreintegratedCombinedMeasurements(factor_params(ta), zero_bias)
+        pim = gtsam.PreintegratedCombinedMeasurements(
+            chunk_params(ta, tb) if bias_chunk else factor_params(ta), zero_bias)
         s = max(np.searchsorted(imu_ns, ta, side="right") - 1, 0)
         e = np.searchsorted(imu_ns, tb, side="left")
         for i in range(s, min(e, len(imu_ns) - 1)):
@@ -1902,7 +1920,9 @@ def cmd_solve(a):
                           gyro_m=m_vec[:9].reshape(3, 3) if np.any(m_vec[:9]) else None,
                           accel_m=m_vec[9:18].reshape(3, 3) if np.any(m_vec[9:18]) else None,
                           temp=imu_temp, gyro_temp=m_vec[18:24] if np.any(m_vec[18:24]) else None,
-                          time_offsets=m_vec[24:26] if np.any(m_vec[24:26]) else None)
+                          time_offsets=m_vec[24:26] if np.any(m_vec[24:26]) else None,
+                          bias_chunk=(a.bias_chunk_seconds, a.bias_chunk_accel, a.bias_chunk_gyro)
+                          if getattr(a, "bias_chunk_seconds", 0) else None)
 
     graph, values, index, imu_factors = build_imu(gm)
     gm_pass = gm.copy()  # the M the IMU factors were preintegrated with
@@ -2840,6 +2860,11 @@ def main():
         s.add_argument("--gyro-bias-rw", type=float, default=None,
                        help="gyroscope bias random walk (rad/s/sqrt(s)) instead of the calibration's "
                             "(--gyro-rw-scale still multiplies it)")
+        s.add_argument("--bias-chunk-seconds", type=float, default=0.0,
+                       help="biases constant within chunks of this many seconds, stepping between them by "
+                            "--bias-chunk-accel / --bias-chunk-gyro (SLAM Dunk's 5 s; 0: the continuous walk)")
+        s.add_argument("--bias-chunk-accel", type=float, default=0.005, help="accelerometer bias step (m/s^2)")
+        s.add_argument("--bias-chunk-gyro", type=float, default=2e-5, help="gyroscope bias step (rad/s)")
         s.add_argument("--est-time-offsets", action="store_true",
                        help="estimate the IMU's clock against the cameras' and the accelerometer's against the "
                             "gyroscope's (SLAM Dunk's clock offsets)")
