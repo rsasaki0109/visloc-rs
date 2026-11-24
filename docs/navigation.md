@@ -677,8 +677,9 @@ real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a 3D model of a delivery robot drawn into the
 render, hidden where the splat's depth is in front of it. Both now show the
-latest drive (the twelfth run below: walkers, cyclists, cars, the lane, posts,
-kerbs, and people kept off the road and along the walk), not this table's. The chase camera skips the splat within 1.5 m
+latest drive (the thirteenth run below: walkers, cyclists, cars, the lane, posts,
+kerbs, people off the road and along the walk, and room round the robot's
+body), not this table's. The chase camera skips the splat within 1.5 m
 of it (`gsplat_render_server --near`, `chase_video.py --near`), so a street
 sign it passes close by does not fill the frame.
 
@@ -950,6 +951,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, kerbs (below) | 4/4, all at the first try | 0 | 791 of 850 | 5.6 / 2.3 / 32 cm |
 | the same, people kept off the road (above) | 4/4, all at the first try | 0 | 742 of 800 | 4.9 / 2.3 / 26 cm |
 | the same, people along the walk (above) | 4/4, all at the first try | 0 | 697 of 800 | 6.0 / 2.4 / 22 cm |
+| the same, Nav2's footprint the robot's body (below) | 4/4, all at the first try | 0 | 719 of 800 | 8.9 / 2.3 / 72 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -1067,7 +1069,19 @@ from a solid cell; of 3,384 recorded positions of people and bikes along
 the road, none was past the pavement's edge. In the twelfth, with people
 along the walk, 9.7 s on the kerbs; of 32,096 positions of people and
 bikes none was within 3.2 m of the road's centre line, and between the
-kerbs none was more than 0.91 m from the walk. Video (the twelfth run):
+kerbs none was more than 0.91 m from the walk.
+
+**Room round the robot.** In the video a cyclist rode through the robot.
+The robot drawn there is 0.87 by 0.70 m, but Nav2 and the people took it
+for a 0.2 m circle (scene.json's `robot_radius`): bikes came up to 0.30 m
+into its body, walkers 0.16 m, and the robot squeezed between a walker and
+a cyclist. Now `gs_sim.py` keeps people 0.6 m from its centre
+(`--robot-body`), and `gs_nav.launch.py robot_radius:=0.45` gives Nav2 a
+footprint the body's size (inflation 0.70 m). In the thirteenth run nobody
+came within 0.10 m of the body, the robot kept at least 0.74 m from any
+solid cell, and it still reached 4/4 goals at the first try with no
+contacts. Its pose error was over 0.3 m for 3 s (up to 72 cm, at 84 s,
+then back under 0.3 m), hence the larger RMSE. Video (the thirteenth run):
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>

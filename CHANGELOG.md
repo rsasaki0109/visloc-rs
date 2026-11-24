@@ -416,6 +416,11 @@ All notable changes to `visloc-rs` will be documented here.
   1.2-1.7 m towards the road, so people walked along the real zebra
   crossing in the splat. Between kerbs they keep within 0.9 m of the walk
   (`people.kerb_spans`), as on a crossing, not out into the side street.
+- 3DGS sim: room round the robot's body. People kept clear of a 0.2 m
+  circle while the robot drawn in the video is 0.87 x 0.70 m, so a bike
+  rode through it. `gs_sim.py --robot-body` (0.6 m) keeps people off the
+  body, and `gs_nav.launch.py robot_radius:=` sets Nav2's footprint (0.45
+  m for this robot), so it no longer squeezes between people.
 
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it
