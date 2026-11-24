@@ -14,9 +14,9 @@ walls stay lethal), so the global plan, and the robot, stay on the
 pavement, while a robot pushed off the lane can still plan back onto it
 (`--hard` makes off-lane lethal). Nav2's static layer must not be
 trinary (`trinary_costmap: false`, as in gz/nav2_params.yaml). Cells near the walk that the
-original map left unknown become free: someone walked there. Lone occupied
-cells there (fewer than two occupied neighbours, stray map points) are
-cleared too.
+original map left unknown become free: someone walked there. Small clumps
+of occupied cells there (under --max-clump, 0.1 m^2: stray map points) are
+cleared too; a real post is still in the robot's scan.
 
 `--walk` is a TUM trajectory (`t x y z qx qy qz qw`, e.g. `real2sim.py`'s
 `faces.tum`); only x and y are used. Where the walk wanders off and comes
@@ -103,6 +103,8 @@ def main():
     p.add_argument('--detour-ratio', type=float, default=1.6,
                    help='cut a detour whose length is at least this many times the straight line (0: keep the walk)')
     p.add_argument('--max-chord', type=float, default=20.0, help='longest straight line that replaces a detour (m)')
+    p.add_argument('--max-clump', dest='max_clump', type=float, default=0.1,
+                   help='clear clumps of occupied cells smaller than this (m^2) on the lane: stray map points')
     p.add_argument('--hard', action='store_true', help='off the lane lethal (by default very costly: see below)')
     args = p.parse_args()
     from PIL import Image  # noqa: PLC0415
@@ -128,12 +130,14 @@ def main():
         np.savetxt(args.out + '_walk.txt', walk, fmt='%.3f', header='x y: the walk with its detours cut')
         print(f'walk: {n0} points, detours cut -> {len(walk)} ({args.out}_walk.txt)')
     near = lane_mask(img.shape, res, origin, walk, args.half_width)
-    # A lone occupied cell is a stray map point, not a wall: on a 2 m lane, inflated, it
-    # would narrow the way for nothing.
-    pad = np.pad(occupied, 1)
-    neighbours = sum(np.roll(np.roll(pad, dy, 0), dx, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1))[1:-1, 1:-1] - occupied
-    lone = occupied & (neighbours < 2)
-    occupied = occupied & ~(lone & near)
+    # A small clump of occupied cells on the lane (under --max-clump m^2) is stray map points,
+    # not a wall: inflated, it would push the plan off the lane for nothing. A real post or
+    # tree there is still in the robot's scan.
+    from scipy import ndimage  # noqa: PLC0415
+    lab, _ = ndimage.label(occupied, structure=np.ones((3, 3)))
+    sizes = np.bincount(lab.ravel())
+    small = (sizes[lab] * res * res < args.max_clump) & occupied
+    occupied = occupied & ~(small & ndimage.binary_dilation(near, iterations=2))
     # Off the lane: costly, not lethal (`--hard`: lethal), so a robot nudged off it (by people,
     # a recovery or a localization jump) can still plan its way back. Walls stay lethal.
     off = 0 if args.hard else 25                       # occupancy 0.90 -> cost ~234 of 254 ('scale')
