@@ -27,6 +27,13 @@
 //! poses continue from there ([`visloc_ros2::odom_bridge`]). The odometry
 //! frame stays the same, so no `odom_reset` is published and the robot can
 //! keep driving.
+//!
+//! Two inputs reach into the estimator itself ([`visloc_ros2::vio_external`],
+//! docs/odometry_fusion.md): with `map_prior:=true`, each fix that
+//! `visloc_map_localize_node` uses (`odom_fix`) becomes a pose prior on its
+//! frame, so the map corrects the VIO's velocity and biases too; with
+//! `wheel_velocity:=true` and `wheel_odom_topic`, the wheel odometry's
+//! twist becomes a body-velocity factor on every frame.
 
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -44,7 +51,9 @@ use visloc_ros2::dds::{
 };
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::se3_from_ros;
-use visloc_ros2::msgs::{Image, Imu, Int32, Odometry, Path, PoseStamped, TfMessage};
+use visloc_ros2::msgs::{
+    Image, Imu, Int32, Odometry, Path, PoseStamped, PoseWithCovarianceStamped, TfMessage,
+};
 use visloc_ros2::odom_bridge::{BridgeState, OdomBridge};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::sync::{SensorPacket, VioInputs};
@@ -53,6 +62,9 @@ use visloc_ros2::tracking::{TrackingConfig, TrackingMonitor, TrackingVerdict};
 use visloc_ros2::vio::{
     imu_sample_from_msg, odometry_msg, pose_stamped_msg, rebase, tf_msg, PathAccumulator,
     TrackedFrame, VioCore, VioError, VioEstimate, VioFrames, VioFrontend, VioOptions,
+};
+use visloc_ros2::vio_external::{
+    map_prior_factor, wheel_velocity_factor, ExternalNoise, FrameStamps,
 };
 use visloc_ros2::vio_mapper::{
     map_pose_msg, map_to_odom_transform, new_online_mapper, MapperParams, MapperSession,
@@ -108,12 +120,22 @@ PARAMETERS (--name value  or  -p name:=value):
                          frame; its child frame is placed relative to the output
                          frame by /tf_static; needs the lost-tracking monitor;
                          not with the mapper (empty: off)                        []
+  wheel_velocity         also feed wheel_odom_topic's twist into the estimator as a
+                         body velocity on every frame (wheel-inertial odometry);
+                         its child frame is placed relative to body_frame by
+                         /tf_static; does not need the lost-tracking monitor     [false]
+  wheel_velocity_stddev  1-sigma of that velocity (m/s), plus 2% of the speed    [0.02]
+  map_prior              feed each fix visloc_map_localize_node used (odom_fix) into
+                         the estimator as a pose prior on its frame               [false]
+  map_prior_stddev_m     1-sigma position of such a prior (m)                     [0.03]
+  map_prior_stddev_deg   1-sigma orientation of such a prior (deg)                [1.0]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
 TOPICS (remap with --remap from=to or -r from:=to):
   in : left/image_raw, right/image_raw (sensor_msgs/Image), imu (sensor_msgs/Imu),
-       /tf_static (tf2_msgs/TFMessage, with base_frame)
+       /tf_static (tf2_msgs/TFMessage, with base_frame), with map_prior: odom_fix
+       (geometry_msgs/PoseWithCovarianceStamped, from visloc_map_localize_node)
   out: odom (nav_msgs/Odometry), pose (geometry_msgs/PoseStamped),
        path (nav_msgs/Path), /tf (tf2_msgs/TFMessage),
        odom_reset (std_msgs/Int32, estimator resets so far; transient-local)
@@ -326,8 +348,19 @@ fn run() -> Result<(), String> {
     let wheel_odom_topic = args
         .string("wheel_odom_topic")
         .filter(|topic| !topic.is_empty());
+    let wheel_velocity = args.flag("wheel_velocity", false)?;
+    let map_prior = args.flag("map_prior", false)?;
+    let external_noise = ExternalNoise {
+        fix_position_m: args.parsed_or("map_prior_stddev_m", 0.03f64)?,
+        fix_orientation_rad: args.parsed_or("map_prior_stddev_deg", 1.0f64)?.to_radians(),
+        velocity_m_s: args.parsed_or("wheel_velocity_stddev", 0.02f64)?,
+        ..ExternalNoise::default()
+    };
+    if wheel_velocity && wheel_odom_topic.is_none() {
+        return Err("wheel_velocity needs wheel_odom_topic".into());
+    }
     if wheel_odom_topic.is_some() {
-        if !tracking.enabled() {
+        if !tracking.enabled() && !wheel_velocity {
             return Err(
                 "wheel_odom_topic needs the lost-tracking monitor (lost_min_observations \
                  or lost_max_speed)"
@@ -362,6 +395,7 @@ fn run() -> Result<(), String> {
     let map_pose_topic = args.topic("map_pose");
     let map_path_topic = args.topic("map_path");
     let odom_reset_topic = args.topic("odom_reset");
+    let odom_fix_topic = args.topic("odom_fix");
     args.finish()?;
 
     let read = |path: &str| {
@@ -465,6 +499,20 @@ fn run() -> Result<(), String> {
         })
         .transpose()?;
 
+    // Map fixes in the published odometry frame: stamp and output-frame pose.
+    let (fix_tx, fix_rx) = mpsc::channel::<(i64, visloc_core::geometry::SE3)>();
+    if map_prior {
+        let fix_sub =
+            ros.subscription::<PoseWithCovarianceStamped>(&odom_fix_topic, sensor_qos(20))?;
+        spawn_receiver(
+            "odom-fix-rx",
+            fix_sub,
+            move |msg: PoseWithCovarianceStamped| {
+                let _ = fix_tx.send((msg.header.stamp.to_nanos(), se3_from_ros(&msg.pose.pose)));
+            },
+        )?;
+        eprintln!("visloc_vio_node: map fixes on {odom_fix_topic} go into the estimator");
+    }
     let mut tf_static = (base_frame.is_some() || wheel_odom_topic.is_some())
         .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
         .transpose()?;
@@ -631,6 +679,8 @@ fn run() -> Result<(), String> {
     let mut bridge = OdomBridge::new();
     let mut wheel_published = 0u64;
     let mut outages = 0u32;
+    let mut frame_stamps = FrameStamps::new(64);
+    let (mut priors_used, mut priors_missed, mut velocities_used) = (0u64, 0u64, 0u64);
     // While tracking is lost, publishes the wheel-bridged pose of each new
     // wheel odometry message.
     let mut publish_bridged = |bridge: &mut OdomBridge, path: &mut PathAccumulator| {
@@ -705,7 +755,7 @@ fn run() -> Result<(), String> {
                 "visloc_vio_node: processed={processed} pairs={} dropped_behind={} \
                  sync_dropped={} imu_out_of_order={} imu_evicted={} \
                  frontend={frontend_time} estimator={} (avg/max) observations={} resets={resets} \
-                 held={held}{}{}",
+                 held={held} map_priors={priors_used}/{} wheel_velocities={velocities_used}{}{}",
                 stats.pairs,
                 stats.frames_dropped_behind,
                 stats.sync_dropped,
@@ -713,6 +763,7 @@ fn run() -> Result<(), String> {
                 stats.imu_evicted,
                 estimator_time.take(),
                 observations.take(),
+                priors_used + priors_missed,
                 if monitor.is_tracking() {
                     ""
                 } else {
@@ -768,6 +819,60 @@ fn run() -> Result<(), String> {
                 processed += 1;
                 if processed == 1 {
                     eprintln!("visloc_vio_node: first pose published");
+                }
+                frame_stamps.record(estimate.header_stamp_ns, estimate.frame_id);
+                if wheel_velocity {
+                    let sample = wheel_latest
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let imu_from_wheel = sample.as_ref().and_then(|sample| {
+                        transforms
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .lookup(&frames.body_frame, &sample.child_frame)
+                    });
+                    if let (Some(sample), Some(imu_from_wheel), Some(angular)) =
+                        (sample, imu_from_wheel, estimate.angular_velocity_body)
+                    {
+                        // Only a recent twist describes this frame.
+                        if (sample.stamp_ns - estimate.header_stamp_ns).abs() <= 100_000_000 {
+                            backend.add_external_factor(wheel_velocity_factor(
+                                estimate.frame_id,
+                                imu_from_wheel,
+                                angular,
+                                sample.velocity_body,
+                                &external_noise,
+                            ));
+                            velocities_used += 1;
+                        }
+                    }
+                }
+                if map_prior {
+                    let out_from_imu = match &base_frame {
+                        None => Some(visloc_core::geometry::SE3::identity()),
+                        Some(base) => transforms
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .lookup(&frames.body_frame, base)
+                            .map(|imu_from_base| imu_from_base.inverse()),
+                    };
+                    let odom_from_vio = bridge.offset().clone();
+                    for (stamp_ns, odom_from_out) in fix_rx.try_iter() {
+                        match (frame_stamps.frame_at(stamp_ns, 1_000_000), &out_from_imu) {
+                            (Some(frame_id), Some(out_from_imu)) => {
+                                backend.add_external_factor(map_prior_factor(
+                                    frame_id,
+                                    &odom_from_out,
+                                    out_from_imu,
+                                    &odom_from_vio,
+                                    &external_noise,
+                                ));
+                                priors_used += 1;
+                            }
+                            _ => priors_missed += 1,
+                        }
+                    }
                 }
                 if let Some(session) = mapper.as_mut() {
                     // The IMU pose, as the mapper's keyframe poses are.
@@ -874,6 +979,9 @@ fn run() -> Result<(), String> {
                     // frame of the new generation.
                     generation = shared.restart_stream();
                     backend.reset()?;
+                    frame_stamps.clear();
+                    // Fixes of the old VIO frame no longer apply.
+                    priors_missed += fix_rx.try_iter().count() as u64;
                     monitor.restart();
                     resets += 1;
                     let wheel_pose = wheel_odom_topic.as_ref().and_then(|_| {

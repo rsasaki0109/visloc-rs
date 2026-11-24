@@ -67,6 +67,7 @@ frame; see [the online mapper](#online-mapper-mappertrue) below.
 | `map_pose` | `geometry_msgs/PoseStamped` | out | only with `mapper`: the same pose in `map_frame`, loop-closure corrected |
 | `map_path` | `nav_msgs/Path` | out | only with `mapper` and `publish_path`: last `path_max_length` `map_pose`s |
 | `odom_reset` | `std_msgs/Int32` | out | number of estimator resets so far (0 at start), transient-local; each reset starts a new `odom` frame, and `visloc_map_localize_node` relocalizes on it |
+| `odom_fix` | `geometry_msgs/PoseWithCovarianceStamped` | in | only with `map_prior`: `visloc_map_localize_node`'s used fixes, as poses in `odom` ([map fixes and wheel speed in the VIO](#map-fixes-and-wheel-speed-inside-the-vio)) |
 
 Output stamps are the left image's header stamps.
 
@@ -99,6 +100,11 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `lost_after_s` | `0.5` | weak tracking for this long is lost tracking |
 | `recover_after_s` | `1.0` | after a reset, tracking must hold this long before anything is published again |
 | `lost_max_speed` | `0` (off) | an estimated speed above this (m/s) is lost tracking at once |
+| `wheel_odom_topic` | empty | a wheel odometry (`nav_msgs/Odometry`): carries the outputs through lost tracking ([on a ground robot](#on-a-ground-robot)), and with `wheel_velocity` feeds the estimator |
+| `wheel_velocity` | `false` | feed `wheel_odom_topic`'s twist into the estimator as a body velocity on every frame; its `child_frame_id` is placed relative to `body_frame` by `/tf_static` |
+| `wheel_velocity_stddev` | `0.02` m/s | 1-sigma of that velocity, plus 2% of the speed |
+| `map_prior` | `false` | feed each fix `visloc_map_localize_node` used (`odom_fix`) into the estimator as a pose prior on its frame |
+| `map_prior_stddev_m`, `map_prior_stddev_deg` | `0.03`, `1.0` | 1-sigma of such a prior |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -448,6 +454,7 @@ measurements behind the defaults.
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once the correction is set |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once the correction is set (not `pose`, which `visloc_vio_node` publishes) |
 | `map_fix` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose of each image localized with `min_inliers`, stamped with the image (for `visloc_wheel_calibration_node`) |
+| `odom_fix` | `geometry_msgs/PoseWithCovarianceStamped` | out | each fix the correction used (initialized from, accepted, reset to), as the body pose it implies in the odometry frame, stamped with the image; for `visloc_vio_node`'s `map_prior` |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, `map_pose` (whether the odometry has one yet), seconds/metres since the last fix, pending fixes |
 | `map_cloud` | `sensor_msgs/PointCloud2` | out | the map's landmarks in `map_frame`, published once at start, transient-local (a late subscriber such as RViz still gets it) |
 
@@ -518,6 +525,47 @@ player and the map node. There the node drops frames instead of falling
 behind. A dropped frame gets no pose, and drops did not change the VIO's
 accuracy. With the VIO node alone at 0.3x, the latency is about 47 ms: the
 frontend, the estimator and the DDS transport.
+
+### Map fixes and wheel speed inside the VIO
+
+By default the map only corrects the VIO's output (`map -> odom`); the VIO
+itself never hears of it. Two options of `visloc_vio_node` feed the
+estimator directly ([`visloc_ros2::vio_external`](src/vio_external.rs)):
+
+- `map_prior:=true` subscribes `odom_fix` and puts each used fix into the
+  VIO's sliding window as a pose prior on the frame of its stamp, so the
+  map also corrects the VIO's velocity and biases;
+- `wheel_velocity:=true` (with `wheel_odom_topic`) puts the wheel
+  odometry's twist into the window as a body velocity on every frame.
+
+```sh
+visloc_vio_node --calibration ... --config ... --map_prior true \
+  --wheel_odom_topic /wheel/odom --wheel_velocity true   # + the usual remaps
+visloc_map_localize_node --map runs/o11_map --remap image=/cam0/image_raw
+```
+
+A fix arrives after the VIO has processed its frame (localization takes
+tens of milliseconds). It is used if that frame is still in the VIO's
+window, which on these runs held for every fix; the status line counts
+`map_priors=used/received`. Measured on OpenLORIS-Scene office (wheeled robot, maps from the
+scaled calibration of `docs/openloris_map_localization.md`), replayed over
+DDS at 0.2x by `examples/euroc_dds_replay.rs` and scored like the offline
+runs in `docs/odometry_fusion.md`:
+
+| query → map | default | `map_prior` + `wheel_velocity` |
+|---|---|---|
+| office1-6 → office1-1 | 99.8%, 2.25 / 3.5 cm | 99.8%, **1.66 / 2.6 cm** |
+| office1-7 → office1-2 | 99.3%, 6.38 / 12.7 cm | 99.7%, **4.50 / 9.8 cm** |
+
+```sh
+# Replay a converted sequence over DDS and record map_pose (no ROS 2 needed)
+cargo run --release --example euroc_dds_replay -- --euroc-dir data/office1-6 \
+  --domain-id 42 --rate 0.2 --odometry data/office1-6/odom.tum \
+  --imu-from-body -0.0314,-0.8938,-0.2587,-0.5059,-0.5042,-0.4958,0.4940 \
+  --record-map-pose map_pose.tum
+# ... with the two nodes on the same domain, remapped to cam0/image_raw,
+# cam1/image_raw, imu0 and wheel/odom
+```
 
 ## Launch file, URDF and RViz
 

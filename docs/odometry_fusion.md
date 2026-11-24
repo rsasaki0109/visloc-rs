@@ -120,9 +120,11 @@ RMSE / max of every frame's map pose, in cm.
   on the Basalt estimator (`BasaltVioEstimator::add_external_factor`).
   `--vio-map-prior --vio-wheel-velocity` is the recommended setup for a
   wheeled robot with a VIO. They are opt-in, so the Basalt port's default
-  output is unchanged. The ROS 2 nodes do not use them yet:
-  `visloc_vio_node` and `visloc_map_localize_node` run as separate
-  processes, and the fixes would have to flow back to the VIO node.
+  output is unchanged. On ROS 2 they are `visloc_vio_node`'s `map_prior`
+  (fed by `visloc_map_localize_node`'s new `odom_fix` topic) and
+  `wheel_velocity`. Replayed over DDS, they lower office1-6's error from
+  2.25 to 1.66 cm and office1-7's from 6.38 to 4.50 cm
+  ([ROS 2 README](../ros2/visloc-ros2/README.md#map-fixes-and-wheel-speed-inside-the-vio)).
 - **B** (`MapFusion`, `--fusion`) is for robots with more than one odometry,
   to keep a map pose through a VIO outage. It is not the default.
 - **D** needs no new input. Any gravity-aligned 6-DoF odometry (TUM file, or

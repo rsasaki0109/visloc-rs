@@ -343,6 +343,14 @@ impl VioBackend {
             .1;
         Ok(())
     }
+
+    /// Queues a factor from outside the VIO (a map fix's pose prior, a
+    /// wheel odometry's body velocity) on frame `factor.frame_id`, an
+    /// estimate's [`VioEstimate::frame_id`]. It enters the solves while that
+    /// frame is in the estimator's window and is dropped after.
+    pub fn add_external_factor(&mut self, factor: visloc_basalt::vio::ExternalFactor) {
+        self.stage.add_external_factor(factor);
+    }
 }
 
 /// One frame tracked by [`VioFrontend`], bound for [`VioBackend`].

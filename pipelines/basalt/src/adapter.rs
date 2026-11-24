@@ -556,6 +556,11 @@ impl BasaltVioEstimatorStage {
             imu_count,
         })
     }
+    /// Queues a factor from outside the VIO on an active frame (see
+    /// [`BasaltVioEstimator::add_external_factor`]).
+    pub fn add_external_factor(&mut self, factor: crate::vio::ExternalFactor) {
+        self.estimator.add_external_factor(factor);
+    }
 }
 
 /// Builds the Basalt VIO estimator from the pinned calibration/config
