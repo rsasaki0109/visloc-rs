@@ -153,7 +153,7 @@ MX0, MX1, MY0, MY1 = path[:, 0].min() - 3, path[:, 0].max() + 3, path[:, 1].min(
 MW = 420; MPPM = MW / (MX1 - MX0); MH = int((MY1 - MY0) * MPPM)
 mto = lambda x, y: ((x - MX0) * MPPM, (MY1 - y) * MPPM)
 
-cam_yaw = None; back_now = None; trail = []; n = 0
+cam_yaw = None; trail = []; n = 0
 for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     if n >= LIMIT: break
     for tt in np.arange(max(NT[0], t - STEP) if trail else NT[0], t, 0.25):  # trail from the start
@@ -169,26 +169,14 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     R_wc = cam_axes(cam_yaw, PITCH); R_cw = R_wc.T
     if SPLAT:
         people_at(t)
-    # The camera follows BACK m behind; something solid between it and the robot (a sign,
-    # a trunk) would fill the frame, so then it moves in until the robot is in view.
-    back_now = BACK if back_now is None else back_now + 0.15 * (BACK - back_now)
-    for attempt in range(3):
-        k_ = back_now / BACK
-        c_w = np.array([x - back_now * math.cos(cam_yaw), y - back_now * math.sin(cam_yaw), gz(x, y) + UP * (0.5 + 0.5 * k_)])
-        if SPLAT:
-            # the people, except those brushing past the chase camera itself
-            clear = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1]) > 2.0
-            buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7, CROWD.splats(c_w, gz, max_m=40.0, only=clear))
-        else:
-            buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7)
-        depth = np.frombuffer(buf[W * H * 3:], '<f4').reshape(H, W)
-        rc = (np.array([x, y, z0 + 0.35]) - c_w) @ R_wc       # the robot's body, in the camera
-        u_, v_ = int(rc[0] / rc[2] * FX + W / 2), int(rc[1] / rc[2] * FX + H / 2)
-        win = depth[max(v_ - 6, 0):v_ + 7, max(u_ - 6, 0):u_ + 7]
-        win = win[win > 0]
-        if attempt == 2 or not len(win) or np.median(win) > rc[2] - 0.5:
-            break
-        back_now = max(0.9, back_now * 0.5)
+    c_w = np.array([x - BACK * math.cos(cam_yaw), y - BACK * math.sin(cam_yaw), gz(x, y) + UP])
+    if SPLAT:
+        # the people, except those brushing past the chase camera itself
+        clear = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1]) > 2.0
+        buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7, CROWD.splats(c_w, gz, max_m=40.0, only=clear))
+    else:
+        buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7)
+    depth = np.frombuffer(buf[W * H * 3:], '<f4').reshape(H, W)
     rgb = np.frombuffer(buf[:W * H * 3], np.uint8).reshape(H, W, 3).astype(float)
     # shadow
     rgb = robot_model.shadow(rgb, project, (x, y, yaw), z0, R_wc, c_w)
