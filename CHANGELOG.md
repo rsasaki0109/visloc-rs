@@ -4,6 +4,26 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **Map fixes and wheel speed inside the VIO.** The Basalt estimator takes
+  external factors (`BasaltVioEstimator::add_external_factor`: a pose
+  prior, a body velocity) in its window; none are queued by default, so its
+  output is unchanged. `basalt_euroc_localize_demo --vio-map-prior
+  --vio-wheel-velocity` and the ROS 2 `visloc_vio_node`'s `map_prior` /
+  `wheel_velocity` (fed by `visloc_map_localize_node`'s new `odom_fix`)
+  use them. On OpenLORIS-Scene office the map error falls 8-22% with a
+  stereo VIO, and a monocular VIO (`--mono`) with them matches the stereo
+  one (1.40-5.82 cm against 8-50 cm without). See
+  `docs/odometry_fusion.md`.
+- `visloc_localization::MapFusion` (`--fusion`): a sliding-window pose
+  graph over several odometries and the map fixes, which keeps a map pose
+  through a VIO outage when a second odometry (wheels, legs) is fused.
+- `scripts/synthesize_leg_odometry.py`, a synthetic legged odometry for
+  testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
+  and recorder for running the ROS 2 nodes on recorded data without ROS 2.
+- `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+
 ## 0.5.0 - 2026-11-24
 
 ### Added

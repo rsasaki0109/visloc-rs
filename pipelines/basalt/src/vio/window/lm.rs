@@ -94,6 +94,7 @@ impl WindowProblem {
                 factors.push(factor);
             }
         }
+        factors.extend(self.external_factors(|index| values.block_nav(index)));
         let prior_prefix = if self.prior.is_some() {
             1
         } else if self
@@ -303,6 +304,7 @@ impl LmProblem for WindowProblem {
                 factors.push(factor);
             }
         }
+        factors.extend(self.external_factors(|index| self.block_nav(state, index)));
         // `LinearizationAbsQR::linearizeProblem()` accumulates visual landmark
         // blocks first, then IMU blocks, and finally the marginal-prior error.
         // Rust's factor row stack keeps the prior row first because it must

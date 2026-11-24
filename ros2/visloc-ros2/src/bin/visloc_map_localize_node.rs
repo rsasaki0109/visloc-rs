@@ -8,8 +8,9 @@
 //! and publishes `/tf` (`map -> odom`, REP-105),
 //! `map_pose` (the body pose in the map,
 //! `geometry_msgs/PoseWithCovarianceStamped`; not `pose`, which
-//! `visloc_vio_node` already publishes), `map_fix` (each localization) and
-//! `/diagnostics`. Run with `--help` for parameters.
+//! `visloc_vio_node` already publishes), `map_fix` (each localization),
+//! `odom_fix` (each fix the correction used, in the odometry frame, for
+//! `visloc_vio_node`'s `map_prior`) and `/diagnostics`. Run with `--help` for parameters.
 
 use std::path::PathBuf;
 use std::process;
@@ -23,8 +24,8 @@ use visloc_ros2::dds::{
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_fix_msg, map_pose_msg,
-    map_to_odom_tf, se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions, MapLocalizer,
-    Matching, OdomCorrector, OdomLookup,
+    map_to_odom_tf, odom_fix_msg, se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions,
+    MapLocalizer, Matching, OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
     DiagnosticArray, Header, Image, Int32, Odometry, PointCloud2, PoseWithCovarianceStamped,
@@ -107,7 +108,9 @@ TOPICS (remap with --remap from=to or -r from:=to):
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, after two agreeing fixes), map_fix (geometry_msgs/
        PoseWithCovarianceStamped, the body pose of each image localized with min_inliers,
-       e.g. for visloc_wheel_calibration_node), /diagnostics (diagnostic_msgs/DiagnosticArray),
+       e.g. for visloc_wheel_calibration_node), odom_fix (geometry_msgs/
+       PoseWithCovarianceStamped, each fix the correction used, as the body pose it
+       implies in the odometry frame; for visloc_vio_node's map_prior), /diagnostics (diagnostic_msgs/DiagnosticArray),
        map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local)
 ";
 
@@ -204,6 +207,7 @@ fn run() -> Result<(), String> {
     let tf_static_topic = args.topic("/tf_static");
     let pose_topic = args.topic("map_pose");
     let fix_topic = args.topic("map_fix");
+    let odom_fix_topic = args.topic("odom_fix");
     let diagnostics_topic = args.topic("/diagnostics");
     let map_cloud_topic = args.topic("map_cloud");
     let odom_reset_topic = args.topic("odom_reset");
@@ -245,6 +249,8 @@ fn run() -> Result<(), String> {
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let fix_pub = ros.publisher::<PoseWithCovarianceStamped>(&fix_topic, output_qos(10))?;
+    let odom_fix_pub =
+        ros.publisher::<PoseWithCovarianceStamped>(&odom_fix_topic, output_qos(10))?;
     let diagnostics_pub = ros.publisher::<DiagnosticArray>(&diagnostics_topic, output_qos(10))?;
     // Kept by the transient-local writer for subscribers that join later.
     let _map_cloud_pub = match map_cloud {
@@ -302,12 +308,22 @@ fn run() -> Result<(), String> {
                 }
             }
             let stamp_ns = msg.header.stamp.to_nanos();
-            let (events, map_pose) = core
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .add_odom(stamp_ns, se3_from_ros(&msg.pose.pose));
+            let (events, map_pose, odom_fixes) = {
+                let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
+                let (events, map_pose) = core.add_odom(stamp_ns, se3_from_ros(&msg.pose.pose));
+                // Also the fixes the image thread applied since the last
+                // odometry message: at most one message late.
+                (events, map_pose, core.take_odom_fixes())
+            };
             odom_arrived.notify_all();
             log_events(&events);
+            for (fix_ns, odom_from_body) in &odom_fixes {
+                publish_logged(
+                    &odom_fix_pub,
+                    odom_fix_msg(*fix_ns, odom_from_body, &msg.header.frame_id, &options),
+                    "odom_fix",
+                );
+            }
             if let Some(map_pose) = map_pose {
                 if publish_tf {
                     publish_logged(

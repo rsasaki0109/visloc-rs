@@ -809,6 +809,10 @@ pub struct OdomCorrector {
     /// `carried` expressed for the new odometry frame: map from odom, and
     /// the odometry position it was taken at.
     reset_guess: Option<(SE3, Vector3<f64>)>,
+    /// Fixes the correction used, as the body pose each implies in the
+    /// odometry frame (through the correction right after it): stamp and
+    /// pose. Drained by [`Self::take_odom_fixes`].
+    odom_fixes: Vec<(i64, SE3)>,
 }
 
 impl OdomCorrector {
@@ -825,7 +829,17 @@ impl OdomCorrector {
             fresh_m: options.projection_fresh_m,
             carried: None,
             reset_guess: None,
+            odom_fixes: Vec::new(),
         }
+    }
+
+    /// The fixes the correction used (initialized from, accepted, or reset
+    /// to) since the last call, each as the body pose it implies in the
+    /// odometry frame, oldest first. Fed back into a VIO as pose priors
+    /// (`visloc_vio_node`'s `map_prior`), they pull the VIO itself toward
+    /// the map.
+    pub fn take_odom_fixes(&mut self) -> Vec<(i64, SE3)> {
+        std::mem::take(&mut self.odom_fixes)
     }
 
     /// Starts over after the odometry restarted in a new frame (a VIO
@@ -990,6 +1004,15 @@ impl OdomCorrector {
                         self.correction
                             .add_fix(stamp_ns, &map_from_body, &odom_from_body)
                     };
+                    if matches!(
+                        outcome,
+                        FixOutcome::Initialized | FixOutcome::Accepted | FixOutcome::Reset
+                    ) {
+                        if let Some(map_from_odom) = self.correction.map_from_odom() {
+                            self.odom_fixes
+                                .push((stamp_ns, map_from_odom.inverse().compose(&map_from_body)));
+                        }
+                    }
                     events.push(FixEvent::Applied { stamp_ns, outcome });
                 }
             }
@@ -1100,6 +1123,19 @@ pub fn map_fix_msg(
             ),
         },
     }
+}
+
+/// A fix the correction used, as the body pose it implies in the odometry
+/// frame (`OdomCorrector::take_odom_fixes`), for `odom_fix`.
+pub fn odom_fix_msg(
+    stamp_ns: i64,
+    odom_from_body: &SE3,
+    odom_frame: &str,
+    options: &MapLocalizeOptions,
+) -> PoseWithCovarianceStamped {
+    let mut msg = map_fix_msg(stamp_ns, odom_from_body, odom_frame, options);
+    msg.header.frame_id = odom_frame.into();
+    msg
 }
 
 pub fn fix_outcome_name(outcome: FixOutcome) -> &'static str {
@@ -1218,6 +1254,35 @@ mod tests {
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.7),
             Vector3::new(2.0, -1.0, 0.3),
         )
+    }
+
+    /// Used fixes come back as odometry-frame body poses, once each; pending
+    /// and rejected ones do not.
+    #[test]
+    fn used_fixes_come_back_in_the_odometry_frame() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let odom = |i: usize| pose(i as f64 * 0.1, i as f64 * 0.05);
+        for i in 0..4 {
+            core.add_odom(i as i64 * 50 * MS, odom(i));
+            core.add_fix(i as i64 * 50 * MS, offset().compose(&odom(i)));
+        }
+        // An outlier 1 m off.
+        core.add_odom(200 * MS, odom(4));
+        let mut wrong = offset().compose(&odom(4));
+        wrong.translation.x += 1.0;
+        core.add_fix(200 * MS, wrong);
+        let fixes = core.take_odom_fixes();
+        // The first fix is pending; the next three initialize and are accepted.
+        assert_eq!(
+            fixes.iter().map(|(stamp, _)| *stamp).collect::<Vec<_>>(),
+            [50 * MS, 100 * MS, 150 * MS]
+        );
+        for (stamp, odom_from_body) in &fixes {
+            let expected = odom((*stamp / (50 * MS)) as usize);
+            assert!((odom_from_body.translation - expected.translation).norm() < 1e-9);
+            assert!(odom_from_body.rotation.angle_to(&expected.rotation) < 1e-9);
+        }
+        assert!(core.take_odom_fixes().is_empty());
     }
 
     #[test]

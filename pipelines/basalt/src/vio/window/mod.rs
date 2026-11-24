@@ -55,6 +55,7 @@ use visloc_core::geometry::SE3;
 
 mod diagnostic_env;
 mod diagnostics;
+mod external;
 mod imu;
 mod iteration_trace;
 mod lm;
@@ -70,6 +71,7 @@ mod visual;
 use super::aom;
 pub(crate) use diagnostic_env::*;
 use diagnostics::*;
+pub use external::*;
 use imu::*;
 use iteration_trace::*;
 use lm_token::*;
@@ -440,6 +442,9 @@ pub struct WindowProblem {
     /// Visual-only (no IMU) gauge rows; `None` on every IMU path, which then
     /// builds exactly the factors it always did.
     pub visual_only: Option<VisualOnlyPrior>,
+    /// Pose priors and body velocities from outside the VIO (not upstream;
+    /// empty unless a caller queues them on the estimator).
+    pub external: Vec<WindowExternalFactor>,
 }
 
 /// Visual-only monocular mode (`config.vio_visual_only`, not upstream; see

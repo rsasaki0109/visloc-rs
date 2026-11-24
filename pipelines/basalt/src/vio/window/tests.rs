@@ -875,6 +875,7 @@ fn test_window(states: Vec<WindowState>, landmarks: Vec<WindowLandmark>) -> Wind
         scalar_mode: ScalarMode::UpstreamF32,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     }
 }
 
@@ -2254,6 +2255,7 @@ fn mixed_pose_then_state_layout_is_six_plus_fifteen() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     assert_eq!(problem.state_dof(), 36);
     let x = problem.initial_state();
@@ -2294,6 +2296,7 @@ fn lm_pose_step_matches_upstream_additive_translation_left_rotation() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let mut step = DVector::zeros(NAV_STATE_DOF);
     step[0] = 0.3;
@@ -2387,6 +2390,7 @@ fn upstream_f32_pose_apply_reconstructs_from_linearized_delta() {
         scalar_mode: ScalarMode::UpstreamF32,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let second_increment = DVector::from_column_slice(&[
         0.8693182_f64,
@@ -2614,6 +2618,7 @@ fn upstream_f32_frame3_iter0_apply_step_matches_native_accepted_state() {
         scalar_mode: ScalarMode::UpstreamF32,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let step = DVector::from_iterator(NAV_STATE_DOF, increment_bits.into_iter().map(f64_from_bits));
     let (_, updated_states) = problem.apply_step_full(&problem.initial_state(), &step);
@@ -2796,6 +2801,7 @@ fn upstream_f32_visual_get_pose_reconstructs_native_linearized_current() {
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
             visual_only: None,
+            external: Vec::new(),
         }
     };
     let raw_pose = pose_from_bits(
@@ -3308,6 +3314,7 @@ fn imu_residual_has_cross_state_jacobian_blocks() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let x = problem.initial_state();
     let factors = problem.linearize(&x).unwrap().factors;
@@ -3344,6 +3351,7 @@ fn initial_prior_matches_basalt_pose_yaw_and_bias_columns() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let factors = problem.linearize(&problem.initial_state()).unwrap().factors;
     let anchor = factors.iter().find(|factor| factor.rows() == 15).unwrap();
@@ -3401,6 +3409,7 @@ fn window_imu_rows_are_whitened_and_bias_walk_uses_both_state_blocks() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let initial = problem.initial_state();
     let linearization = problem.linearize(&initial).unwrap();
@@ -3601,6 +3610,7 @@ fn grouped_landmark_qr_backsubstitutes_a_point_update() {
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let before = problem.landmarks[0].direction.bearing() / problem.landmarks[0].inverse_distance;
     let initial = problem.initial_state();
@@ -3760,6 +3770,7 @@ fn same_timestamp_stereo_rows_accumulate_both_pose_blocks() {
         scalar_mode: ScalarMode::UpstreamF32,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let factor = problem
         .linearize(&problem.initial_state())
@@ -3854,6 +3865,7 @@ fn pre_marginal_aom_holes_keep_native_zero_rows_in_observation_order() {
         scalar_mode: ScalarMode::UpstreamF32,
         factor_config: FactorConfig::default(),
         visual_only: None,
+        external: Vec::new(),
     };
     let state = problem.initial_state();
     let factor = problem
@@ -4654,5 +4666,68 @@ mod m11_prior_reanchor_rhs_schedule_20260908 {
                 .to_bits(),
             0x28800000
         );
+    }
+}
+
+/// The external factors' Jacobians match finite differences of their
+/// residuals on the window's own increment chart.
+#[test]
+fn external_factor_jacobians_match_finite_differences() {
+    let mut states = vec![nav(0, 0.0), nav(1, 0.25), nav(2, 0.5)];
+    for (index, state) in states.iter_mut().enumerate() {
+        let rotation =
+            UnitQuaternion::from_euler_angles(0.1 * index as f64, -0.2, 0.3 + 0.1 * index as f64);
+        state.nav.imu_to_world.rotation = rotation;
+        state.nav.velocity_world_m_s = Vector3::new(0.4, -0.1 * index as f64, 0.05);
+        state.stored_current_nav = state.nav.clone();
+        state.linearized_nav = state.nav.clone();
+    }
+    let mut problem = test_window(states, Vec::new());
+    problem.scalar_mode = ScalarMode::ExtendedF64;
+    problem.external = vec![
+        WindowExternalFactor {
+            block_index: 1,
+            measurement: ExternalMeasurement::PosePrior {
+                world_from_imu: SE3::new(
+                    UnitQuaternion::from_euler_angles(0.05, -0.1, 0.5),
+                    Vector3::new(0.3, 0.1, -0.05),
+                ),
+                sqrt_information: nalgebra::Vector6::new(30.0, 30.0, 20.0, 50.0, 50.0, 40.0),
+                huber: 1e9,
+            },
+        },
+        WindowExternalFactor {
+            block_index: 2,
+            measurement: ExternalMeasurement::BodyVelocity {
+                imu_from_body: SE3::new(
+                    UnitQuaternion::from_euler_angles(1.5, 0.0, -1.5),
+                    Vector3::new(0.1, -0.2, 0.3),
+                ),
+                imu_angular_velocity: Vector3::new(0.2, -0.1, 0.4),
+                body_velocity: Vector3::new(0.5, 0.0, 0.0),
+                sqrt_information: Vector3::new(20.0, 30.0, 40.0),
+            },
+        },
+    ];
+    let state = problem.initial_state();
+    let factors = problem.external_factors(|index| problem.block_nav(&state, index));
+    assert_eq!(factors.len(), 2);
+    let epsilon = 1e-6;
+    for column in 0..problem.state_dof() {
+        let mut step = DVector::zeros(problem.state_dof());
+        step[column] = epsilon;
+        let trial = problem.trial_problem_with_step_owned(&state, &step);
+        let trial_state = trial.initial_state();
+        let moved = trial.external_factors(|index| trial.block_nav(&trial_state, index));
+        for (factor, moved) in factors.iter().zip(&moved) {
+            let numeric = (&moved.residual - &factor.residual) / epsilon;
+            let analytic = factor.state_jacobian.column(column);
+            assert!(
+                (numeric - analytic).amax() < 1e-4,
+                "column {column}: numeric {:?} analytic {:?}",
+                (&moved.residual - &factor.residual) / epsilon,
+                analytic
+            );
+        }
     }
 }

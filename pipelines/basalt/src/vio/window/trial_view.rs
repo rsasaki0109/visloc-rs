@@ -703,6 +703,7 @@ impl WindowTrialView<'_, '_> {
                 },
                 |prior| self.base.marginal_prior_reduced_cost_view(self, prior),
             );
+            let prior = prior + self.base.external_cost(|index| self.block_nav(index));
             let prior = if self.base.visual_only.is_some() {
                 prior
                     + self
