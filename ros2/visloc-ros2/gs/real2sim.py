@@ -260,6 +260,7 @@ def main():
                 make_scene(open_path=lane_walk, crossings=crossings if os.path.exists(crossings) else '')
                 sc = json.load(open(scene_json))
                 sc['goals'] = goals_along(np.loadtxt(lane_walk, ndmin=2), args.goals)
+                sc['walk'] = np.round(np.loadtxt(lane_walk, ndmin=2), 2).tolist()   # people walk along it
                 json.dump(sc, open(scene_json, 'w'), indent=1)
                 print(f"goals on the lane {sc['goals']}")
     step('map', build_map)

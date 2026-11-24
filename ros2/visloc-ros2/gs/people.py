@@ -609,14 +609,64 @@ def fit_road_lines(xyz, opacity, route, ground_z, road, max_turn_deg=30.0):
     return out
 
 
-def pavement_edges(xyz, rgb, opacity, route, ground_z, road, step=1.0, scan_m=4.0, warm=8.0):
-    """Where the pavement ends on the road side, along the route: [[s, edge]], edge the signed
-    offset (m, + left) of the kerb, from the splat's colours (warm flags, then grey or no
+def walk_offsets(route, walk, step=1.0, reach=4.0):
+    """[[s, offset]]: where the walk (the line the video was walked, the pavement's; scene.json's
+    'walk') is, as a signed offset (m, + left) from the route (start and goals joined by straight
+    lines), every `step` m along it. People walk along the walk, not the route: between goals
+    the route cuts corners, onto the road where the pavement bends away from it."""
+    route = np.asarray(route, float)[:, :2]
+    walk = np.asarray(walk, float)[:, :2]
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+    out = []
+    for s_ in np.arange(0.0, cum[-1] + 1e-9, step):
+        k = int(np.clip(np.searchsorted(cum, s_) - 1, 0, len(route) - 2))
+        d = route[k + 1] - route[k]
+        d /= max(np.linalg.norm(d), 1e-9)
+        p = route[k] + d * (s_ - cum[k])
+        n = np.array([-d[1], d[0]])
+        best = None
+        for a, b in zip(walk[:-1], walk[1:]):                  # the walk's segments the normal meets
+            e = b - a
+            den = n[0] * e[1] - n[1] * e[0]
+            if abs(den) < 1e-9:
+                continue
+            q = a - p
+            t = (q[0] * e[1] - q[1] * e[0]) / den               # along the normal
+            u = (q[0] * n[1] - q[1] * n[0]) / den               # along the segment
+            if 0.0 <= u <= 1.0 and abs(t) <= reach and (best is None or abs(t) < abs(best)):
+                best = t
+        out.append([round(float(s_), 2), round(float(best if best is not None else (out[-1][1] if out else 0.0)), 3)])
+    return out
+
+
+def kerb_spans(route, kerbs):
+    """[(s0, s1)]: the route's arc positions of each kerb pair (scene.json's 'kerbs')."""
+    route = np.asarray(route, float)[:, :2]
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+
+    def s_of(p):
+        best = None
+        for k in range(len(route) - 1):
+            d = route[k + 1] - route[k]
+            L = max(float(np.linalg.norm(d)), 1e-9)
+            t = float(np.clip((np.asarray(p) - route[k]) @ d / L, 0.0, L))
+            dist = float(np.linalg.norm(route[k] + d / L * t - p))
+            if best is None or dist < best[0]:
+                best = (dist, cum[k] + t)
+        return best[1]
+    return [tuple(sorted((round(s_of(k['a']), 2), round(s_of(k['b']), 2)))) for k in (kerbs or [])]
+
+
+def pavement_edges(xyz, rgb, opacity, route, ground_z, road, step=1.0, scan_m=4.0, warm=8.0, walk=None):
+    """Where the pavement ends on the road side, along the route: [[s, edge, side]], edge the
+    signed offset (m, + left) of the kerb and side +1 when the road is to the left (-1: right), from the splat's colours (warm flags, then grey or no
     ground: the asphalt is too plain to have many gaussians). Only where `road`
-    (estimate_road's stretches) has a road beside the route; people keep to this side of it."""
+    (estimate_road's stretches) has a road beside the route; people keep to this side of it.
+    walk (walk_offsets): the scan starts on the walk rather than the route."""
     from scipy.spatial import cKDTree  # noqa: PLC0415
     route = np.asarray(route, float)[:, :2]
     cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
+    walk = np.asarray(walk, float) if walk else None
     gz = np.array([ground_z(x, y) for x, y in xyz[:, :2]])
     m = (np.abs(xyz[:, 2] - gz) < 0.35) & (opacity > 0.2)
     P, C = xyz[m, :2], rgb[m] * 255.0
@@ -630,8 +680,10 @@ def pavement_edges(xyz, rgb, opacity, route, ground_z, road, step=1.0, scan_m=4.
             k = int(np.clip(np.searchsorted(cum, s_) - 1, 0, len(route) - 2))
             d = route[k + 1] - route[k]
             d /= max(np.linalg.norm(d), 1e-9)
-            p = route[k] + d * (s_ - cum[k])
-            n = side * np.array([-d[1], d[0]])
+            n0 = np.array([-d[1], d[0]])
+            base = float(np.interp(s_, walk[:, 0], walk[:, 1])) if walk is not None else 0.0
+            p = route[k] + d * (s_ - cum[k]) + base * n0
+            n = side * n0
             edge, missing = 0.0, 0
             for off in np.arange(0.0, scan_m + 1e-9, 0.25):
                 idx = tree.query_ball_point(p + off * n, 0.35)
@@ -644,7 +696,7 @@ def pavement_edges(xyz, rgb, opacity, route, ground_z, road, step=1.0, scan_m=4.
                 if c[0] - c[2] < warm:            # grey: the road
                     break
                 missing, edge = 0, off
-            out.append([round(float(s_), 2), round(float(side * (edge + 0.15)), 2)])
+            out.append([round(float(s_), 2), round(float(base + side * (edge + 0.15)), 2), side])
     return out
 
 
@@ -692,6 +744,7 @@ FOOT = {0: ((0.0, 0.0, RADIUS),),
         3: ((0.0, 0.0, RADIUS), (0.75, 0.0, 0.32)),
         4: ((-1.4, 0.0, 0.9), (0.0, 0.0, 0.9), (1.4, 0.0, 0.9))}
 LANE_HALF = 1.6     # a lane's centre from the road's centre line (m)
+NARROW = 0.9        # how far from the walk people go while crossing a street between kerbs (m)
 
 
 def _two_link(hip, foot, l1, l2, forward):
@@ -899,7 +952,7 @@ def draw_fast(fig, rgb, depth, pose, z0, R_wc, c_w, fx):
 class Crowd:
     def __init__(self, path, n, grid, seed=0, speed=1.1, yield_m=1.2, cyclists=0, cyclist_speed=4.0,
                  dog_walkers=0, strollers=0, pauses=True, cars=0, road_offset=None, car_speed=6.0, road_lines=None,
-                 crossing=False, pavement=None):
+                 crossing=False, pavement=None, walk=None, narrow=None):
         rng = np.random.default_rng(seed + 1000)
         self.path = np.asarray(path, float)[:, :2]
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
@@ -998,6 +1051,10 @@ class Crowd:
         self.lane_mix = self.dir.copy()
         # The kerb on the road side along the route (pavement_edges): people keep inside it.
         self.pavement = np.array(pavement, float) if pavement else None
+        self.walk = np.array(walk, float) if walk else None        # walk_offsets: people follow the walk
+        # [(s0, s1)]: where the walk crosses a street between kerbs (scene.json's 'kerbs'): people keep
+        # within NARROW m of the walk there, as on a crossing, not out into the side street
+        self.narrow = [tuple(r) for r in (narrow or [])]
         # Footprints (x along, y left, radius) per agent: by kind, but a car's from its own body,
         # seven overlapping circles as wide as it, so its sides have no waist to walk into.
         self.foot = []
@@ -1165,6 +1222,13 @@ class Crowd:
         seg = w * (self.lanes[1.0][k + 1] - self.lanes[1.0][k]) + (1 - w) * (self.lanes[-1.0][k + 1] - self.lanes[-1.0][k])
         return float((self.cum[k + 1] - self.cum[k]) / max(np.linalg.norm(seg), 1e-6))
 
+    def _base(self, s):
+        """The walk's offset from the route at s (0 without a walk): people's side offsets are
+        from it."""
+        if self.walk is None:
+            return 0.0
+        return float(np.interp(s, self.walk[:, 0], self.walk[:, 1]))
+
     def _pose(self, i, s, dodge, direction):
         """Where agent i would stand at arc position s with this dodge: (xy, yaw, normal)."""
         if self.kind[i] == 4:
@@ -1172,13 +1236,19 @@ class Crowd:
         p, d = self._at(np.array([s]))
         p, d = p[0], d[0]
         normal = np.array([-d[1], d[0]])
-        off = self.side[i] + dodge
+        base = self._base(s)
+        off = base + self.side[i] + dodge
+        if not self.cross[i] and any(a - 1.0 <= s <= b + 1.0 for a, b in self.narrow):
+            off = base + float(np.clip(off - base, -NARROW, NARROW))
         if self.pavement is not None and not self.cross[i] and \
                 self.pavement[0, 0] - 0.5 <= s <= self.pavement[-1, 0] + 0.5:
+            k = int(np.argmin(np.abs(self.pavement[:, 0] - s)))
             edge = float(np.interp(s, self.pavement[:, 0], self.pavement[:, 1]))
-            off = min(off, edge - RADIUS) if edge > 0 else max(off, edge + RADIUS)   # not onto the road
-        while self.kind[i] != 4 and not self.cross[i] and abs(off) > 0.05 and self.grid.hits(*(p + off * normal), RADIUS):
-            off *= 0.7                            # (cars keep to their lane: the road is off the grid)
+            left = self.pavement[k, 2] > 0 if self.pavement.shape[1] > 2 else edge > 0
+            off = min(off, edge - RADIUS) if left else max(off, edge + RADIUS)   # not onto the road
+        while self.kind[i] != 4 and not self.cross[i] and abs(off - base) > 0.05 and \
+                self.grid.hits(*(p + off * normal), RADIUS):
+            off = base + (off - base) * 0.7       # (cars keep to their lane: the road is off the grid)
         return p + off * normal, math.atan2(d[1] * direction, d[0] * direction), normal
 
     def _footprint(self, i, xy, yaw):
@@ -1306,7 +1376,7 @@ class Crowd:
             if self.cross[i]:                                  # crossing the road and back
                 side = self._road_side()
                 target = (self.lane(self.crossing_s, 1.0) + LANE_HALF + side * (LANE_HALF + 1.6)
-                          if self.cross[i] in (1, 2) else self.cross_home[i])
+                          - self._base(self.s[i]) if self.cross[i] in (1, 2) else self.cross_home[i])
                 step = float(np.clip(target - self.side[i], -1.2 * dt, 1.2 * dt))
                 self.side[i] += step
                 cross_want = abs(step) > 1e-6

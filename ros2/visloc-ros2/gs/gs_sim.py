@@ -167,6 +167,14 @@ class Sim(Node):
             if args.road:
                 road_offset = [tuple(r) for r in json.load(open(args.road))]
             road_lines = None
+            walk = None
+            if scene.get('walk'):                 # the line the video was walked: people follow it
+                from people import walk_offsets  # noqa: PLC0415
+                walk = walk_offsets(route, scene['walk'])
+                w = np.abs([v for _, v in walk])
+                self.get_logger().info(f'people: along the walk, {w.max():.1f} m from the route at most')
+            from people import kerb_spans  # noqa: PLC0415
+            narrow = kerb_spans(route, scene.get('kerbs'))      # crossing a street: people keep to the walk
             if args.cars:
                 from make_gs_scene import read_ply  # noqa: PLC0415
                 ply = read_ply(sp(scene['splat']))
@@ -199,16 +207,18 @@ class Sim(Node):
             if args.cars and not np.isscalar(road_offset):
                 # where the pavement ends on the road side: people keep off the road
                 from people import pavement_edges  # noqa: PLC0415
-                pavement = pavement_edges(xyz, rgb, opacity, route, self.ground_z, road_offset)
+                pavement = pavement_edges(xyz, rgb, opacity, route, self.ground_z, road_offset, walk=walk)
                 if pavement:
-                    e = np.abs([v for _, v in pavement])
+                    e = np.array([(v - (np.interp(s_, *np.array(walk).T) if walk else 0.0)) * side
+                                  for s_, v, side in pavement])
                     self.get_logger().info(f'people: pavement edge on the road side at s {pavement[0][0]:.0f}-'
-                                           f'{pavement[-1][0]:.0f}: {e.min():.2f}-{e.max():.2f} m (median {np.median(e):.2f})')
+                                           f'{pavement[-1][0]:.0f}: {e.min():.2f}-{e.max():.2f} m from the walk '
+                                           f'(median {np.median(e):.2f})')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
                                cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
-                               road_lines=road_lines, pavement=pavement,
+                               road_lines=road_lines, pavement=pavement, walk=walk, narrow=narrow,
                                crossing=args.crossing)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.radius = scene.get('robot_radius', 0.2)
@@ -244,6 +254,8 @@ class Sim(Node):
             json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
                        'road_lines': getattr(self.crowd, 'road_lines', None),
                        'pavement': None if self.crowd.pavement is None else self.crowd.pavement.tolist(),
+                       'walk': None if self.crowd.walk is None else self.crowd.walk.tolist(),
+                       'narrow': self.crowd.narrow,
                        'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 

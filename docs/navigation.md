@@ -894,6 +894,17 @@ keeping right.
   crossing do they step past it. Offline, 3 seeds × 400 s: from 20-40%
   of samples past the edge to none, and nobody stood still longer than
   before (24 s, at the crossing).
+- **Along the walk**: people walk along the line the 360 video was walked
+  (scene.json's `walk`, which `real2sim.py` writes from the lane's walk),
+  each at its own side offset from it (`people.walk_offsets`). Before,
+  they followed the straight lines between the goals, which at the side
+  street's mouth run 1.2-1.7 m on the road side of the pavement: people
+  walked lengthwise along the real zebra crossing in the splat. Between
+  the kerbs they keep within 0.9 m of the walk, as the robot does, rather
+  than out into the side street. Offline, 4 seeds × 400 s: nobody on the
+  road except on the crossing, at most 0.91 m from the walk between the
+  kerbs, nobody more than 5 cm into a car, and nobody still for longer
+  than 21 s.
 - **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
   smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
   on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They

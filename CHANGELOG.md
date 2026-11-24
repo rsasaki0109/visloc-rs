@@ -410,6 +410,12 @@ All notable changes to `visloc-rs` will be documented here.
   people and bikes, except on the crossing, stay on their side of it.
   Offline, 3 seeds × 400 s: from 20-40% of samples past the edge (up to
   1.6 m) to none, and nobody stood still longer than before (24 s).
+- 3DGS sim people walk along the walk (the line the 360 video was walked,
+  scene.json's new `walk`, written by `real2sim.py`), not along the
+  straight lines between the goals. At the side street's mouth those cut
+  1.2-1.7 m towards the road, so people walked along the real zebra
+  crossing in the splat. Between kerbs they keep within 0.9 m of the walk
+  (`people.kerb_spans`), as on a crossing, not out into the side street.
 
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it
