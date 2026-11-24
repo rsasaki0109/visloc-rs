@@ -116,19 +116,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3, Vector6};
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
 use visloc_basalt::mapper::features::detect_keypoints_mapping_with;
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, localization_camera_id, orb_descriptor_to_f32,
 };
 use visloc_basalt::pyramid::RawU16Image;
+use visloc_basalt::vio::{ExternalFactor, ExternalMeasurement};
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, OdomCorrection,
-    OdomCorrectionConfig,
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, MapFusion,
+    MapFusionConfig, OdomCorrection, OdomCorrectionConfig, OdometryNoise,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -187,6 +188,21 @@ struct Args {
     odometry: Option<PathBuf>,
     /// With `--odometry`: the body's pose in the IMU frame, `T_imu_body`.
     imu_from_body: Option<SE3>,
+    /// Fuse the odometries and the fixes in a sliding-window pose graph
+    /// (`visloc_localization::MapFusion`) instead of one rigid correction;
+    /// with both `--vio` and `--odometry`, both odometries are fused.
+    fusion: bool,
+    /// Drift model of `--odometry` in the fusion: wheel or legged.
+    odometry_noise: OdometryNoise,
+    /// Drop the VIO's poses between these two times (s from the first
+    /// frame), to test a VIO outage: `START:END`.
+    drop_vio_s: Option<(f64, f64)>,
+    /// Feed each fix the correction accepts back into the VIO window as a
+    /// pose prior (tight coupling of the map into the VIO).
+    vio_map_prior: bool,
+    /// Feed `--odometry`'s body velocity into the VIO window on every frame
+    /// (wheel-inertial odometry).
+    vio_wheel_velocity: bool,
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
     /// ... and every N-th until the odometry has a map pose,
@@ -226,7 +242,9 @@ impl Args {
          [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
-         [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
+         [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--fusion [--odometry-noise wheel|legged] \
+         [--drop-vio-s START:END]] [--vio-map-prior] [--vio-wheel-velocity] \
+         [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
@@ -276,6 +294,11 @@ impl Args {
             config: None,
             odometry: None,
             imu_from_body: None,
+            fusion: false,
+            odometry_noise: OdometryNoise::WHEEL,
+            drop_vio_s: None,
+            vio_map_prior: false,
+            vio_wheel_velocity: false,
             localize_every: 1,
             initial_localize_every: 1,
             initial_window_s: 30.0,
@@ -361,6 +384,27 @@ impl Args {
                         Vector3::new(tx, ty, tz),
                     ));
                 }
+                "--fusion" => args.fusion = true,
+                "--vio-map-prior" => args.vio_map_prior = true,
+                "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
+                "--odometry-noise" => {
+                    args.odometry_noise = match value()?.as_str() {
+                        "wheel" => OdometryNoise::WHEEL,
+                        "legged" => OdometryNoise::LEGGED,
+                        "vio" => OdometryNoise::VIO,
+                        other => return Err(format!("--odometry-noise: unknown {other:?}")),
+                    }
+                }
+                "--drop-vio-s" => {
+                    let text = value()?;
+                    let (start, end) = text
+                        .split_once(':')
+                        .ok_or_else(|| format!("--drop-vio-s: expected START:END, got {text:?}"))?;
+                    args.drop_vio_s = Some((
+                        number(&option, start.to_owned())?,
+                        number(&option, end.to_owned())?,
+                    ));
+                }
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
                 "--initial-localize-every" => {
                     args.initial_localize_every = number(&option, value()?)?;
@@ -391,8 +435,24 @@ impl Args {
         if args.retrieval_keyframes == Some(0) || !(1..=32).contains(&args.retrieval_bits) {
             return Err("--retrieval-keyframes must be positive, --retrieval-bits 1..=32".into());
         }
-        if args.vio && args.odometry.is_some() {
-            return Err("--vio and --odometry are alternatives".into());
+        if args.vio && args.odometry.is_some() && !(args.fusion || args.vio_wheel_velocity) {
+            return Err(
+                "--vio and --odometry are alternatives, unless fused (--fusion) or the \
+                 odometry's velocity goes into the VIO (--vio-wheel-velocity)"
+                    .into(),
+            );
+        }
+        if args.vio_wheel_velocity && !(args.vio && args.odometry.is_some()) {
+            return Err("--vio-wheel-velocity needs --vio and --odometry".into());
+        }
+        if args.vio_map_prior && !args.vio {
+            return Err("--vio-map-prior needs --vio".into());
+        }
+        if args.fusion && !(args.vio || args.odometry.is_some()) {
+            return Err("--fusion needs --vio or --odometry".into());
+        }
+        if args.drop_vio_s.is_some() && !(args.vio && args.fusion) {
+            return Err("--drop-vio-s needs --vio and --fusion".into());
         }
         if args.vio != (args.calibration.is_some() && args.config.is_some())
             || args.calibration.is_some() != args.config.is_some()
@@ -922,6 +982,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 /// correction and every output file of `--vio` / `--odometry`.
 struct CorrectedRun {
     correction: OdomCorrection,
+    /// With `--fusion`: the fused map pose, fed the fixes the correction
+    /// accepts.
+    fusion: Option<MapFusion>,
+    /// Fixes the correction accepted or initialized from, and the newest.
+    fixes_used: usize,
+    last_used_fix: Option<(i64, SE3)>,
     /// Localize every `localize_every`-th frame once the odometry has a map
     /// pose, every `initial_every`-th before, within `initial_window_ns` of
     /// the first frame or of the latest localization.
@@ -957,6 +1023,21 @@ impl CorrectedRun {
             correction: OdomCorrection::new(OdomCorrectionConfig {
                 weak_gate_m: args.weak_gate_m,
                 ..OdomCorrectionConfig::default()
+            }),
+            fixes_used: 0,
+            last_used_fix: None,
+            fusion: args.fusion.then(|| {
+                let mut sources = Vec::new();
+                if args.vio {
+                    sources.push(OdometryNoise::VIO);
+                }
+                if args.odometry.is_some() {
+                    sources.push(args.odometry_noise);
+                }
+                MapFusion::new(MapFusionConfig {
+                    sources,
+                    ..MapFusionConfig::default()
+                })
             }),
             localize_every: args.localize_every,
             initial_every: args.initial_localize_every,
@@ -1006,15 +1087,34 @@ impl CorrectedRun {
 
     /// One frame: the odometry's IMU pose and, on a frame to localize, its
     /// image.
+    /// The map pose of the IMU now: the fusion's with `--fusion`, else the
+    /// correction's.
+    fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
+        match &self.fusion {
+            Some(fusion) => fusion.map_from_body(sources),
+            None => self.correction.map_from_body(odom_from_imu?),
+        }
+    }
+
+    /// One frame: each odometry source's IMU pose (`sources`; the first,
+    /// the primary, is the one the correction follows) and, on a frame to
+    /// localize, its image.
     fn frame(
         &mut self,
         localizer: &mut Localizer,
         timestamp_ns: i64,
-        odom_from_imu: &SE3,
+        sources: &[Option<SE3>],
         image: Option<&RawU16Image>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.frames += 1;
         self.first_ns.get_or_insert(timestamp_ns);
+        if let Some(fusion) = &mut self.fusion {
+            fusion.observe(timestamp_ns, sources);
+        }
+        let primary = sources.first().cloned().flatten();
+        let Some(odom_from_imu) = primary.as_ref() else {
+            return self.frame_without_primary(localizer, timestamp_ns, sources, image);
+        };
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
         self.correction
@@ -1034,7 +1134,7 @@ impl CorrectedRun {
         let stale_min_inliers =
             (!fresh && self.stale_min_inliers > 0).then_some(self.stale_min_inliers);
         let predicted = (fresh || stale_min_inliers.is_some())
-            .then(|| self.correction.map_from_body(odom_from_imu))
+            .then(|| self.map_pose(Some(odom_from_imu), sources))
             .flatten();
         if let Some(image) = image {
             let attempt = localizer.localize(image, predicted.as_ref(), stale_min_inliers)?;
@@ -1046,17 +1146,19 @@ impl CorrectedRun {
                     self.last_localized_ns = Some(timestamp_ns);
                     self.fixes_tum
                         .push_str(&tum_line(timestamp_ns, map_from_imu));
-                    outcome_name(
+                    let outcome =
                         self.correction
-                            .add_fix(timestamp_ns, map_from_imu, odom_from_imu),
-                    )
+                            .add_fix(timestamp_ns, map_from_imu, odom_from_imu);
+                    self.fuse(timestamp_ns, map_from_imu, sources, outcome);
+                    outcome_name(outcome)
                 }
                 (None, Some(map_from_imu)) => {
                     self.last_localized_ns = Some(timestamp_ns);
-                    match self
-                        .correction
-                        .add_weak_fix(timestamp_ns, map_from_imu, odom_from_imu)
-                    {
+                    let outcome =
+                        self.correction
+                            .add_weak_fix(timestamp_ns, map_from_imu, odom_from_imu);
+                    self.fuse(timestamp_ns, map_from_imu, sources, outcome);
+                    match outcome {
                         FixOutcome::Pending => "weak-pending",
                         FixOutcome::Initialized => "weak-initialized",
                         FixOutcome::Accepted => "weak-accepted",
@@ -1070,7 +1172,7 @@ impl CorrectedRun {
             inlier_rows(&mut self.inliers, timestamp_ns, &attempt);
         }
         if let (Some(map_from_imu), Some((fix_ns, fix_position))) = (
-            self.correction.map_from_body(odom_from_imu),
+            self.map_pose(Some(odom_from_imu), sources),
             self.correction.last_fix(),
         ) {
             self.map_tum
@@ -1089,6 +1191,78 @@ impl CorrectedRun {
                 (timestamp_ns - fix_ns) as f64 * 1e-9,
                 (odom_from_imu.translation - fix_position).norm(),
             )?;
+            self.map_poses += 1;
+        }
+        Ok(())
+    }
+
+    /// Passes a fix the correction used on to the fusion: a reset restarts
+    /// the fusion from it.
+    fn fuse(
+        &mut self,
+        timestamp_ns: i64,
+        map_from_imu: &SE3,
+        sources: &[Option<SE3>],
+        outcome: FixOutcome,
+    ) {
+        if matches!(
+            outcome,
+            FixOutcome::Initialized | FixOutcome::Reset | FixOutcome::Accepted
+        ) {
+            self.fixes_used += 1;
+            self.last_used_fix = Some((timestamp_ns, map_from_imu.clone()));
+        }
+        let Some(fusion) = &mut self.fusion else {
+            return;
+        };
+        match outcome {
+            FixOutcome::Initialized | FixOutcome::Reset => {
+                fusion.reset();
+                fusion.add_fix(timestamp_ns, map_from_imu, sources);
+            }
+            FixOutcome::Accepted => fusion.add_fix(timestamp_ns, map_from_imu, sources),
+            _ => {}
+        }
+    }
+
+    /// A frame without the primary odometry (a VIO outage, `--drop-vio-s`):
+    /// the fusion carries the map pose on the other sources, and a fix is
+    /// used if it lies within 15 cm and 3 deg of the fusion's prediction.
+    fn frame_without_primary(
+        &mut self,
+        localizer: &mut Localizer,
+        timestamp_ns: i64,
+        sources: &[Option<SE3>],
+        image: Option<&RawU16Image>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let predicted = self.map_pose(None, sources);
+        if let (Some(image), Some(prediction)) = (image, predicted.as_ref()) {
+            let attempt = localizer.localize(image, Some(prediction), None)?;
+            self.attempts += 1;
+            self.latencies.push(attempt.latency_ms);
+            let mut outcome = "-";
+            if let Some(map_from_imu) = &attempt.world_from_imu {
+                self.localized += 1;
+                self.last_localized_ns = Some(timestamp_ns);
+                self.fixes_tum
+                    .push_str(&tum_line(timestamp_ns, map_from_imu));
+                let close = (map_from_imu.translation - prediction.translation).norm() < 0.15
+                    && map_from_imu.rotation.angle_to(&prediction.rotation) < 3f64.to_radians();
+                outcome = if close {
+                    if let Some(fusion) = &mut self.fusion {
+                        fusion.add_fix(timestamp_ns, map_from_imu, sources);
+                    }
+                    "accepted-no-primary"
+                } else {
+                    "rejected-no-primary"
+                };
+            }
+            *self.outcomes.entry(outcome).or_default() += 1;
+            csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
+        }
+        if let Some(map_from_imu) = self.map_pose(None, sources) {
+            self.map_tum
+                .push_str(&tum_line(timestamp_ns, &map_from_imu));
             self.map_poses += 1;
         }
         Ok(())
@@ -1138,10 +1312,32 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         .unwrap_or(usize::MAX)
         .min(dataset.frame_count());
 
+    // With --fusion --odometry: the external odometry as a second source.
+    let odometry = args
+        .odometry
+        .as_ref()
+        .map(|path| read_tum_ns(path))
+        .transpose()?;
+    let body_from_imu = args
+        .imu_from_body
+        .as_ref()
+        .map_or_else(SE3::identity, SE3::inverse);
+    let mut first_ns = None;
+
     let mut run = CorrectedRun::new(args);
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
+        let frame_imu_gyro_mean = if frame.imu.is_empty() {
+            Vector3::zeros()
+        } else {
+            frame
+                .imu
+                .iter()
+                .map(|sample| sample.gyro_rad_s)
+                .sum::<Vector3<f64>>()
+                / frame.imu.len() as f64
+        };
         let image = if run.localizes(index, timestamp_ns) {
             let image = match args.camera {
                 0 => Some(&frame.cam0),
@@ -1152,12 +1348,80 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         } else {
             None
         };
-        let odom_from_imu = adapter
-            .process_without_marg_data_no_trace(frame)?
+        let (odom_from_imu, gyro_bias) = {
+            let output = adapter.process_without_marg_data_no_trace(frame)?;
+            (
+                output.estimator.state.imu_to_world.clone(),
+                output.estimator.state.gyro_bias_rad_s,
+            )
+        };
+        let since_s = (timestamp_ns - *first_ns.get_or_insert(timestamp_ns)) as f64 * 1e-9;
+        let vio = match args.drop_vio_s {
+            Some((start, end)) if (start..end).contains(&since_s) => None,
+            _ => Some(odom_from_imu),
+        };
+        let mut sources = vec![vio];
+        if let (Some(odometry), true) = (&odometry, args.fusion) {
+            sources.push(
+                interpolate_pose(odometry, timestamp_ns)
+                    .map(|odom_from_body| odom_from_body.compose(&body_from_imu)),
+            );
+        }
+        let fixes_before = run.fixes_used;
+        run.frame(localizer, timestamp_ns, &sources, image.as_ref())?;
+        let frame_id = adapter
             .estimator
-            .state
-            .imu_to_world;
-        run.frame(localizer, timestamp_ns, &odom_from_imu, image.as_ref())?;
+            .active_frames()
+            .into_iter()
+            .find(|(_, stamp)| *stamp == timestamp_ns)
+            .map(|(frame_id, _)| frame_id);
+        if let (true, Some(frame_id)) = (args.vio_map_prior, frame_id) {
+            // A fix the correction just used: the IMU pose it implies in the
+            // VIO's frame, through the correction as it stands.
+            if let (true, Some((_, map_from_imu)), Some(map_from_odom)) = (
+                run.fixes_used > fixes_before,
+                run.last_used_fix.as_ref(),
+                run.correction.map_from_odom(),
+            ) {
+                adapter.estimator.add_external_factor(ExternalFactor {
+                    frame_id,
+                    measurement: ExternalMeasurement::PosePrior {
+                        world_from_imu: map_from_odom.inverse().compose(map_from_imu),
+                        sqrt_information: Vector6::new(
+                            1.0 / 0.03,
+                            1.0 / 0.03,
+                            1.0 / 0.03,
+                            1.0 / 1f64.to_radians(),
+                            1.0 / 1f64.to_radians(),
+                            1.0 / 1f64.to_radians(),
+                        ),
+                        huber: 2.0,
+                    },
+                });
+            }
+        }
+        if let (true, Some(frame_id), Some(odometry)) =
+            (args.vio_wheel_velocity, frame_id, odometry.as_ref())
+        {
+            if let Some(body_velocity) = body_velocity(odometry, timestamp_ns, 0.05) {
+                let imu_angular_velocity = frame_imu_gyro_mean - gyro_bias;
+                let imu_from_body = body_from_imu.inverse();
+                let sigma = |v: f64| 1.0 / (0.02 + 0.02 * v.abs());
+                adapter.estimator.add_external_factor(ExternalFactor {
+                    frame_id,
+                    measurement: ExternalMeasurement::BodyVelocity {
+                        imu_from_body,
+                        imu_angular_velocity,
+                        body_velocity,
+                        sqrt_information: Vector3::new(
+                            sigma(body_velocity.x),
+                            sigma(body_velocity.x),
+                            sigma(body_velocity.x),
+                        ),
+                    },
+                });
+            }
+        }
     }
     run.finish(args, "trajectory_vio.tum")
 }
@@ -1199,7 +1463,7 @@ fn run_odometry(
         run.frame(
             localizer,
             entry.timestamp_ns,
-            &odom_from_imu,
+            &[Some(odom_from_imu)],
             image.as_ref(),
         )?;
     }
@@ -1238,6 +1502,21 @@ fn read_tum_ns(path: &std::path::Path) -> Result<Vec<(i64, SE3)>, Box<dyn std::e
     }
     poses.sort_by_key(|(timestamp_ns, _)| *timestamp_ns);
     Ok(poses)
+}
+
+/// A body's velocity in its own frame at `timestamp_ns`, from its poses
+/// `half_window_s` before and after (central difference).
+fn body_velocity(
+    poses: &[(i64, SE3)],
+    timestamp_ns: i64,
+    half_window_s: f64,
+) -> Option<Vector3<f64>> {
+    let half_ns = (half_window_s * 1e9) as i64;
+    let before = interpolate_pose(poses, timestamp_ns - half_ns)?;
+    let after = interpolate_pose(poses, timestamp_ns + half_ns)?;
+    let now = interpolate_pose(poses, timestamp_ns)?;
+    let world_velocity = (after.translation - before.translation) / (2.0 * half_window_s);
+    Some(now.rotation.inverse() * world_velocity)
 }
 
 /// The pose at `timestamp_ns`, interpolated between the two poses around

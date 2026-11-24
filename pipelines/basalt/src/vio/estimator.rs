@@ -17,10 +17,10 @@ use super::scalar::ScalarMode;
 use super::window::{
     diagnostic_env_active, diagnostic_env_snapshot, flatten_nav_with_mode, flatten_pose_with_mode,
     marginalize_mixed_prior_with_mode, projected_rows, projected_rows_native_q2, stack_rows,
-    take_diagnostic_prior_pre, visual_state_pose_with_mode, write_blocks_with_mode,
-    VisualOnlyPrior, WindowBlockKind, WindowDiagnostics, WindowImuLink, WindowLandmark,
-    WindowObservation, WindowPose, WindowPrior, WindowProblem, WindowSolveResult, WindowState,
-    NAV_STATE_DOF, POSE_DOF,
+    take_diagnostic_prior_pre, visual_state_pose_with_mode, write_blocks_with_mode, ExternalFactor,
+    VisualOnlyPrior, WindowBlockKind, WindowDiagnostics, WindowExternalFactor, WindowImuLink,
+    WindowLandmark, WindowObservation, WindowPose, WindowPrior, WindowProblem, WindowSolveResult,
+    WindowState, NAV_STATE_DOF, POSE_DOF,
 };
 use crate::camera::DoubleSphereCamera;
 use crate::dynamic_objects::{
@@ -611,6 +611,9 @@ pub struct BasaltVioEstimator {
     /// `window.lm` diagnostic trace payload is omitted.  Default off so
     /// diagnostic/provenance callers keep their existing behavior.
     lean_marg_data: bool,
+    /// Queued external factors (not upstream): see
+    /// [`Self::add_external_factor`].
+    external_factors: Vec<ExternalFactor>,
     /// Marginalization bookkeeping exposed in the next MargData artifact.
     last_kf_to_marg: Vec<(u64, u64)>,
     last_marg_targets: MarginalizationTargets,
@@ -718,6 +721,7 @@ impl BasaltVioEstimator {
             num_points_kf: BTreeMap::new(),
             lean_no_output_mode: false,
             lean_marg_data: false,
+            external_factors: Vec::new(),
             last_kf_to_marg: Vec::new(),
             last_marg_targets: MarginalizationTargets::default(),
             last_lost_landmarks: Vec::new(),
@@ -742,6 +746,35 @@ impl BasaltVioEstimator {
     /// field for the contract.
     pub fn set_lean_marg_data(&mut self, enabled: bool) {
         self.lean_marg_data = enabled;
+    }
+
+    /// Queues a factor from outside the VIO (a map localization's pose
+    /// prior, a wheel odometry's body velocity) on frame `frame_id`. It
+    /// enters every window solve while that frame's state is active, and is
+    /// dropped when the frame leaves the window. Not part of upstream
+    /// Basalt; without queued factors nothing changes.
+    pub fn add_external_factor(&mut self, factor: ExternalFactor) {
+        let active = self.active_frames();
+        self.external_factors.retain(|queued| {
+            active
+                .iter()
+                .any(|(frame_id, _)| *frame_id == queued.frame_id)
+        });
+        self.external_factors.push(factor);
+    }
+
+    /// Frame ids of the active window, oldest first (pose-only keyframes,
+    /// then full states), with their stamps.
+    pub fn active_frames(&self) -> Vec<(u64, i64)> {
+        self.window_poses
+            .iter()
+            .map(|pose| (pose.frame_id, pose.timestamp_ns))
+            .chain(
+                self.window_states
+                    .iter()
+                    .map(|state| (state.frame_id, state.timestamp_ns)),
+            )
+            .collect()
     }
 
     /// Replaces the compatibility camera-0 setup with the complete calibrated
@@ -2765,6 +2798,20 @@ impl BasaltVioEstimator {
             } else {
                 None
             },
+            external: self
+                .external_factors
+                .iter()
+                .filter_map(|factor| {
+                    let block_index = pose_index_by_frame
+                        .get(&factor.frame_id)
+                        .copied()
+                        .or_else(|| index_by_frame.get(&factor.frame_id).copied())?;
+                    Some(WindowExternalFactor {
+                        block_index,
+                        measurement: factor.measurement.clone(),
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -8617,6 +8664,40 @@ mod tests {
         }
         assert!(first.states.len() <= 3);
         assert!(last.unwrap().marg_data.aom_sqrt_jacobian.cols >= 15);
+    }
+
+    /// External factors stay queued only while their frame is active.
+    #[test]
+    fn external_factors_leave_with_their_frame() {
+        let mut estimator = BasaltVioEstimator::new(cam(), EstimatorConfig::default());
+        let point = Point3::new(0.1, 0.0, 2.0);
+        let velocity = |frame_id| ExternalFactor {
+            frame_id,
+            measurement: super::super::window::ExternalMeasurement::BodyVelocity {
+                imu_from_body: SE3::identity(),
+                imu_angular_velocity: Vector3::zeros(),
+                body_velocity: Vector3::zeros(),
+                sqrt_information: Vector3::repeat(10.0),
+            },
+        };
+        for frame in 0..12 {
+            let observation = obs(&estimator.camera, 1, frame, point);
+            let imu = [ImuSample::new(
+                frame as i64 * 10,
+                nalgebra::Vector3::zeros(),
+                nalgebra::Vector3::new(0., 0., 9.81),
+            )];
+            estimator
+                .process(frame, frame as i64 + 1, &[observation], &imu)
+                .unwrap();
+            estimator.add_external_factor(velocity(frame));
+        }
+        let active = estimator.active_frames();
+        assert!(active.len() < 12, "{active:?}");
+        assert!(estimator.external_factors.iter().all(|factor| active
+            .iter()
+            .any(|(frame_id, _)| *frame_id == factor.frame_id)));
+        assert_eq!(estimator.external_factors.len(), active.len());
     }
 
     /// An interval's IMU covariance must not depend on where the samples fall

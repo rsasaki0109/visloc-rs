@@ -12,6 +12,7 @@
 
 mod binary_index;
 mod correspondence;
+mod fusion;
 mod keyframe_retrieval;
 mod map_merge;
 mod odom_correction;
@@ -39,6 +40,7 @@ pub use correspondence::{
     CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
+pub use fusion::{MapFusion, MapFusionConfig, OdometryNoise};
 pub use keyframe_retrieval::KeyframeRetrieval;
 pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
