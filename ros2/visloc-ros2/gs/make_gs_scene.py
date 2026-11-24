@@ -16,6 +16,14 @@ The splat has no collision geometry, so the robot's world is made from it:
   the photos it was trained on. Cells farther than `--fence-m` from every
   training camera are marked occupied too, a fence the robot (and its scan)
   sees as a wall, so it drives where its camera images mean something.
+- **Posts, poles and trunks**: a 10 cm column with gaussians in at least
+  `--column-bins` (8) of the 10 cm height bins from 0.2 to 2.4 m is solid,
+  whatever the filters above say: thin things standing tall (a sign's
+  pole) pass few of them, haze is never that tall.
+- **Kerbs**: with `--crossings` (`lane_map.py`'s cuts, where the robot
+  crosses a street), the road on each crossing is the longest run of
+  neutral grey ground between warm pavement (`kerbs.find_kerbs`); its ends
+  are kerbs, and `gs_sim.py` lowers the road between them by 10 cm.
 - **Where the camera was carried**: cells within `--clear-path-m` of the
   capture path are free (floaters near the camera would block it).
 
@@ -83,7 +91,16 @@ def main():
     p.add_argument('--min-opacity', type=float, default=0.5)
     p.add_argument('--max-scale', type=float, default=0.1, help='largest Gaussian axis, m')
     p.add_argument('--min-count', type=int, default=3)
+    p.add_argument('--crossings', default='',
+                   help="lane_map.py's OUT_crossings.json: where the robot crosses a street; the kerbs there are "
+                        "found in the splat's colours (kerbs.find_kerbs) and the road between them lowered")
+    p.add_argument('--column-bins', dest='column_bins', type=int, default=8,
+                   help='a 10 cm column with gaussians in at least this many of the 10 cm height bins from 0.2 to '
+                        '2.4 m is a post, a sign pole or a trunk, and solid whatever the other filters say (0: off)')
     p.add_argument('--fence-m', type=float, default=1.5)
+    p.add_argument('--open-path', dest='open_path', default='',
+                   help='a text file of x y points: the fence also stays open within --fence-m of this path '
+                        "(lane_map.py's walk with its detours cut, which may leave the cameras' track)")
     p.add_argument('--clear-path-m', type=float, default=0.45,
                    help='cells this close to the capture path are free: the camera was carried through them')
     p.add_argument('--resolution', type=float, default=0.05)
@@ -127,9 +144,38 @@ def main():
     ci = ((cams[:, 0] - x0) / res).astype(int)
     cj = ((cams[:, 1] - y0) / res).astype(int)
     seen[cj.clip(0, H - 1), ci.clip(0, W - 1)] = True
+    if args.open_path:
+        pts = np.loadtxt(args.open_path, ndmin=2)[:, :2]
+        dense = [a + t * (b - a) for a, b in zip(pts[:-1], pts[1:])
+                 for t in np.linspace(0, 1, max(2, int(np.linalg.norm(b - a) / (res / 2))))]
+        dense = np.array(dense) if dense else pts
+        oi = ((dense[:, 0] - x0) / res).astype(int)
+        oj = ((dense[:, 1] - y0) / res).astype(int)
+        ok_ = (oi >= 0) & (oi < W) & (oj >= 0) & (oj < H)
+        seen[oj[ok_], oi[ok_]] = True
     dist = ndimage.distance_transform_edt(~seen) * res
     fence = dist > args.fence_m
     occ &= dist > args.clear_path_m
+    if args.column_bins:
+        # Posts, sign poles and trunks: thin, so few of their gaussians pass the filters above,
+        # but they stand tall. Haze does not.
+        m = (h > 0.2) & (h < 2.4) & (opacity > 0.2)
+        cr = 0.1
+        ci = ((xyz[m, 0] - x0) / cr).astype(int)
+        cj = ((xyz[m, 1] - y0) / cr).astype(int)
+        hb = ((h[m] - 0.2) / 0.1).astype(int)
+        key = np.unique(np.stack([cj, ci, hb], 1), axis=0)
+        cols, counts = np.unique(key[:, :2], axis=0, return_counts=True)
+        tall = cols[counts >= args.column_bins]
+        column = np.zeros((H, W), bool)
+        f = int(round(cr / res))
+        for dj in range(f):
+            for di in range(f):
+                jj, ii = tall[:, 0] * f + dj, tall[:, 1] * f + di
+                ok_ = (jj >= 0) & (jj < H) & (ii >= 0) & (ii < W)
+                column[jj[ok_], ii[ok_]] = True
+        occ |= ndimage.binary_dilation(column, iterations=1)
+        print(f'{len(tall)} tall thin columns (posts, poles, trunks) made solid')
     grid = (occ | fence).astype(np.uint8)
     stem = os.path.splitext(args.out)[0]
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
@@ -149,6 +195,15 @@ def main():
     }
     if args.terrain:
         scene['ground'] = os.path.basename(stem + '_ground.npy')  # same frame as the grid
+    if args.crossings:
+        from kerbs import find_kerbs  # noqa: PLC0415
+        rgb_ = np.clip(np.stack([g['f_dc_0'], g['f_dc_1'], g['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
+
+        def gz_(x, y):
+            return float(ground[min(max(int((y - y0) / res), 0), H - 1), min(max(int((x - x0) / res), 0), W - 1)])
+        scene['kerbs'] = find_kerbs(xyz, rgb_, opacity, gz_, json.load(open(args.crossings)))
+        print(f"kerbs: {len(scene['kerbs'])} roads crossed, " + ', '.join(
+            f"({k['a'][0]:.1f}, {k['a'][1]:.1f}) to ({k['b'][0]:.1f}, {k['b'][1]:.1f})" for k in scene['kerbs']))
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(scene, f, indent=2)
     try:

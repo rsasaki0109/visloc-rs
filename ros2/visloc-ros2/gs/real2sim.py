@@ -20,7 +20,9 @@ directory):
    `--camera-height` over the ground, start and goals along the walk.
 6. `map/`: the 6 horizontal faces of every frame rendered at the robot's
    camera height (`render_tum_seq.py`), `tum_rgbd_save_map` on them and
-   `visual_map_to_occupancy`.
+   `visual_map_to_occupancy`; `lane_map.py` then writes Nav2's map free only
+   within `--lane-half-width` (1 m) of the walk, so the robot keeps to the
+   pavement the video was walked on.
 7. With `--nav`: `gs_nav.launch.py` and `nav_goals.py` (the tuned
    localization settings, `--dump_inliers`), results in `sim/nav.json`.
    `--pedestrians`, `--cyclists`, `--dog-walkers` and `--strollers` put
@@ -73,6 +75,18 @@ def done(path):
     return os.path.exists(path)
 
 
+def goals_along(path, n):
+    """n goals spread along a 2D path by length, the last 2 m short of its end, facing along it."""
+    s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+    goals = []
+    for k in range(1, n + 1):
+        i = min(int(np.searchsorted(s, s[-1] * k / n - (2.0 if k == n else 0))), len(path) - 1)
+        a, b = path[max(i - 3, 0)], path[min(i + 3, len(path) - 1)]
+        goals.append([round(float(path[i, 0]), 3), round(float(path[i, 1]), 3),
+                      round(math.atan2(b[1] - a[1], b[0] - a[0]), 3)])
+    return goals
+
+
 def mask_faces(src_images, src_model, out):
     """Copy the model and make each face's near-black pixels transparent (RGBA)."""
     from PIL import Image  # noqa: PLC0415
@@ -116,6 +130,9 @@ def main():
     p.add_argument('--gpu', action='store_true',
                    help="run SfM's matching on the GPU (wgpu) too; 3DGS training uses a GPU whenever wgpu finds one")
     p.add_argument('--nav', action='store_true', help='also drive the goals with Nav2')
+    p.add_argument('--lane-half-width', dest='lane_half_width', type=float, default=1.0,
+                   help="Nav2's map is free only this far either side of the walk (lane_map.py), so the robot "
+                        'keeps to the pavement; 0: the whole occupancy map')
     p.add_argument('--pedestrians', type=int, default=0, help='with --nav: people walking the street')
     p.add_argument('--cyclists', type=int, default=0, help='with --nav: people riding bicycles')
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='with --nav: people with a dog')
@@ -181,26 +198,23 @@ def main():
     sim = os.path.join(out, 'sim')
     scene_json = os.path.join(sim, 'scene.json')
 
-    def scene():
+    def make_scene(open_path='', crossings=''):
         d = path[min(5, len(path) - 1), :2] - path[0, :2]
         start = f'{path[0, 0]:.3f},{path[0, 1]:.3f},{math.atan2(d[1], d[0]):.3f}'
         run([sys.executable, os.path.join(HERE, 'make_gs_scene.py'), '--splat', splat, '--model',
              os.path.join(level, 'sparse', '0'), '--out', scene_json, '--camera', FACE,
              '--camera-height', args.camera_height, '--camera-forward', 0, f'--start={start}', '--terrain',
-             '--fence-m', args.fence_m, '--min-opacity', 0.3, '--max-scale', 0.3])
-        # goals spread along the walk, the last near its end, facing along it
-        s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))]
-        goals = []
-        for k in range(1, args.goals + 1):
-            i = int(np.searchsorted(s, s[-1] * k / args.goals - (2.0 if k == args.goals else 0)))
-            i = min(i, len(path) - 1)
-            a, b = path[max(i - 3, 0), :2], path[min(i + 3, len(path) - 1), :2]
-            goals.append([round(float(path[i, 0]), 3), round(float(path[i, 1]), 3),
-                          round(math.atan2(b[1] - a[1], b[0] - a[0]), 3)])
+             '--fence-m', args.fence_m, '--min-opacity', 0.3, '--max-scale', 0.3]
+            + (['--open-path', open_path] if open_path else [])
+            + (['--crossings', crossings] if crossings else []))
+
+    def scene():
+        make_scene()
+        goals = goals_along(path[:, :2], args.goals)
         sc = json.load(open(scene_json))
         sc['goals'] = goals
         json.dump(sc, open(scene_json, 'w'), indent=1)
-        print(f'walk {s[-1]:.0f} m, goals {goals}')
+        print(f'goals {goals}')
     step('scene', scene)
 
     mapd = os.path.join(out, 'map')
@@ -237,6 +251,17 @@ def main():
              '--max-hamming', 70, '--keep-world'], log=os.path.join(out, 'map.log'))
         run([os.path.join(EX, 'visual_map_to_occupancy'), '--map-dir', mapd, '--camera-height', args.camera_height,
              '--max-range', 20, '--min-height', 0.3, '--out', os.path.join(mapd, 'occupancy')])
+        if args.lane_half_width > 0:            # keep the robot to the pavement the video was walked on
+            run([sys.executable, os.path.join(HERE, 'lane_map.py'), '--occupancy', os.path.join(mapd, 'occupancy.yaml'),
+                 '--walk', traj, '--out', os.path.join(mapd, 'occupancy_lane'), '--half-width', args.lane_half_width])
+            lane_walk = os.path.join(mapd, 'occupancy_lane_walk.txt')
+            if os.path.exists(lane_walk):        # the sim's fence open along the lane, goals on it
+                crossings = os.path.join(mapd, 'occupancy_lane_crossings.json')
+                make_scene(open_path=lane_walk, crossings=crossings if os.path.exists(crossings) else '')
+                sc = json.load(open(scene_json))
+                sc['goals'] = goals_along(np.loadtxt(lane_walk, ndmin=2), args.goals)
+                json.dump(sc, open(scene_json, 'w'), indent=1)
+                print(f"goals on the lane {sc['goals']}")
     step('map', build_map)
 
     if args.nav:
@@ -245,6 +270,8 @@ def main():
             json.dump({'x': 0.0, 'y': 0.0, 'yaw': 0.0}, open(ident, 'w'))
             ros2 = os.path.join(REPO, 'ros2', 'visloc-ros2')
             loc = ' '.join(TUNED + ['--dump_inliers', os.path.join(sim, 'inliers.csv')])
+            lane = os.path.join(mapd, 'occupancy_lane.yaml')
+            occ = f'occupancy:={lane} ' if args.lane_half_width > 0 and os.path.exists(lane) else ''
             sim_args = ' '.join(['--mono', '--pedestrians', str(args.pedestrians), '--cyclists', str(args.cyclists),
                                  '--dog-walkers', str(args.dog_walkers), '--strollers', str(args.strollers)])
             # only this scene's processes (other splats may be rendering on the machine)
@@ -254,7 +281,7 @@ def main():
 source /opt/ros/jazzy/setup.bash
 export RCUTILS_COLORIZED_OUTPUT=0
 for attempt in 1 2 3; do
-  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} record:={sim}/nav.sim.csv \\
+  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}record:={sim}/nav.sim.csv \\
     "sim_args:={sim_args}" "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
   LP=$!; ok=0
   for t in $(seq 1 60); do sleep 5; grep -q "lifecycle_manager_navigation\\]: .*Managed nodes are active" {sim}/nav.launch.log && {{ ok=1; break; }}; done

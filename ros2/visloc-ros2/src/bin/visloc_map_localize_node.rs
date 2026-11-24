@@ -82,7 +82,10 @@ PARAMETERS (--name value  or  -p name:=value):
                          `timestamp_ns,x,y,landmark_id` (keypoint px), for visualizations [none]
   prior_wait_ms          longest wait for the odometry of an image's stamp before
                          matching map-wide instead                                    [300]
-  match_threads          threads of the map-wide search                               [1]
+  match_threads          threads of the map-wide (and radius) search                  [1]
+  prior_radius           with a prior whose projection search fails, first match the
+                         landmarks within this many metres of it (0: off; dense maps) [0]
+  no_global_with_prior   with a prior, never match map-wide (dense maps)              [false]
   duplicate_radius       map-wide search: landmarks within this many metres of the best
                          one count as the same point in the ratio test (0: off)      [0]
   extra_descriptors      extra descriptors per landmark to match, from the map's
@@ -176,6 +179,9 @@ fn run() -> Result<(), String> {
     options.reset_prior_s = args.parsed_or("reset_prior_s", options.reset_prior_s)?;
     let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
+    let prior_radius = args.parsed_or("prior_radius", 0.0f64)?;
+    options.prior_radius_m = (prior_radius > 0.0).then_some(prior_radius);
+    options.no_global_with_prior = args.flag("no_global_with_prior", false)?;
     let duplicate_radius = args.parsed_or("duplicate_radius", 0.0f64)?;
     options.duplicate_radius_m = (duplicate_radius > 0.0).then_some(duplicate_radius);
     options.extra_descriptors = args.parsed_or("extra_descriptors", options.extra_descriptors)?;

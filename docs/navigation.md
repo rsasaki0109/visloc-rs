@@ -860,12 +860,31 @@ keeping right.
   there showed the splat itself broken up, not a road. So that stretch
   was set to no road by hand in a `--road FILE`, the format the estimate
   is logged in.
-- **Driving**: the cars drive the longest stretch of road and U-turn at
-  its ends, moving across to the other lane at 1 m/s.
+- **Driving**: the cars keep right and drive the longest stretch of road.
+  At its ends they U-turn in a half circle into the other lane. Held up
+  (behind a car waiting at the light), they wait; they never turn back
+  mid-road.
 - **Lanes**: the lanes are polylines mitred at the route's corners, so no
   car jumps.
 - **Traffic**: cars never swerve; they follow, or stop for, whoever is in
   their lane.
+- **Bodies**: a sedan, a hatchback or an SUV, about 4.1 to 4.6 m long.
+  Each is lofted from its side profile and cross-sections: wheel arches,
+  a cabin that leans in, glass with pillars, lights, number plates,
+  mirrors and five-spoke wheels. Most are white, black, grey or silver.
+  Each car is about 4,500 flat gaussians, plus a soft shadow on the road.
+- **Footprint**: seven overlapping circles as wide as the car's own body,
+  plus one in each corner, so nobody can step into its side or corners.
+  Walkers start across only when no car is on the crossing or too close
+  to stop. One blocked on the crossing for 4 s goes back. People or bikes
+  deadlocked head-on on a narrow pavement for 16 s may brush past (up to
+  15 cm), never a car. Offline over 600 s with 4 seeds: no one more than
+  5 cm into a car body; nobody stood still longer than 20 s (cars 11 s,
+  a red light).
+- **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
+  smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
+  on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They
+  slow to 2.5 m/s for the U-turn.
 
 | Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
 | --- | --- | ---: | ---: | --- |
@@ -877,6 +896,152 @@ within 12 m in front of the robot then, so it is localization's own
 spread at that corner, not the cars. One run, though. The nearest car came
 1.9 m from the robot. Video:
 [media/gs_street_cars.mp4](media/gs_street_cars.mp4).
+
+**Finding the broken stretch, and a crossing.** The estimate now drops
+stretches where the splat is blurred (`people.check_road`). From three
+points along each stretch, it renders the view towards the road with the
+robot's camera. It keeps the stretch only when the lower half of those
+views is sharp: its median Laplacian variance must reach 40% of the
+sharpest stretch's. On this street the stretches scored 12, 12 and 2, so
+the broken last 40 m now goes by itself, as it had been removed by hand.
+
+`--crossing` adds a zebra crossing in the middle of the road's stretch,
+with a traffic light. The stripes are flat gaussians. The light runs green
+15 s, amber 3 s, red 12 s. Cars wait at the line unless it is green.
+Walkers who reach the crossing on red mostly cross, wait a few seconds on
+the far side, and come back on the next red. Offline, over 600 s, five
+walkers crossed, cars stopped on every red, and no footprints overlapped.
+
+| Run | Goals | Contacts | Images localized | Pose error, RMSE / median / max |
+| --- | --- | ---: | ---: | --- |
+| everything, the road estimated, a crossing (wrong-way U-turns, see below) | 4/4, all at the first try | 0 | 821 of 850 | 4.3 / 2.7 / 24 cm |
+| the same, cars keeping right | 4/4, all at the first try | 0 | 813 of 850 | 16.4 / 2.2 / 76 cm |
+| the same, the car bodies and braking above | 4/4, all at the first try | 0 | 821 of 850 | 4.2 / 2.5 / 31 cm |
+| the same, lanes along the fitted road line (below) | 3/4: Nav2 succeeded at all 4 at the first try, one stop 30.1 cm off | 0 | 777 of 850 | 7.4 / 2.6 / 49 cm |
+| the same, car footprints as wide as the body, no crossing deadlocks | 4/4, all at the first try | 0 | 822 of 850 | 4.3 / 2.2 / 37 cm |
+| the same, the new people (below) | 4/4, all at the first try | 0 | 825 of 850 | 3.6 / 2.2 / 22 cm |
+| the same, Nav2 kept to a lane along the walk (below) | 4/4, all at the first try | 0 | 795 of 800 | 4.1 / 1.8 / 25 cm |
+| the same, the side street crossed at its mouth (below) | 4/4, all at the first try | 0 | 727 of 800 | 6.9 / 2.5 / 41 cm |
+| the same, posts and trunks solid (below) | 4/4, goal 2 at the second try | 0 | 805 of 900 | 4.6 / 2.3 / 24 cm |
+| the same, kerbs (below) | 4/4, all at the first try | 0 | 791 of 850 | 5.6 / 2.3 / 32 cm |
+
+That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
+the first run, a car held up behind another at the light counted as stuck
+after 8 s and turned back mid-road. It faced the other way at once and
+slid across to the other lane at walking pace, so for a while it drove on
+the wrong side. Offline over 600 s, cars were left of the centre line 10%
+of the time. Now they wait in the queue and U-turn only at the road's
+ends, in a half circle: offline, 0% and no mid-road turns.
+
+In the second run the error stayed above 30 cm for 20 s just past goal 3
+(300 to 320 s). There the node rejected every fix but one until a reset.
+No car or person was within 6 m in front of the robot then. It is the same
+stretch where the cars run lost track. So it is localization's
+run-to-run spread around goal 3, not the cars. The third run, with the
+new car bodies and their braking, went through that stretch at 4.2 cm
+RMSE.
+
+**Lanes along the road itself.** The lanes had been the route offset
+sideways, so where the route cut across a side street, the lanes bent
+with it and the cars drove up to 26° off the street.
+`people.fit_road_lines` now finds each road run's own straight centre
+line in the splat. Its direction is the one along which the ground
+gaussians beside it (kerbs, building lines) line up best: the sharpest
+histogram across it, within 30° of the route. It runs down the middle of
+the band between the pavements, where the asphalt's ground gaussians are
+under a tenth as dense as the pavement's. On this street the road heads
+−8.9° against the route's −17.9°, and the cars' heading is now 0° off it
+(it was 25.6° at the 90th percentile). The crossing and its light are
+square to that line. `gs_sim --no-road-fit` keeps the old lanes.
+
+In the fourth run Nav2 succeeded at all four goals at the first try, but
+it stopped 30.1 cm from goal 1, 1 mm past the 30 cm check. Before that,
+on the lawn, no image localized for 18 s while a cyclist and a dog walker
+passed in front of the camera, 1 to 7 m ahead. That is on the lawn before
+the road, so it is not the cars. In the fifth run, with the car
+footprints below, nobody came more than 5 cm into a car body.
+
+**People.** Each pedestrian is a lofted torso (shoulders, waist, hips),
+tapered limbs, shoes, and a head with a nose and hair that leaves the
+face clear. They wear everyday clothes in street colours: trousers or a
+skirt, a T-shirt, a top or a jacket, and long hair, a bun or a cap,
+sometimes with a backpack. In the walk the thigh swings from −12° to 22°
+and the knee bends in the swing. The stance foot stays on the ground, so
+the pelvis bobs, and the arms swing with a bent elbow. That is up to about
+2,700 gaussians a person. The sixth run, with them, went at 3.6 cm RMSE.
+
+
+**Keeping to the pavement.** Nav2 planned on the whole occupancy map, so
+the robot cut across the lawn and wandered off the walked line: 0.37 m
+median and 2.5 m at most from the 360 camera's track. `gs/lane_map.py`
+writes Nav2's map free only within 1 m of the walk, which is the pavement
+the video was walked along. It also clears lone stray map points there.
+`gs_nav.launch.py occupancy:=` takes that map, and `real2sim.py` builds it
+and uses it by default (`--lane-half-width`, 0 for the whole map). In the
+seventh run the robot stayed 0.20 m median and 0.55 m at most from the
+walk, against 0.37 and 2.50 m in the sixth.
+
+That lane still followed the walker off the pavement in one place. They
+crossed a side street in a U, halfway down it over the cobbles, rather
+than on the crossing at its mouth, and the robot did the same, down the
+kerb and back up. So `lane_map.py` now cuts the walk's detours: an arc at
+least 1.6 times the straight line between its ends, with that line at
+most 20 m and clear of walls, becomes the straight line. Here that is
+across the mouth, on the crossing, in line with both pavements.
+
+Three more things made the robot keep to it:
+
+- **Goals.** `real2sim.py` puts the goals on the cut walk.
+- **Fence.** The sim's fence is opened along it (`make_gs_scene.py
+  --open-path`); before, the scan showed a wall across the mouth.
+- **Off the lane.** Cells off the lane are now very costly (about 234 of
+  254) rather than lethal, so a robot nudged off it can plan back. Small
+  clumps of stray map points on the lane (under 0.1 m²) are cleared
+  (`--max-clump`).
+
+In the eighth run the robot crossed the side street on the crossing at
+its mouth: it went no lower than y = 8.2 m there, where the walk went
+down to 1.5 m. It left the lane only once, by up to 2.4 m, to make way
+for a cyclist and a pushchair coming along it before goal 1. It waited
+10 s while the cyclist was 0.6 m in front of it.
+
+**Posts and trunks.** In that run the robot drove through four things it
+should have hit: a parking sign's pole, a crossing sign's pole and two
+tree trunks. Thin, they left too few gaussians through the sim's
+obstacle filters (centre under 0.8 m, axis under 0.3 m, opacity at least
+0.3). So the sim grid, and the scan, had nothing there. Now
+`make_gs_scene.py` also makes solid any 10 cm column with gaussians in
+at least 8 of the 10 cm height bins from 0.2 to 2.4 m (`--column-bins`).
+Thin things stand tall; haze does not. On this street that made 389
+columns solid, the four among them, and the lane walk still has at least
+0.55 m clear. In the ninth run the robot passed them all, its centre
+never nearer than 0.32 m to a solid cell (its radius is 0.2 m).
+
+**Kerbs.** The robot still rolled off the pavement onto the side street and
+back as if there were no kerbs. The splat's ground is too sparse and noisy
+to show a 10 cm kerb in its geometry: along the lane, the ground's height
+wanders by about 7 cm either way. Its colours do show one, though. Here the
+pavement is warm beige flags and the road neutral grey.
+
+- **Finding the kerbs.** `kerbs.find_kerbs` walks each crossing
+  (`lane_map.py` now writes its cuts to `OUT_crossings.json`). It takes the
+  longest run of road-coloured ground along it as the road (median colour
+  within 0.5 m, red minus blue under 8), and the run's ends as the kerbs.
+  Here they are (59.0, 8.8) and (65.6, 7.5).
+- **The scene.** `make_gs_scene.py --crossings` puts them in `scene.json`.
+- **The robot.** `gs_sim.py` lowers the road between the kerbs by 10 cm. It
+  pitches the body and the camera from the ground under the front and rear
+  wheels, and holds the robot to 0.12 m/s while a wheel is on a kerb
+  (`--kerb-speed`). `chase_video.py` draws the robot pitched.
+
+In the tenth run the robot spent 9.6 s on the two kerbs, at no more than
+0.12 m/s, and kept at least 0.51 m from any solid cell. Video (the tenth
+run): [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+
+<p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
+
+Video (the seventh run):
+[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 The nearest person passed 0.80 m from the robot's centre. People came no
 closer than 0.49 m to each other's centres, so shoulders brushed but nobody
@@ -1050,6 +1215,24 @@ threads:
 A robot with odometry always has a prior, so the last row is its setting.
 It is 3.8 times as fast as before and loses 6 of the 175 fixes.
 
+The ROS 2 node has two of these too.
+
+- `visloc_map_localize_node prior_radius:=10`: when the projection search
+  near the odometry's prediction fails, it first matches the landmarks
+  within 10 m of the predicted camera.
+- `no_global_with_prior:=true`: while there is a prediction, the node never
+  matches map-wide.
+
+On the 360° street with 4 walkers and 2 cyclists (`match_threads 2`),
+Nav2 reached 4/4 goals at the first try with 0 contacts, at 10.4 cm RMSE,
+63 cm max. 847 of the 850 images matched by projection, so on this render
+map the two options seldom came into play. The error exceeded 20 cm for
+15 s, at the corner before goal 3. The cars run, without these options,
+was off at the same spot and the same time. The two runs start the same
+walkers and cyclists in the same places, so these runs cannot tell
+whether someone was in view there or the corner itself is hard. The runs
+before them had stayed under 22 cm.
+
 **On a real robot's own depth camera (OpenLORIS-Scene).** The same test runs
 on data with real depth: OpenLORIS-Scene's office, a wheeled robot with a
 D435i (848 × 480 colour and aligned depth) and motion capture.
@@ -1072,7 +1255,24 @@ With a real depth camera, landmarks are tracked across keyframes better
 than with a splat's depth. Keeping single observations still adds 5 points
 and gives every fix within 50 cm. A map from one direction cannot
 localize the other: the camera sees the other side of the room. A
-daylight session against a night map stays at 0 for single images. The
+daylight session against a night map stays at 0 for single images.
+
+A map of three sessions together: office1-1, office1-2 (the opposite
+direction) and office1-4 (daylight). They share the motion-capture frame,
+so their frames can simply be put in one sequence: 2,578 frames, 60k
+landmarks. It did not help:
+
+| Queries | office1-1's map | Three-session map |
+| --- | ---: | ---: |
+| office1-6, 2.8 days later, same direction | 228 (63%) | 214 (59%) |
+| office1-7, 2.8 days later, opposite direction | 0 | 1 |
+| office1-5, dawn, lights off | 0 | 0 |
+| office1-2 itself (in the map) | | 300 (100%), 0.5 cm |
+
+office1-7 against office1-2's map alone localizes 9 of 381. So it is not
+the direction: office1-7 and office1-2 see the same side of the room. That
+side changed with the furniture moved between them, while the side
+office1-6 sees stayed. And no ORB map of the night copes with dawn light. The
 [OpenLORIS page](openloris_map_localization.md) gets some of it back by
 correcting the VIO with weak fixes.
 

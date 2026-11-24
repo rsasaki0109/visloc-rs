@@ -23,7 +23,9 @@ differential drive driven by `cmd_vel`. It publishes:
   then stand still a while, and people on foot drift across to the other
   side. `--cars` drive both ways along a road beside the route, keeping
   right; the road is `--road-offset` metres to the left of the route, or
-  estimated from the splat's grey ground; They show in the camera and in the
+  estimated from the splat's grey ground (stretches whose renders are
+  blurred are left out). `--crossing` adds a zebra crossing with a traffic
+  light: cars wait unless green, walkers cross on red; They show in the camera and in the
   scan, so Nav2 has to steer round them, and they wait while the robot is
   just in front of them. In the camera they are gaussians rendered with the
   scene by default (`--people-style splat`, `gsplat_render_server
@@ -148,11 +150,13 @@ class Sim(Node):
         self.splat_people = movers > 0 and args.people_style == 'splat'
         self.renderer = Renderer(args.server, sp(scene['splat']), cam,
                                  depth=movers > 0 and not self.splat_people,
-                                 dynamic=(2500 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
+                                 dynamic=(3000 * args.pedestrians + 6000 * args.cyclists + 4500 * args.dog_walkers
                                           + 5500 * args.strollers + 7000 * args.cars) if self.splat_people else 0)
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
+        from kerbs import Kerbs  # noqa: PLC0415
+        self.kerbs = Kerbs(scene.get('kerbs'))   # roads the robot crosses, between kerbs
         self.crowd = None
         if movers > 0:
             from people import Crowd  # noqa: PLC0415
@@ -162,21 +166,41 @@ class Sim(Node):
             road_offset = args.road_offset
             if args.road:
                 road_offset = [tuple(r) for r in json.load(open(args.road))]
-            if args.cars and road_offset is None:
+            road_lines = None
+            if args.cars:
                 from make_gs_scene import read_ply  # noqa: PLC0415
-                from people import estimate_road  # noqa: PLC0415
                 ply = read_ply(sp(scene['splat']))
                 xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
+                opacity = 1 / (1 + np.exp(-ply['opacity']))
+            if args.cars and road_offset is None:
+                from people import estimate_road  # noqa: PLC0415
                 rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
-                road_offset = estimate_road(xyz, rgb, 1 / (1 + np.exp(-ply['opacity'])), route, self.ground_z)
+                road_offset = estimate_road(xyz, rgb, opacity, route, self.ground_z)
+                from people import check_road  # noqa: PLC0415
+
+                def grey(R_cw, t_cw):
+                    buf = self.renderer.render(R_cw, t_cw)[:cam['width'] * cam['height'] * 3]
+                    a_ = np.frombuffer(buf, np.uint8).reshape(cam['height'], cam['width'], 3).astype(float)
+                    return a_ @ [0.299, 0.587, 0.114]
+                road_offset, sharp = check_road(road_offset, route, self.ground_z, grey)
+                self.get_logger().info('cars: road views sharpness per stretch (kept at >= 4 and 40% of the sharpest): '
+                                       + ', '.join('-' if v is None else f'{v:.0f}' for v in sharp))
                 if all(o is None for _, _, o in road_offset):
                     raise SystemExit('--cars: no road found beside the route; pass --road-offset')
                 self.get_logger().info('cars: road beside the route (estimated, s from-to: offset m): ' + ', '.join(
                     f'{a:.0f}-{b:.0f}: {"-" if o is None else f"{o:+.1f}"}' for a, b, o in road_offset))
+            if args.cars and not np.isscalar(road_offset) and not args.no_road_fit:
+                from people import fit_road_lines  # noqa: PLC0415
+                road_lines = fit_road_lines(xyz, opacity, route, self.ground_z, road_offset)
+                for s0, s1, px, py, ux, uy in road_lines:
+                    self.get_logger().info(f'cars: road centre line {s0:.0f}-{s1:.0f}: through ({px:.1f}, {py:.1f}), '
+                                           f'heading {math.degrees(math.atan2(uy, ux)):.1f} deg')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
-                               cars=args.cars, road_offset=road_offset, car_speed=args.car_speed)
+                               cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
+                               road_lines=road_lines,
+                               crossing=args.crossing)
             self.crowd.robot_radius = scene.get("robot_radius", 0.2)
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
@@ -208,7 +232,9 @@ class Sim(Node):
         self.people = open(args.record + '.people.csv', 'w') if args.record and self.crowd else None
         if self.people:
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
-            json.dump({'road_offset': getattr(self.crowd, 'road_offset', None)},  # number or segments
+            json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
+                       'road_lines': getattr(self.crowd, 'road_lines', None),
+                       'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 
     def on_cmd(self, msg):
@@ -235,6 +261,8 @@ class Sim(Node):
         dw = max(-a.max_alpha * DT, min(a.max_alpha * DT, w_cmd - self.w))
         self.v, self.w = self.v + dv, self.w + dw
         x, y, yaw = self.pose
+        if self.kerbs and self.kerbs.on_edge(x, y, yaw):     # a wheel on a kerb: crawl over it
+            self.v = max(-a.kerb_speed, min(a.kerb_speed, self.v))
         nyaw = yaw + self.w * DT
         nx = x + self.v * DT * math.cos(yaw + self.w * DT / 2)
         ny = y + self.v * DT * math.sin(yaw + self.w * DT / 2)
@@ -294,6 +322,10 @@ class Sim(Node):
                     self.people.write(f'{self.t:.3f},{i},{p[0]:.4f},{p[1]:.4f},{yw:.4f},{ph:.3f},{kd}\n')
 
     def ground_z(self, x, y):
+        """The ground, with the road between kerbs lowered."""
+        return self.ground_raw(x, y) - (self.kerbs.drop_at(x, y) if self.kerbs else 0.0)
+
+    def ground_raw(self, x, y):
         if self.ground is None:
             return 0.0
         g = self.grid
@@ -319,9 +351,14 @@ class Sim(Node):
         x, y, yaw = self.pose
         c, s = math.cos(yaw), math.sin(yaw)
         fwd = self.scene['camera_forward']
-        centre = np.array([x + c * fwd, y + s * fwd, self.scene['camera_height'] + self.ground_z(x, y)])
+        # the body on its wheels: down a kerb with one pair, it pitches and the camera with it
+        zmid, pitch = self.kerbs.pose(x, y, yaw) if self.kerbs else (0.0, 0.0)
+        f = np.array([c * math.cos(pitch), s * math.cos(pitch), math.sin(pitch)])
+        up = np.array([-c * math.sin(pitch), -s * math.sin(pitch), math.cos(pitch)])
+        base = np.array([x, y, self.ground_raw(x, y) + zmid])
+        centre = base + fwd * f + self.scene['camera_height'] * up
         # camera axes in the map: x right = -left, y down, z forward
-        R_wc = np.array([[s, 0, c], [-c, 0, s], [0, -1, 0]], dtype=float)
+        R_wc = np.stack([np.array([s, -c, 0.0]), -up, f], 1)
         R_cw = R_wc.T
         splats = self.crowd.splats(centre, self.ground_z) if self.splat_people else None
         buf = self.renderer.render(R_cw, -R_cw @ centre, splats)
@@ -368,11 +405,18 @@ def main():
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
     p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
     p.add_argument('--cars', type=int, default=0, help='cars driving along the road beside the route')
+    p.add_argument('--kerb-speed', dest='kerb_speed', type=float, default=0.12,
+                   help="m/s at most while a wheel is on a kerb (the scene's 'kerbs')")
     p.add_argument('--road-offset', dest='road_offset', type=float, default=None,
                    help='the road centre line, m to the left of the route (default: estimated from the splat)')
     p.add_argument('--road', default='',
                    help='JSON [[s_start, s_end, offset or null], ...]: the road beside the route per stretch '
                         '(as estimated and logged, edited where the splat misleads the estimate)')
+    p.add_argument('--no-road-fit', dest='no_road_fit', action='store_true',
+                   help='lanes at the offsets from the route instead of along the road centre line fitted '
+                        'to the splat (people.fit_road_lines)')
+    p.add_argument('--crossing', action='store_true',
+                   help='with --cars: a zebra crossing and a traffic light in the middle of the road')
     p.add_argument('--car-speed', dest='car_speed', type=float, default=6.0, help='m/s, each +-20%%')
     p.add_argument('--cyclist-speed', dest='cyclist_speed', type=float, default=4.0, help='m/s, each +-20%%')
     p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',

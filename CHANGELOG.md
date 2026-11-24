@@ -396,6 +396,49 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
+  no longer turns back mid-road and drives on the wrong side while it
+  crosses over. Cars wait, keep right, and U-turn only at the road's
+  ends, in a half circle.
+- 3DGS sim cars look and move like cars: sedans, hatchbacks and SUVs
+  lofted from side profiles (wheel arches, glass and pillars, lights,
+  plates, mirrors) in street colours, with a shadow. They no longer start
+  and stop at once: 2 m/s² up, at most 6 m/s² down, braking for the car
+  ahead and for the line, and slowing for the U-turn.
+- 3DGS sim cars drive along the street, not along the robot's route
+  offset sideways (`people.fit_road_lines`, `gs_sim --no-road-fit`):
+  where the route cut across a side street they had driven 26° off it.
+- 3DGS sim: people no longer walk into cars. A car's footprint is its body
+  (seven circles as wide as it, and its corners), not three circles with a
+  waist. Walkers wait for cars on or close to the crossing and go back if
+  blocked there; head-on deadlocks on the pavement resolve by brushing
+  past (people and bikes only). With 4 seeds over 600 s: nobody 5 cm into
+  a car, no standstill over 20 s (there had been 400 s ones).
+- 3DGS sim people look and walk like people: a lofted torso (shoulders,
+  waist, hips), tapered limbs, shoes, a face left clear by the hair, and
+  everyday clothes (trousers or a skirt, a T-shirt, a top or a jacket,
+  long hair, a bun, a cap, a backpack). Knees bend in the swing, the
+  pelvis bobs, and the arms swing with a bent elbow.
+- `gs/lane_map.py`: Nav2's map free only within 1 m of the walk the 360
+  video was taken on, so the robot keeps to that pavement
+  (`gs_nav.launch.py occupancy:=`; `real2sim.py` by default,
+  `--lane-half-width`). On the street, the robot's distance from the walk
+  went from 0.37 m median / 2.5 m max to 0.20 / 0.55 m; 4/4 goals, 4.1 cm
+  RMSE.
+- `lane_map.py` cuts the walk's detours (a walker crossing a side street
+  halfway down it), so the robot crosses on the crossing at the street's
+  mouth. Off the lane is very costly rather than lethal, small clumps of
+  stray map points on it are cleared, `make_gs_scene.py --open-path` opens
+  the sim's fence along the lane, and `real2sim.py` puts the goals on it.
+- 3DGS sim: posts, sign poles and tree trunks are solid
+  (`make_gs_scene.py --column-bins`). The robot had driven through them,
+  since too few of their thin gaussians passed the obstacle filters.
+- 3DGS sim: kerbs. Where the robot crosses a street, the kerbs are found
+  in the splat's colours (`kerbs.find_kerbs`, warm pavement against grey
+  road; `make_gs_scene.py --crossings`). The road between them is 10 cm
+  lower, the robot pitches on its wheels over them, and it crawls at
+  0.12 m/s while a wheel is on one (`gs_sim.py --kerb-speed`).
+
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.
   - **Cause.** `kabsch_n` converted its rotation with nalgebra's
