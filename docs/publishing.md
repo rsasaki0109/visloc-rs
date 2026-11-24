@@ -125,8 +125,10 @@ settings → Danger Zone → Change visibility → Public), so that
 
 ## Publishing to crates.io and PyPI
 
-Not done so far: no `visloc-*` crate is on crates.io and `visloc` is not on
-PyPI. The release workflow can publish them, but only when run by hand
+The `visloc` Python package is on PyPI from 0.4.0
+(<https://pypi.org/project/visloc/>). No `visloc-*` crate is on crates.io
+yet: that needs the `CARGO_REGISTRY_TOKEN` secret below. The release
+workflow publishes both, but only when run by hand
 (Actions → release → Run workflow, with an existing tag and **publish**
 ticked); a tag push never publishes. That run adds these jobs:
 
@@ -147,9 +149,10 @@ Later releases only update existing crates and finish in minutes.
 
 ### One-time setup
 
-Needed before the first publishing run. Without it the `crates` job skips
-itself with a notice and the `pypi` job fails; the GitHub release and
-binaries are unaffected either way.
+Needed before the first publishing run. Without the crates.io credential
+the `crates` job skips itself with a notice (and still reports success); the
+GitHub release and binaries are unaffected either way. The PyPI trusted
+publisher is configured.
 
 **crates.io.**
 

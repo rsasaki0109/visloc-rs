@@ -502,9 +502,14 @@ read/write as NumPy arrays, PnP + RANSAC localization, and ATE / RPE
 trajectory evaluation.
 
 ```bash
-cd bindings/python && pip install maturin numpy && maturin develop --release
+pip install visloc
 python -c "import visloc; print(visloc.Camera('PINHOLE', 640, 480, [500, 500, 320, 240]))"
 ```
+
+Prebuilt wheels on [PyPI](https://pypi.org/project/visloc/) cover CPython
+3.10–3.14 on Linux (x86_64, aarch64), Windows x64 and macOS arm64; elsewhere
+pip builds from the sdist, which needs a Rust toolchain. To build from a
+checkout instead: `cd bindings/python && pip install maturin numpy && maturin develop --release`.
 
 ### ROS 2
 
