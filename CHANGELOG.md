@@ -384,6 +384,9 @@ All notable changes to `visloc-rs` will be documented here.
   mouth. Off the lane is very costly rather than lethal, small clumps of
   stray map points on it are cleared, `make_gs_scene.py --open-path` opens
   the sim's fence along the lane, and `real2sim.py` puts the goals on it.
+- 3DGS sim: posts, sign poles and tree trunks are solid
+  (`make_gs_scene.py --column-bins`). The robot had driven through them,
+  since too few of their thin gaussians passed the obstacle filters.
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.

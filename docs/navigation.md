@@ -922,6 +922,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, the new people (below) | 4/4, all at the first try | 0 | 825 of 850 | 3.6 / 2.2 / 22 cm |
 | the same, Nav2 kept to a lane along the walk (below) | 4/4, all at the first try | 0 | 795 of 800 | 4.1 / 1.8 / 25 cm |
 | the same, the side street crossed at its mouth (below) | 4/4, all at the first try | 0 | 727 of 800 | 6.9 / 2.5 / 41 cm |
+| the same, posts and trunks solid (below) | 4/4, goal 2 at the second try | 0 | 805 of 900 | 4.6 / 2.3 / 24 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -1002,6 +1003,20 @@ its mouth: it went no lower than y = 8.2 m there, where the walk went
 down to 1.5 m. It left the lane only once, by up to 2.4 m, to make way
 for a cyclist and a pushchair coming along it before goal 1. It waited
 10 s while the cyclist was 0.6 m in front of it.
+
+**Posts and trunks.** In that run the robot drove through four things it
+should have hit: a parking sign's pole, a crossing sign's pole and two
+tree trunks. Thin, they left too few gaussians through the sim's
+obstacle filters (centre under 0.8 m, axis under 0.3 m, opacity at least
+0.3). So the sim grid, and the scan, had nothing there. Now
+`make_gs_scene.py` also makes solid any 10 cm column with gaussians in
+at least 8 of the 10 cm height bins from 0.2 to 2.4 m (`--column-bins`).
+Thin things stand tall; haze does not. On this street that made 389
+columns solid, the four among them, and the lane walk still has at least
+0.55 m clear. In the ninth run the robot passed them all, its centre
+never nearer than 0.32 m to a solid cell (its radius is 0.2 m). Video
+(the ninth run):
+[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
 
