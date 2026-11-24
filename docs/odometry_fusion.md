@@ -113,6 +113,56 @@ RMSE / max of every frame's map pose, in cm.
   the VIO works (1.94 against 2.02 cm) and carries the pose where it does
   not.
 
+## Monocular VIO
+
+One camera and an IMU, with or without wheels.
+
+The same couplings with the monocular-inertial VIO (`--mono`: cam0 + IMU,
+[mono_inertial_vio.md](mono_inertial_vio.md)), every 5th frame localized,
+the scaled calibration, and `config.vio_init_accel_average_s: 0.5` (the
+robots start still). Two kinds of map: the stereo SLAM maps above, and
+maps built by the monocular SLAM itself (`basalt_euroc_online_slam_demo
+--mono --save-map`; office1-1 1.37 cm and office1-2 1.80 cm SLAM ATE, against
+0.75 / 0.88 cm for stereo). "Mono map" is a robot with one camera
+throughout. RMSE / max in cm.
+
+| Query → map | VIO + correction | A | C | **A + C** | Stereo A + C, for reference |
+|---|---|---|---|---|---|
+| office1-6 → stereo map | 24.76 / 41.6 | 8.62 / 16.4 | 3.80 / 8.8 | **1.72** / 2.7 | 1.46 / 2.2 |
+| office1-7 → stereo map | 50.45 / 107.9 | 13.40 / 28.7 | 4.66 / 12.6 | **4.58** / 12.7 | 4.56 / 9.5 |
+| office1-6 → mono map | 7.66 / 15.7 | 2.71 / 8.8 | 2.35 / 6.7 | **1.40** / 3.6 | |
+| office1-7 → mono map | 49.75 / 106.5 | 30.64 / 56.3 | **4.62** / 12.3 | 5.82 / 11.5 | |
+| EuRoC MH_02 → stereo MH_01 map | 5.23 / 12.5 | **2.07** / 5.8 | — | — | 1.79 / 6.7 (A + B) |
+
+Frames with a map pose: 98.2–99.6%.
+
+- **A monocular VIO alone does not hold on a ground robot.** Corrected
+  into the map it is 8–50 cm off; alone (rigid fit) 16.5 cm on office1-6
+  and 38.5 cm on office1-7. A robot driving at near constant speed on a
+  level floor barely excites the IMU, so the monocular scale and velocity
+  drift.
+- **The wheels fix that.** With the wheel velocity in the VIO (C), the
+  monocular VIO alone is 3.4 cm on office1-7, and A + C reaches the stereo
+  numbers: 1.72 against 1.46 cm, and 4.58 against 4.56 cm, on the same maps.
+  On a map built by the monocular SLAM, office1-6 is 1.40 cm. With rare
+  fixes (office1-7), C alone is as good or better than A + C.
+- **Without wheels, the map fixes alone (A) do most of the job where fixes
+  keep coming.** On EuRoC, A brings the monocular VIO from 5.23 to 2.07 cm,
+  the stereo baseline's 2.02 cm. On office1-7, where fixes are rare, A
+  alone is not enough (13–31 cm).
+- **No roll/pitch prior for a monocular VIO without wheels.** With the
+  fix's roll and pitch in the prior (1 deg), the monocular VIO on office1-7
+  ran away (49 m RMSE): the map's gravity is a degree or so off the IMU's,
+  and pulling the tilt leaks gravity into the velocity. Without the tilt
+  rows: 13.4 cm. With wheels or stereo, the tilt prior helps a little
+  (office1-6/7 stereo A + C: 1.46 / 4.56 cm with it, 1.56 / 5.18 cm
+  without), so it stays on there. `--map-prior-sigma` and the ROS 2 node's
+  `map_prior_tilt_stddev_deg` default to no tilt for a monocular VIO without
+  wheel velocity.
+- **Through the ROS 2 nodes** (`mono:=true`, mono maps, replayed over DDS at
+  0.2x): office1-6 57.8 → 1.88 cm, office1-7 60.3 → 7.89 cm with
+  `map_prior` + `wheel_velocity`.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`

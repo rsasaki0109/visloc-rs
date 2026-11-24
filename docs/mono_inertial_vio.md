@@ -501,8 +501,10 @@ platforms do not make them flaky.
    The synthetic tests always contain acceleration.
 4. **Mapping / loop closure.** Done for the online SLAM demo and the NFR
    mapper (see "Mapping and loop closure"). Not done: the ROS 2 node's
-   mapper is stereo-only, and `--save-map` / localization against a mono
-   map has not been tried.
+   mapper is stereo-only. `--save-map` with `--mono` and localization
+   against such a map work: see
+   [odometry_fusion.md](odometry_fusion.md#monocular-vio)
+   (office1-6 on a mono map, mono VIO + map + wheels: 1.40 cm).
 5. **Triangulation gate.** The 5 cm gate is still the hard-coded upstream
    constant (`vio_min_triangulation_dist` in the EuRoC config has the same
    value). Mono-specific tuning, such as a parallax-angle gate, has not been
