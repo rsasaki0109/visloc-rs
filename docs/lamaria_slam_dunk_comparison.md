@@ -184,3 +184,34 @@ walk per 5 s chunk, and its robust passes end with the calibration frozen. In vi
 freedom fits the pseudo-GT better and the surveyed points worse, the pattern sequence_3_18's drift showed
 before ([Where the second sequences' heading drift comes from](lamaria_batch_ba.md#where-the-second-sequences-heading-drift-comes-from)).
 Adopting the paper's terms would mean adopting its objective first.
+
+## The paper's IMU noise
+
+The first step towards the paper's objective: its noise densities and bias walks in the pass
+(`--accel-noise 3e-3 --gyro-noise 5e-4 --accel-bias-rw 2.2e-3 --gyro-bias-rw 8.9e-6`, the walks per 5 s chunk
+taken per √s, the pass's ×10 off; [run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45329522916),
+commit `b8471fc`):
+
+| Recording | Default | Paper's IMU noise | Change |
+|---|---:|---:|---:|
+| R_11_5cp | 87.75 | 83.11 | −4.63 |
+| R_12_10cp | 63.88 | 66.77 | +2.90 |
+| R_13_15cp | 78.10 | 76.98 | −1.11 |
+| sequence_1_19 | 85.34 | 91.34 | +6.00 |
+| sequence_1_20 | 86.38 | 90.65 | +4.27 |
+| sequence_2_11 | 88.47 | 84.10 | −4.37 |
+| sequence_2_12 | 51.02 | 43.45 | −7.57 |
+| sequence_3_17 | 80.33 | 79.95 | −0.38 |
+| sequence_3_18 | 57.78 | 56.80 | −0.98 |
+| sequence_4_10 | 68.18 | 64.61 | −3.57 |
+| sequence_4_11 | 76.05 | 72.14 | −3.92 |
+| sequence_5_11 | 69.02 | 66.50 | −2.52 |
+| sequence_5_12 | 6.18 | 6.44 | +0.26 |
+| Mean of thirteen | 69.11 | 67.91 | −1.20 |
+
+Four of thirteen gain: not kept. It moves the recordings more than any term so far, both ways: the two
+Short walks of the second device gain 4–6 (sequence_1_19 reaches 91.3, its best), R_12_10cp gains 2.9, and
+the longer and the low-light recordings lose up to 7.6. The noise is half of the objective's IMU side; the
+paper's also has bias states per 5 s chunk with an absolute prior and fixed whitening with additive floors,
+which GTSAM's preintegrated factors here do not have, so this run does not yet put the paper's camera terms in
+the paper's objective.
