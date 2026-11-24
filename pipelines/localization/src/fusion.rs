@@ -19,8 +19,10 @@
 //! sigma instead ([`OdometryNoise::sigma_z_per_m`]).
 //!
 //! Where one source is missing (a VIO that lost tracking, a wheel odometry
-//! message gap), the others carry the chain; where all are, a loose
-//! "standing still" edge keeps the graph connected.
+//! message gap), the others carry the chain. Where all are, the pose has
+//! nothing to follow: the fusion forgets its chain and starts again at the
+//! next fix (only a fix's own node can be joined to the chain by the loose
+//! "standing still" gap edge).
 //!
 //! Nodes older than [`MapFusionConfig::window_s`] are marginalized: the chain
 //! is block-tridiagonal, so dropping the oldest node is one Schur complement
@@ -295,7 +297,13 @@ impl MapFusion {
                         yaw_of(&pose.rotation),
                     ),
                     (None, Some(fix)) => fix,
-                    (None, None) => self.nodes.back().expect("checked").state,
+                    // No source spans the newest node and now: nothing ties
+                    // the pose to the chain any more. Start over at the
+                    // next fix rather than guess.
+                    (None, None) => {
+                        self.reset();
+                        return;
+                    }
                 }
             }
         };
