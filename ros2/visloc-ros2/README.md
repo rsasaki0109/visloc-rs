@@ -560,8 +560,8 @@ runs in `docs/odometry_fusion.md`:
 | office1-6 → office1-1, `mono:=true`, mono map | 99.7%, 57.8 / 92.2 cm | 99.7%, **1.88 / 4.9 cm** |
 | office1-7 → office1-2, `mono:=true`, mono map | 99.5%, 60.3 / 113.4 cm | 99.5%, **7.89 / 17.6 cm** |
 
-With `mono:=true` (and `config.vio_init_accel_average_s: 0.5` for a robot
-that starts still) the maps were built by `basalt_euroc_online_slam_demo
+With `mono:=true` (and, for a robot that starts still,
+`configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`) the maps were built by `basalt_euroc_online_slam_demo
 --mono --save-map`, so the robot has one camera throughout. A monocular
 VIO on a ground robot barely sees its scale; the wheel velocity is what
 holds it.

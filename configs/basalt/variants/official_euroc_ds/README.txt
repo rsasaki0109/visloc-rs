@@ -52,3 +52,13 @@ Both passed the "Sim3 must not degrade more than ~20%" gate, so the full
 11-sequence VIO(+MargData)-then-mapper sweep was launched via
 scripts/run_basalt_official_calib_all11.py into
 E:\visloc-rs-runs\basalt_official_calib_20260915\.
+
+euroc_config_mono_static_start.json
+-----------------------------------
+
+euroc_config.json plus "config.vio_init_accel_average_s": 0.5: the
+initial roll and pitch come from the mean accelerometer reading of the
+first 0.5 s instead of one sample (docs/mono_inertial_vio.md, "A static
+start on EuRoC"). For a monocular VIO on a platform that starts still,
+e.g. a ground robot; used for the monocular map-localization runs in
+docs/odometry_fusion.md ("Monocular VIO").

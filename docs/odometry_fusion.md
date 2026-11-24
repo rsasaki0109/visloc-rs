@@ -119,8 +119,10 @@ One camera and an IMU, with or without wheels.
 
 The same couplings with the monocular-inertial VIO (`--mono`: cam0 + IMU,
 [mono_inertial_vio.md](mono_inertial_vio.md)), every 5th frame localized,
-the scaled calibration, and `config.vio_init_accel_average_s: 0.5` (the
-robots start still). Two kinds of map: the stereo SLAM maps above, and
+the scaled calibration, and
+`configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`
+(the EuRoC config with `config.vio_init_accel_average_s: 0.5`, as the robots
+start still). Two kinds of map: the stereo SLAM maps above, and
 maps built by the monocular SLAM itself (`basalt_euroc_online_slam_demo
 --mono --save-map`; office1-1 1.37 cm and office1-2 1.80 cm SLAM ATE, against
 0.75 / 0.88 cm for stereo). "Mono map" is a robot with one camera
@@ -223,6 +225,18 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   --reference $D/office1-6/mav0/state_groundtruth_estimate0/data.csv \
   --align-estimate runs/o11_slam/trajectory_online.tum \
   --align-ground-truth $D/office1-1/mav0/state_groundtruth_estimate0/data.csv
+
+# Monocular, on a map from the monocular SLAM, with the wheels
+target/release/examples/basalt_euroc_online_slam_demo --euroc-dir $D/office1-1 \
+  --calibration $D/office1-1/calibration_scaled.json --mono \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json \
+  --out-dir runs/mo11_slam --save-map runs/mo11_map
+target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
+  --euroc-dir $D/office1-6 --out-dir runs/mono16_ac --vio --mono \
+  --calibration $D/office1-6/calibration_scaled.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json \
+  --localize-every 5 --odometry $D/office1-6/odom.tum --imu-from-body $IFB \
+  --vio-map-prior --vio-wheel-velocity
 ```
 
 ## Limits
@@ -234,3 +248,6 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   VIO's marginal prior.
 - B's drift models (`OdometryNoise::VIO`, `WHEEL`, `LEGGED`) were set once
   and not tuned on these runs.
+- The monocular VIO without wheels varies a lot between setups: office1-6
+  on the mono map is 7.7 cm offline and 57.8 cm through the ROS 2 node.
+  The wheel-coupled numbers are the stable ones.
