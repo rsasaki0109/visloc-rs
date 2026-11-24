@@ -628,6 +628,9 @@ def main() -> int:
     parser.add_argument("--ba-fisheye-model", action="store_true",
                         help="in the experimental batch pass, solve on each camera's factory fisheye model, the focal "
                              "lengths the fisheye's (downloads LaMAria's aria_calibrations json)")
+    parser.add_argument("--ba-common-pass-args", default="",
+                        help="--ba-chain: options of the batch pass's solves for every chain, the default one of "
+                             "--ba-compare included (one string)")
     parser.add_argument("--ba-pass-args", default="",
                         help="--ba-chain: extra options of the experimental batch pass's solves (one string, e.g. "
                              "\"--est-gyro-m\"); with --ba-compare the default pass runs next to it")
@@ -865,7 +868,8 @@ def main() -> int:
                                                  work, submit_vio)
             if args.ba_chain:
                 imu = inner / "mav0" / "imu0" / "data.csv"
-                sequence_pass_args = list(pass_args)
+                common_pass_args = args.ba_common_pass_args.split()
+                sequence_pass_args = [*common_pass_args, *pass_args]
                 if args.ba_fisheye_model:  # the published factory fisheye calibration of the recording
                     fisheye = calib_dir / f"{seq}_aria_fisheye.json"
                     download(f"{BASE_URL}/aria_calibrations/{args.split}/{seq}.json", fisheye)
@@ -898,7 +902,7 @@ def main() -> int:
                     if args.ba_compare:
                         baseline_work = work / "ba_baseline"
                         baseline = run_chain(*chain_args, baseline_work, work / "ba_baseline.tum",
-                                             **chain_options, keep_matches=True)
+                                             **chain_options, keep_matches=True, pass_args=common_pass_args)
                         log_dir = args.log_dir / seq
                         log_dir.mkdir(parents=True, exist_ok=True)
                         for source, name in ((baseline, "baseline_estimate.txt"),
@@ -912,15 +916,15 @@ def main() -> int:
                     if args.ba_compare_camera_gyro:
                         camera_options = sequence_pass_args.copy()
                         camera_options.remove("--est-gyro-m")
-                        variants = [("camera_only", camera_options), ("gyro_only", ["--est-gyro-m"])]
+                        variants = [("camera_only", camera_options), ("gyro_only", [*common_pass_args, "--est-gyro-m"])]
                     if args.ba_compare_focal_only:  # the same pass with both rotations held at the factory's
-                        variants = [("gyro_only", ["--est-gyro-m"]),
+                        variants = [("gyro_only", [*common_pass_args, "--est-gyro-m"]),
                                     ("focal_only", [*sequence_pass_args, "--fix-camera-rotations"]),
                                     # the default 8-segment rotations, the focal lengths per 5 s
                                     ("focal_5s_rot_8", ["--est-gyro-m", "--focal-seg-seconds", "5",
                                                         "--focal-seg-sigma-px", "0.035"])]
                     if args.ba_compare_accel:  # the same focal pass without the accelerometer matrix
-                        variants = [("gyro_only", ["--est-gyro-m"]),
+                        variants = [("gyro_only", [*common_pass_args, "--est-gyro-m"]),
                                     ("focal_5s_rot_8", [o for o in sequence_pass_args if o != "--est-accel-m"])]
                     if variants:
                         for name, options in variants:

@@ -20,9 +20,11 @@ permissions:
 env:
   SPLIT: training
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
-  PASS_ARGS: "--accel-noise 3e-3 --gyro-noise 5e-4 --bias-chunk-seconds 5 --bias-chunk-accel 0.005 --bias-chunk-gyro 2e-5"
+  PASS_ARGS: ""
   # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
-  EXPERIMENT_ARGS: ""
+  EXPERIMENT_ARGS: "--ba-fisheye-model --ba-stereo-reference 0 --ba-stereo-paper-priors --ba-est-gyro-m --ba-est-accel-m"
+  # options of the batch pass's solves in both chains, e.g. an IMU model to compare the experiment on top of
+  COMMON_PASS_ARGS: "--accel-noise 3e-3 --gyro-noise 5e-4 --bias-chunk-seconds 5 --bias-chunk-accel 0.005 --bias-chunk-gyro 2e-5"
   # further driver options for both chains, e.g. "--no-ba-temperature"
   DRIVER_ARGS: ""
 
@@ -102,6 +104,7 @@ jobs:
           compare=()
           if [ -n "$PASS_ARGS" ]; then compare=(--ba-compare --ba-pass-args="$PASS_ARGS"); fi
           if [ -n "$EXPERIMENT_ARGS" ]; then compare+=(--ba-compare $EXPERIMENT_ARGS); fi
+          if [ -n "$COMMON_PASS_ARGS" ]; then compare+=(--ba-common-pass-args="$COMMON_PASS_ARGS"); fi
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences "$SEQUENCE" --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
@@ -143,6 +146,7 @@ jobs:
           from pathlib import Path
           results, labels = Path(sys.argv[1]), sys.argv[2:]
           out = {"sequence": os.environ["SEQUENCE"], "pass_args": os.environ["PASS_ARGS"],
+                 "common_pass_args": os.environ["COMMON_PASS_ARGS"],
                  "experiment_args": os.environ["EXPERIMENT_ARGS"], "driver_args": os.environ["DRIVER_ARGS"]}
           for label in labels:
               log = (results / f"cp_{label}.log").read_text()
@@ -191,7 +195,8 @@ jobs:
           paired = any("baseline" in r for r in rows.values())
           some = next(iter(rows.values()), {})
           print("### LaMAria training evaluation\n")
-          print(f"PASS_ARGS `{some.get('pass_args', '')}`, EXPERIMENT_ARGS `{some.get('experiment_args', '')}`, "
+          print(f"COMMON_PASS_ARGS `{some.get('common_pass_args', '')}`, "
+                f"PASS_ARGS `{some.get('pass_args', '')}`, EXPERIMENT_ARGS `{some.get('experiment_args', '')}`, "
                 f"DRIVER_ARGS `{some.get('driver_args', '')}`\n")
           if paired:
               print("| Sequence | Default CP | With PASS_ARGS | Change | Recall at 1 m, default → with (%) |")
