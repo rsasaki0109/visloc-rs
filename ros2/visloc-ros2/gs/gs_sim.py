@@ -429,8 +429,8 @@ def main():
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
     p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
     p.add_argument('--cars', type=int, default=0, help='cars driving along the road beside the route')
-    p.add_argument('--robot-body', dest='robot_body', type=float, default=0.5,
-                   help="m: the robot's body, as people keep clear of it (robot_model.py is 0.87 x 0.70 m)")
+    p.add_argument('--robot-body', dest='robot_body', type=float, default=0.6,
+                   help="m: the robot's body and a gap, as people keep clear of it (robot_model.py is 0.87 x 0.70 m)")
     p.add_argument('--kerb-speed', dest='kerb_speed', type=float, default=0.12,
                    help="m/s at most while a wheel is on a kerb (the scene's 'kerbs')")
     p.add_argument('--road-offset', dest='road_offset', type=float, default=None,
