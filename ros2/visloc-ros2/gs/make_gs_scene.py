@@ -84,6 +84,9 @@ def main():
     p.add_argument('--max-scale', type=float, default=0.1, help='largest Gaussian axis, m')
     p.add_argument('--min-count', type=int, default=3)
     p.add_argument('--fence-m', type=float, default=1.5)
+    p.add_argument('--open-path', dest='open_path', default='',
+                   help='a text file of x y points: the fence also stays open within --fence-m of this path '
+                        "(lane_map.py's walk with its detours cut, which may leave the cameras' track)")
     p.add_argument('--clear-path-m', type=float, default=0.45,
                    help='cells this close to the capture path are free: the camera was carried through them')
     p.add_argument('--resolution', type=float, default=0.05)
@@ -127,6 +130,15 @@ def main():
     ci = ((cams[:, 0] - x0) / res).astype(int)
     cj = ((cams[:, 1] - y0) / res).astype(int)
     seen[cj.clip(0, H - 1), ci.clip(0, W - 1)] = True
+    if args.open_path:
+        pts = np.loadtxt(args.open_path, ndmin=2)[:, :2]
+        dense = [a + t * (b - a) for a, b in zip(pts[:-1], pts[1:])
+                 for t in np.linspace(0, 1, max(2, int(np.linalg.norm(b - a) / (res / 2))))]
+        dense = np.array(dense) if dense else pts
+        oi = ((dense[:, 0] - x0) / res).astype(int)
+        oj = ((dense[:, 1] - y0) / res).astype(int)
+        ok_ = (oi >= 0) & (oi < W) & (oj >= 0) & (oj < H)
+        seen[oj[ok_], oi[ok_]] = True
     dist = ndimage.distance_transform_edt(~seen) * res
     fence = dist > args.fence_m
     occ &= dist > args.clear_path_m
