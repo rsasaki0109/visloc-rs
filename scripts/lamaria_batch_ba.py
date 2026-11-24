@@ -1743,6 +1743,10 @@ def cmd_solve(a):
     kf_ns, offsets, xy, _ = load_features(a.work, desc=False)
     kf_ns_all = kf_ns
     cams, noise = load_calib(a.calib)
+    for key, opt in (("accel_noise_std", "accel_noise"), ("gyro_noise_std", "gyro_noise"),
+                     ("accel_bias_std", "accel_bias_rw"), ("gyro_bias_std", "gyro_bias_rw")):
+        if getattr(a, opt, None):  # the calibration's IMU noise overridden (e.g. SLAM Dunk's densities)
+            noise[key] = float(getattr(a, opt))
     vio = load_tum(a.vio)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     if a.focal_temp and a.focal_temp_coef:
@@ -2827,6 +2831,15 @@ def main():
         s.add_argument("--est-gyro-scale-temp", action="store_true",
                        help="estimate each gyroscope axis's scale change per degree")
         s.add_argument("--gyro-scale-temp-sigma", type=float, default=3e-5, help="its prior (per degree)")
+        s.add_argument("--accel-noise", type=float, default=None,
+                       help="accelerometer noise density (m/s^2/sqrt(Hz)) instead of the calibration's")
+        s.add_argument("--gyro-noise", type=float, default=None,
+                       help="gyroscope noise density (rad/s/sqrt(Hz)) instead of the calibration's")
+        s.add_argument("--accel-bias-rw", type=float, default=None,
+                       help="accelerometer bias random walk (m/s^2/sqrt(s)) instead of the calibration's")
+        s.add_argument("--gyro-bias-rw", type=float, default=None,
+                       help="gyroscope bias random walk (rad/s/sqrt(s)) instead of the calibration's "
+                            "(--gyro-rw-scale still multiplies it)")
         s.add_argument("--est-time-offsets", action="store_true",
                        help="estimate the IMU's clock against the cameras' and the accelerometer's against the "
                             "gyroscope's (SLAM Dunk's clock offsets)")
