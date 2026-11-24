@@ -14,11 +14,16 @@ Arguments: scene, map, nodes, params_file, record (CSV of the true and
 odometry poses), occupancy (Nav2's map yaml instead of the map's
 `occupancy.yaml`, e.g. `lane_map.py`'s, which keeps the robot to the walk), rtf (largest real-time factor), log_level, sim_args (extra
 `gs_sim.py` arguments, e.g. `--mono`), and
-localize_args (extra `visloc_map_localize_node` arguments, space-separated).
+localize_args (extra `visloc_map_localize_node` arguments, space-separated),
+and robot_radius (m: Nav2's footprint circle instead of the params file's, with
+the inflation 0.25 m beyond it; e.g. 0.45 for the delivery robot drawn in the
+chase video, 0.87 x 0.70 m, so it does not squeeze between people).
 """
 
 import os
+import re
 import sys
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -38,7 +43,20 @@ def _setup(context):
     if get('record'):
         sim += ['--record', get('record')]
     sim += get('sim_args').split()
+    params = get('params_file')
+    if get('robot_radius'):
+        r = float(get('robot_radius'))
+        text = open(params, encoding='utf-8').read()
+        text = re.sub(r'robot_radius: [0-9.]+', f'robot_radius: {r}', text)
+        text = re.sub(r'inflation_radius: [0-9.]+', f'inflation_radius: {r + 0.25:.2f}', text)
+        params = os.path.join(tempfile.mkdtemp(prefix='gs_nav_'), 'nav2_params.yaml')
+        open(params, 'w', encoding='utf-8').write(text)
+    nav2_launch = os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py')
     return [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(nav2_launch),
+            launch_arguments={'params_file': params, 'use_sim_time': 'True', 'autostart': 'True',
+                              'log_level': get('log_level')}.items()),
         ExecuteProcess(cmd=sim, output='screen', name='gs_sim'),
         ExecuteProcess(cmd=[os.path.join(get('nodes'), 'visloc_map_localize_node'), '--map', get('map'),
                             '--remap', 'image=/camera/image', '--extrinsics', 'tf',
@@ -53,8 +71,6 @@ def _setup(context):
 
 
 def generate_launch_description():
-    nav2_launch = os.path.join(get_package_share_directory('nav2_bringup'), 'launch',
-                               'navigation_launch.py')
     return LaunchDescription([
         DeclareLaunchArgument('scene'),
         DeclareLaunchArgument('map'),
@@ -69,10 +85,7 @@ def generate_launch_description():
         DeclareLaunchArgument('localize_args', default_value=''),
         DeclareLaunchArgument('sim_args', default_value='', description='extra gs_sim.py arguments'),
         DeclareLaunchArgument('log_level', default_value='info', description="Nav2's log level"),
+        DeclareLaunchArgument('robot_radius', default_value='',
+                              description="m: Nav2's footprint circle (default: the params file's)"),
         OpaqueFunction(function=_setup),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(nav2_launch),
-            launch_arguments={'params_file': LaunchConfiguration('params_file'),
-                              'use_sim_time': 'True', 'autostart': 'True',
-                              'log_level': LaunchConfiguration('log_level')}.items()),
     ])
