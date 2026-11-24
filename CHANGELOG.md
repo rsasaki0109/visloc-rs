@@ -387,6 +387,11 @@ All notable changes to `visloc-rs` will be documented here.
 - 3DGS sim: posts, sign poles and tree trunks are solid
   (`make_gs_scene.py --column-bins`). The robot had driven through them,
   since too few of their thin gaussians passed the obstacle filters.
+- 3DGS sim: kerbs. Where the robot crosses a street, the kerbs are found
+  in the splat's colours (`kerbs.find_kerbs`, warm pavement against grey
+  road; `make_gs_scene.py --crossings`). The road between them is 10 cm
+  lower, the robot pitches on its wheels over them, and it crawls at
+  0.12 m/s while a wheel is on one (`gs_sim.py --kerb-speed`).
 
 - **Stereo VO no longer hangs on KITTI odometry 01.** On raw drive
   2011_10_03_0042 the stereo VO stopped for good at pair ~326.

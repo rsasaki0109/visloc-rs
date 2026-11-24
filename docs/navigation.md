@@ -923,6 +923,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, Nav2 kept to a lane along the walk (below) | 4/4, all at the first try | 0 | 795 of 800 | 4.1 / 1.8 / 25 cm |
 | the same, the side street crossed at its mouth (below) | 4/4, all at the first try | 0 | 727 of 800 | 6.9 / 2.5 / 41 cm |
 | the same, posts and trunks solid (below) | 4/4, goal 2 at the second try | 0 | 805 of 900 | 4.6 / 2.3 / 24 cm |
+| the same, kerbs (below) | 4/4, all at the first try | 0 | 791 of 850 | 5.6 / 2.3 / 32 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -1014,9 +1015,28 @@ at least 8 of the 10 cm height bins from 0.2 to 2.4 m (`--column-bins`).
 Thin things stand tall; haze does not. On this street that made 389
 columns solid, the four among them, and the lane walk still has at least
 0.55 m clear. In the ninth run the robot passed them all, its centre
-never nearer than 0.32 m to a solid cell (its radius is 0.2 m). Video
-(the ninth run):
-[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+never nearer than 0.32 m to a solid cell (its radius is 0.2 m).
+
+**Kerbs.** The robot still rolled off the pavement onto the side street and
+back as if there were no kerbs. The splat's ground is too sparse and noisy
+to show a 10 cm kerb in its geometry: along the lane, the ground's height
+wanders by about 7 cm either way. Its colours do show one, though. Here the
+pavement is warm beige flags and the road neutral grey.
+
+- **Finding the kerbs.** `kerbs.find_kerbs` walks each crossing
+  (`lane_map.py` now writes its cuts to `OUT_crossings.json`). It takes the
+  longest run of road-coloured ground along it as the road (median colour
+  within 0.5 m, red minus blue under 8), and the run's ends as the kerbs.
+  Here they are (59.0, 8.8) and (65.6, 7.5).
+- **The scene.** `make_gs_scene.py --crossings` puts them in `scene.json`.
+- **The robot.** `gs_sim.py` lowers the road between the kerbs by 10 cm. It
+  pitches the body and the camera from the ground under the front and rear
+  wheels, and holds the robot to 0.12 m/s while a wheel is on a kerb
+  (`--kerb-speed`). `chase_video.py` draws the robot pitched.
+
+In the tenth run the robot spent 9.6 s on the two kerbs, at no more than
+0.12 m/s, and kept at least 0.51 m from any solid cell. Video (the tenth
+run): [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
 
