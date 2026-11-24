@@ -7,9 +7,13 @@
 The 360-degree video was walked along a pavement, so the camera's track is
 that pavement's line. Nav2 planning on the full occupancy map is free to cut
 across the lawn or wander onto the road wherever the map is open. This map
-keeps the cells within --half-width metres of the walk (unless the original
-map has them occupied) and marks every other cell occupied, so the global
-plan, and the robot, stay on the pavement. Cells near the walk that the
+keeps the cells within --half-width metres of the walk free (unless the
+original map has them occupied) and makes every other cell very costly
+(occupancy 0.90 in a 'scale' map: a cost of about 234 of 254; the original
+walls stay lethal), so the global plan, and the robot, stay on the
+pavement, while a robot pushed off the lane can still plan back onto it
+(`--hard` makes off-lane lethal). Nav2's static layer must not be
+trinary (`trinary_costmap: false`, as in gz/nav2_params.yaml). Cells near the walk that the
 original map left unknown become free: someone walked there. Lone occupied
 cells there (fewer than two occupied neighbours, stray map points) are
 cleared too.
@@ -99,6 +103,7 @@ def main():
     p.add_argument('--detour-ratio', type=float, default=1.6,
                    help='cut a detour whose length is at least this many times the straight line (0: keep the walk)')
     p.add_argument('--max-chord', type=float, default=20.0, help='longest straight line that replaces a detour (m)')
+    p.add_argument('--hard', action='store_true', help='off the lane lethal (by default very costly: see below)')
     args = p.parse_args()
     from PIL import Image  # noqa: PLC0415
     meta = read_yaml(args.occupancy)
@@ -129,12 +134,19 @@ def main():
     neighbours = sum(np.roll(np.roll(pad, dy, 0), dx, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1))[1:-1, 1:-1] - occupied
     lone = occupied & (neighbours < 2)
     occupied = occupied & ~(lone & near)
-    out = np.where(near & ~occupied, 0 if negate else 254, 254 if negate else 0).astype(np.uint8)
+    # Off the lane: costly, not lethal (`--hard`: lethal), so a robot nudged off it (by people,
+    # a recovery or a localization jump) can still plan its way back. Walls stay lethal.
+    off = 0 if args.hard else 25                       # occupancy 0.90 -> cost ~234 of 254 ('scale')
+    out = np.full(img.shape, off, np.uint8)
+    out[near & ~occupied] = 254
+    out[occupied] = 0
+    if negate:
+        out = 255 - out
     Image.fromarray(out).save(args.out + '.pgm')
     with open(args.out + '.yaml', 'w', encoding='utf-8') as f:
-        f.write(f'image: {os.path.basename(args.out)}.pgm\nmode: trinary\nresolution: {res}\n'
-                f'origin: [{origin[0]}, {origin[1]}, 0.0]\nnegate: {negate}\n'
-                f"occupied_thresh: {meta.get('occupied_thresh', 0.65)}\nfree_thresh: {meta.get('free_thresh', 0.196)}\n")
+        f.write(f'image: {os.path.basename(args.out)}.pgm\nmode: {"trinary" if args.hard else "scale"}\n'
+                f'resolution: {res}\norigin: [{origin[0]}, {origin[1]}, 0.0]\nnegate: {negate}\n'
+                f"occupied_thresh: {0.65 if args.hard else 0.95}\nfree_thresh: {meta.get('free_thresh', 0.196)}\n")
     print(f'{int((near & ~occupied).sum() * res * res)} m^2 free along {len(walk)} walk points '
           f'(half width {args.half_width} m) -> {args.out}.yaml')
 
