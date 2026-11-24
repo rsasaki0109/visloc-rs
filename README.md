@@ -125,6 +125,10 @@ cargo run --example localize_dummy
 Full options for each are in the sections below; `scripts/check.sh` runs the
 complete local quality gate (`fmt`, `clippy`, `test`, `doc`).
 
+**As a library:** `cargo add visloc-rs` ([crates.io](https://crates.io/crates/visloc-rs),
+[API docs](https://docs.rs/visloc-rs)); the Python bindings are
+`pip install visloc` ([below](#python)).
+
 **Prebuilt binaries:** each [release](https://github.com/rsasaki0109/visloc-rs/releases)
 attaches `gsplat_photos`, `visloc_mvs`, `colmap_incremental_mapper` and
 `visloc_web` for Linux x86_64, Windows x86_64 and macOS (Apple silicon), so
