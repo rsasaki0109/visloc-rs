@@ -104,7 +104,16 @@ def people_at(t):
 
 CAM = scene['camera']
 CW, CH = CAM['width'], CAM['height']
+from kerbs import Kerbs  # noqa: E402
+KERBS = Kerbs(scene.get('kerbs'))
+
+
 def gz(x, y):
+    """The ground, the road between kerbs lowered."""
+    return gz_raw(x, y) - (KERBS.drop_at(x, y) if KERBS else 0.0)
+
+
+def gz_raw(x, y):
     if ground is None: return 0.0
     i = min(max(int((x - gr['x0']) / gr['resolution']), 0), ground.shape[1] - 1)
     j = min(max(int((y - gr['y0']) / gr['resolution']), 0), ground.shape[0] - 1)
@@ -150,7 +159,8 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     x, y, yaw = float(r['true_x']), float(r['true_y']), float(r['true_yaw'])
     b = min(bisect.bisect_left(NT, t), len(nav) - 1)
     est = (float(nav[b]['est_x']), float(nav[b]['est_y'])) if nav[b]['est_x'] else None
-    z0 = gz(x, y)
+    zmid, pitch = KERBS.pose(x, y, yaw) if KERBS else (0.0, 0.0)
+    z0 = gz_raw(x, y) + zmid                     # the body rests on its wheels, a pair maybe down a kerb
     cam_yaw = yaw if cam_yaw is None else cam_yaw + 0.12 * math.atan2(math.sin(yaw - cam_yaw), math.cos(yaw - cam_yaw))
     c_w = np.array([x - BACK * math.cos(cam_yaw), y - BACK * math.sin(cam_yaw), gz(x, y) + UP])
     R_wc = cam_axes(cam_yaw, PITCH); R_cw = R_wc.T
@@ -196,16 +206,16 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
                     a = a * ((depth <= 0) | (depth > pz - 0.35))
                 rgb = rgb * (1 - a[..., None])
         if SPLAT:
-            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX, pitch=pitch)
         else:
             dist = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1])
             far = dist > math.hypot(x - c_w[0], y - c_w[1])
             near = ~far & (dist > 2.0)               # not those brushing past the chase camera itself
             rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz, only=far)
-            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+            rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX, pitch=pitch)
             rgb = CROWD.draw(rgb, depth, R_wc, c_w, FX, gz, only=near)
     else:
-        rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX)
+        rgb = robot_model.draw(ROBOT, rgb, depth, (x, y, yaw), z0, R_wc, c_w, FX, pitch=pitch)
     img = Image.fromarray(rgb.astype(np.uint8)); d = ImageDraw.Draw(img)
     # the latest localization (its PnP inliers), if recent
     k = bisect.bisect_right(FT, int(round(t * 1e9))) - 1

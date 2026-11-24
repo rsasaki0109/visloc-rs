@@ -198,14 +198,15 @@ def main():
     sim = os.path.join(out, 'sim')
     scene_json = os.path.join(sim, 'scene.json')
 
-    def make_scene(open_path=''):
+    def make_scene(open_path='', crossings=''):
         d = path[min(5, len(path) - 1), :2] - path[0, :2]
         start = f'{path[0, 0]:.3f},{path[0, 1]:.3f},{math.atan2(d[1], d[0]):.3f}'
         run([sys.executable, os.path.join(HERE, 'make_gs_scene.py'), '--splat', splat, '--model',
              os.path.join(level, 'sparse', '0'), '--out', scene_json, '--camera', FACE,
              '--camera-height', args.camera_height, '--camera-forward', 0, f'--start={start}', '--terrain',
              '--fence-m', args.fence_m, '--min-opacity', 0.3, '--max-scale', 0.3]
-            + (['--open-path', open_path] if open_path else []))
+            + (['--open-path', open_path] if open_path else [])
+            + (['--crossings', crossings] if crossings else []))
 
     def scene():
         make_scene()
@@ -255,7 +256,8 @@ def main():
                  '--walk', traj, '--out', os.path.join(mapd, 'occupancy_lane'), '--half-width', args.lane_half_width])
             lane_walk = os.path.join(mapd, 'occupancy_lane_walk.txt')
             if os.path.exists(lane_walk):        # the sim's fence open along the lane, goals on it
-                make_scene(open_path=lane_walk)
+                crossings = os.path.join(mapd, 'occupancy_lane_crossings.json')
+                make_scene(open_path=lane_walk, crossings=crossings if os.path.exists(crossings) else '')
                 sc = json.load(open(scene_json))
                 sc['goals'] = goals_along(np.loadtxt(lane_walk, ndmin=2), args.goals)
                 json.dump(sc, open(scene_json, 'w'), indent=1)

@@ -94,11 +94,14 @@ class Model:
 SUN = np.array([0.45, 0.25, 0.86]); SUN /= np.linalg.norm(SUN)
 
 
-def draw(model, rgb, depth, pose, z0, R_wc, c_w, fx, ss=2):
-    """Composite the robot over rgb (H x W x 3 float) where it is in front of the splat's depth."""
+def draw(model, rgb, depth, pose, z0, R_wc, c_w, fx, ss=2, pitch=0.0):
+    """Composite the robot over rgb (H x W x 3 float) where it is in front of the splat's depth.
+    pitch: nose up (rad), e.g. with one pair of wheels up a kerb."""
     H, W = depth.shape
     x, y, yaw = pose; c, s = math.cos(yaw), math.sin(yaw)
     Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    Rz = Rz @ np.array([[cp, 0, -sp], [0, 1, 0], [sp, 0, cp]])
     tw = model.tris @ Rz.T + np.array([x, y, z0]); nw = model.vn @ Rz.T
     cam = (tw - c_w) @ R_wc
     if cam[..., 2].max() < 0.3:

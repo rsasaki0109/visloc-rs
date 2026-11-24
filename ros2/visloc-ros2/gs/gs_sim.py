@@ -155,6 +155,8 @@ class Sim(Node):
         g = scene['grid']
         self.grid = Grid(sp(g['file']), g['x0'], g['y0'], g['resolution'])
         self.ground = np.load(sp(scene['ground'])) if scene.get('ground') else None
+        from kerbs import Kerbs  # noqa: PLC0415
+        self.kerbs = Kerbs(scene.get('kerbs'))   # roads the robot crosses, between kerbs
         self.crowd = None
         if movers > 0:
             from people import Crowd  # noqa: PLC0415
@@ -259,6 +261,8 @@ class Sim(Node):
         dw = max(-a.max_alpha * DT, min(a.max_alpha * DT, w_cmd - self.w))
         self.v, self.w = self.v + dv, self.w + dw
         x, y, yaw = self.pose
+        if self.kerbs and self.kerbs.on_edge(x, y, yaw):     # a wheel on a kerb: crawl over it
+            self.v = max(-a.kerb_speed, min(a.kerb_speed, self.v))
         nyaw = yaw + self.w * DT
         nx = x + self.v * DT * math.cos(yaw + self.w * DT / 2)
         ny = y + self.v * DT * math.sin(yaw + self.w * DT / 2)
@@ -318,6 +322,10 @@ class Sim(Node):
                     self.people.write(f'{self.t:.3f},{i},{p[0]:.4f},{p[1]:.4f},{yw:.4f},{ph:.3f},{kd}\n')
 
     def ground_z(self, x, y):
+        """The ground, with the road between kerbs lowered."""
+        return self.ground_raw(x, y) - (self.kerbs.drop_at(x, y) if self.kerbs else 0.0)
+
+    def ground_raw(self, x, y):
         if self.ground is None:
             return 0.0
         g = self.grid
@@ -343,9 +351,14 @@ class Sim(Node):
         x, y, yaw = self.pose
         c, s = math.cos(yaw), math.sin(yaw)
         fwd = self.scene['camera_forward']
-        centre = np.array([x + c * fwd, y + s * fwd, self.scene['camera_height'] + self.ground_z(x, y)])
+        # the body on its wheels: down a kerb with one pair, it pitches and the camera with it
+        zmid, pitch = self.kerbs.pose(x, y, yaw) if self.kerbs else (0.0, 0.0)
+        f = np.array([c * math.cos(pitch), s * math.cos(pitch), math.sin(pitch)])
+        up = np.array([-c * math.sin(pitch), -s * math.sin(pitch), math.cos(pitch)])
+        base = np.array([x, y, self.ground_raw(x, y) + zmid])
+        centre = base + fwd * f + self.scene['camera_height'] * up
         # camera axes in the map: x right = -left, y down, z forward
-        R_wc = np.array([[s, 0, c], [-c, 0, s], [0, -1, 0]], dtype=float)
+        R_wc = np.stack([np.array([s, -c, 0.0]), -up, f], 1)
         R_cw = R_wc.T
         splats = self.crowd.splats(centre, self.ground_z) if self.splat_people else None
         buf = self.renderer.render(R_cw, -R_cw @ centre, splats)
@@ -392,6 +405,8 @@ def main():
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
     p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
     p.add_argument('--cars', type=int, default=0, help='cars driving along the road beside the route')
+    p.add_argument('--kerb-speed', dest='kerb_speed', type=float, default=0.12,
+                   help="m/s at most while a wheel is on a kerb (the scene's 'kerbs')")
     p.add_argument('--road-offset', dest='road_offset', type=float, default=None,
                    help='the road centre line, m to the left of the route (default: estimated from the splat)')
     p.add_argument('--road', default='',

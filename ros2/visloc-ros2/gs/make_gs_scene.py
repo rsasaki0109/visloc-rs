@@ -20,6 +20,10 @@ The splat has no collision geometry, so the robot's world is made from it:
   `--column-bins` (8) of the 10 cm height bins from 0.2 to 2.4 m is solid,
   whatever the filters above say: thin things standing tall (a sign's
   pole) pass few of them, haze is never that tall.
+- **Kerbs**: with `--crossings` (`lane_map.py`'s cuts, where the robot
+  crosses a street), the road on each crossing is the longest run of
+  neutral grey ground between warm pavement (`kerbs.find_kerbs`); its ends
+  are kerbs, and `gs_sim.py` lowers the road between them by 10 cm.
 - **Where the camera was carried**: cells within `--clear-path-m` of the
   capture path are free (floaters near the camera would block it).
 
@@ -87,6 +91,9 @@ def main():
     p.add_argument('--min-opacity', type=float, default=0.5)
     p.add_argument('--max-scale', type=float, default=0.1, help='largest Gaussian axis, m')
     p.add_argument('--min-count', type=int, default=3)
+    p.add_argument('--crossings', default='',
+                   help="lane_map.py's OUT_crossings.json: where the robot crosses a street; the kerbs there are "
+                        "found in the splat's colours (kerbs.find_kerbs) and the road between them lowered")
     p.add_argument('--column-bins', dest='column_bins', type=int, default=8,
                    help='a 10 cm column with gaussians in at least this many of the 10 cm height bins from 0.2 to '
                         '2.4 m is a post, a sign pole or a trunk, and solid whatever the other filters say (0: off)')
@@ -188,6 +195,15 @@ def main():
     }
     if args.terrain:
         scene['ground'] = os.path.basename(stem + '_ground.npy')  # same frame as the grid
+    if args.crossings:
+        from kerbs import find_kerbs  # noqa: PLC0415
+        rgb_ = np.clip(np.stack([g['f_dc_0'], g['f_dc_1'], g['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
+
+        def gz_(x, y):
+            return float(ground[min(max(int((y - y0) / res), 0), H - 1), min(max(int((x - x0) / res), 0), W - 1)])
+        scene['kerbs'] = find_kerbs(xyz, rgb_, opacity, gz_, json.load(open(args.crossings)))
+        print(f"kerbs: {len(scene['kerbs'])} roads crossed, " + ', '.join(
+            f"({k['a'][0]:.1f}, {k['a'][1]:.1f}) to ({k['b'][0]:.1f}, {k['b'][1]:.1f})" for k in scene['kerbs']))
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(scene, f, indent=2)
     try:
