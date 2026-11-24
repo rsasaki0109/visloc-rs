@@ -31,7 +31,8 @@ struct ProjectUniforms {
     // drawn (radians), the distortion k1..k4 and p1 p2 sx1 sy1.
     lens_kind: u32,
     max_theta: f32,
-    pad0: u32,
+    // Nearest drawn depth (m); 0.1 when smaller (the renderer's default 0).
+    near_plane: f32,
     lens_k: vec4<f32>,
     lens_p: vec4<f32>,
 };
@@ -411,12 +412,13 @@ fn compute_projected(
     // degrees, even behind the image plane, sorted by the distance
     // (cpu_render's project_point).
     var depth = p_cam.z;
+    let near = max(u.near_plane, 0.1);
     if (u.lens_kind == LENS_EQUIDISTANT) {
         depth = length(p_cam);
-        if (depth <= 0.1 || lens_ray_angle(p_cam) > max(u.max_theta, 1.57079633)) {
+        if (depth <= near || lens_ray_angle(p_cam) > max(u.max_theta, 1.57079633)) {
             return p;
         }
-    } else if (p_cam.z <= 0.1) {
+    } else if (p_cam.z <= near) {
         return p;
     }
 

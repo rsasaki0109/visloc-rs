@@ -28,6 +28,9 @@
 //! `dyn` line. So the objects are sorted, blended and occluded with the
 //! scene by the same rasterizer, and show in the depth.
 //! `ros2/visloc-ros2/gs/gs_sim.py` drives it.
+//!
+//! `--near M` skips gaussians nearer than `M` m to the camera (default 0.1):
+//! a chase camera passing a street sign does not see it fill the frame.
 
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -115,12 +118,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sh_degree: Option<u32> = None;
     let mut with_depth = false;
     let mut dynamic = 0usize;
+    let mut near = 0.0f32;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--ply" => ply = args.next().map(PathBuf::from),
             "--camera" => camera = args.next(),
             "--sh-degree" => sh_degree = args.next().and_then(|v| v.parse().ok()),
             "--depth" => with_depth = true,
+            "--near" => {
+                near = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--near M: the nearest depth drawn, m")?
+            }
             "--dynamic" => {
                 dynamic = args
                     .next()
@@ -142,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .gaussians
         .extend((0..dynamic).map(|_| dynamic_gaussian(None, sh_degree_scene)));
     let mut renderer = Renderer::new(GpuContext::new()?, &scene, camera.width, camera.height)?;
+    renderer.set_near_plane(near);
     if let Some(d) = sh_degree {
         renderer.set_active_sh_degree(Some(d));
     }
