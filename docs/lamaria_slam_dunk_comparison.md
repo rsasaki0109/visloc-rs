@@ -142,3 +142,45 @@ reproducible on Actions: across four runs the default chain repeats within about
 (sequence_2_12 at 51.02 every time; sequence_5_11 moves by up to 2.3). The driver now retries its downloads
 (5, 15, 45 and 120 s apart), and the training evaluation fails a job that ran on the raw IMU instead of scoring
 it; the evaluator's packages are fetched with retries too.
+
+## The clock offsets per recording
+
+`solve --est-time-offsets` estimates the IMU's clock against the cameras' and the accelerometer's against the
+gyroscope's (prior 1 ms; the paper loses 2.3 CP without them), as two more entries of the calibration vector
+that carries the gyroscope matrix. On a window of sequence_3_17 with its IMU shifted by 3 ms on purpose, the
+estimate moves by 3.00 ms. On the thirteen ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45283299894),
+commit `aff5383`), now decided on all thirteen since the chain repeats within about 0.3:
+
+| Recording | Default | Clock offsets | Change | IMU–camera (ms) | Accelerometer–gyroscope (ms) |
+|---|---:|---:|---:|---:|---:|
+| R_11_5cp | 88.16 | 86.04 | −2.12 | −0.69 | −0.48 |
+| R_12_10cp | 64.07 | 65.09 | +1.02 | −0.81 | −0.46 |
+| R_13_15cp | 78.10 | 78.33 | +0.23 | −0.37 | −0.53 |
+| sequence_1_19 | 85.34 | 84.61 | −0.73 | −0.21 | +0.01 |
+| sequence_1_20 | 86.70 | 84.90 | −1.80 | −0.18 | +0.16 |
+| sequence_2_11 | 88.49 | 85.73 | −2.76 | −0.72 | −0.55 |
+| sequence_2_12 | 51.02 | 42.80 | −8.22 | −1.20 | −0.43 |
+| sequence_3_17 | 80.33 | 73.50 | −6.84 | −0.98 | −0.30 |
+| sequence_3_18 | 57.76 | 54.37 | −3.39 | −1.21 | −0.45 |
+| sequence_4_10 | 68.22 | 68.95 | +0.73 | −0.20 | −0.62 |
+| sequence_4_11 | 76.05 | 74.35 | −1.70 | −0.18 | −0.78 |
+| sequence_5_11 | 66.10 | 68.84 | +2.74 | −1.34 | −1.03 |
+| sequence_5_12 | 6.19 | 6.21 | +0.02 | −0.72 | −0.83 |
+| Mean of thirteen | 68.96 | 67.21 | −1.76 | | |
+
+Five of thirteen gain: not kept. The offsets come out small and alike (−0.2 to −1.3 ms between the IMU and
+the cameras, about −0.5 ms between the accelerometer and the gyroscope), so the per-device delays the driver
+already applies leave little to find, and what the solve finds costs control points.
+
+## What the five measurements say
+
+Every term of the paper tried here lowers the solve's cost and, where measured, the ATE against the
+pseudo-GT, and every one of them loses on the control points (camera path with the fisheye model −2.52, the
+fisheye model −1.67, the clock offsets −1.76, the accelerometer matrix and the 5 s focal lengths on
+sequence_3_17). The temperature terms by day are the exception. The paper's terms work inside its own
+objective: its inertial residuals are whitened with fixed sigmas and additive floors (accelerometer noise
+3×10⁻³ m/s²/√Hz against visloc-rs's 1.6×10⁻², the gyroscope 5×10⁻⁴ rad/s/√Hz against 2.8×10⁻⁴), its biases
+walk per 5 s chunk, and its robust passes end with the calibration frozen. In visloc-rs's objective the same
+freedom fits the pseudo-GT better and the surveyed points worse, the pattern sequence_3_18's drift showed
+before ([Where the second sequences' heading drift comes from](lamaria_batch_ba.md#where-the-second-sequences-heading-drift-comes-from)).
+Adopting the paper's terms would mean adopting its objective first.
