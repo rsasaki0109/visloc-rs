@@ -677,8 +677,8 @@ real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a 3D model of a delivery robot drawn into the
 render, hidden where the splat's depth is in front of it. Both now show the
-latest drive (the eleventh run below: walkers, cyclists, cars, the lane, posts,
-kerbs, and people kept off the road), not this table's. The chase camera skips the splat within 1.5 m
+latest drive (the twelfth run below: walkers, cyclists, cars, the lane, posts,
+kerbs, and people kept off the road and along the walk), not this table's. The chase camera skips the splat within 1.5 m
 of it (`gsplat_render_server --near`, `chase_video.py --near`), so a street
 sign it passes close by does not fill the frame.
 
@@ -949,6 +949,7 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, posts and trunks solid (below) | 4/4, goal 2 at the second try | 0 | 805 of 900 | 4.6 / 2.3 / 24 cm |
 | the same, kerbs (below) | 4/4, all at the first try | 0 | 791 of 850 | 5.6 / 2.3 / 32 cm |
 | the same, people kept off the road (above) | 4/4, all at the first try | 0 | 742 of 800 | 4.9 / 2.3 / 26 cm |
+| the same, people along the walk (above) | 4/4, all at the first try | 0 | 697 of 800 | 6.0 / 2.4 / 22 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -1063,7 +1064,10 @@ In the tenth run the robot spent 9.6 s on the two kerbs, at no more than
 0.12 m/s, and kept at least 0.51 m from any solid cell. In the eleventh,
 with people kept to the pavement, 9.7 s on the kerbs and at least 0.50 m
 from a solid cell; of 3,384 recorded positions of people and bikes along
-the road, none was past the pavement's edge. Video (the eleventh run):
+the road, none was past the pavement's edge. In the twelfth, with people
+along the walk, 9.7 s on the kerbs; of 32,096 positions of people and
+bikes none was within 3.2 m of the road's centre line, and between the
+kerbs none was more than 0.91 m from the walk. Video (the twelfth run):
 [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
