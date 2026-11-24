@@ -4,6 +4,8 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.5.0 - 2026-11-24
+
 ### Added
 
 - **Selectable P3P solver for wall-heavy scenes** (`P3PSolver`, `P3P`
