@@ -16,6 +16,10 @@ The splat has no collision geometry, so the robot's world is made from it:
   the photos it was trained on. Cells farther than `--fence-m` from every
   training camera are marked occupied too, a fence the robot (and its scan)
   sees as a wall, so it drives where its camera images mean something.
+- **Posts, poles and trunks**: a 10 cm column with gaussians in at least
+  `--column-bins` (8) of the 10 cm height bins from 0.2 to 2.4 m is solid,
+  whatever the filters above say: thin things standing tall (a sign's
+  pole) pass few of them, haze is never that tall.
 - **Where the camera was carried**: cells within `--clear-path-m` of the
   capture path are free (floaters near the camera would block it).
 
@@ -83,6 +87,9 @@ def main():
     p.add_argument('--min-opacity', type=float, default=0.5)
     p.add_argument('--max-scale', type=float, default=0.1, help='largest Gaussian axis, m')
     p.add_argument('--min-count', type=int, default=3)
+    p.add_argument('--column-bins', dest='column_bins', type=int, default=8,
+                   help='a 10 cm column with gaussians in at least this many of the 10 cm height bins from 0.2 to '
+                        '2.4 m is a post, a sign pole or a trunk, and solid whatever the other filters say (0: off)')
     p.add_argument('--fence-m', type=float, default=1.5)
     p.add_argument('--open-path', dest='open_path', default='',
                    help='a text file of x y points: the fence also stays open within --fence-m of this path '
@@ -142,6 +149,26 @@ def main():
     dist = ndimage.distance_transform_edt(~seen) * res
     fence = dist > args.fence_m
     occ &= dist > args.clear_path_m
+    if args.column_bins:
+        # Posts, sign poles and trunks: thin, so few of their gaussians pass the filters above,
+        # but they stand tall. Haze does not.
+        m = (h > 0.2) & (h < 2.4) & (opacity > 0.2)
+        cr = 0.1
+        ci = ((xyz[m, 0] - x0) / cr).astype(int)
+        cj = ((xyz[m, 1] - y0) / cr).astype(int)
+        hb = ((h[m] - 0.2) / 0.1).astype(int)
+        key = np.unique(np.stack([cj, ci, hb], 1), axis=0)
+        cols, counts = np.unique(key[:, :2], axis=0, return_counts=True)
+        tall = cols[counts >= args.column_bins]
+        column = np.zeros((H, W), bool)
+        f = int(round(cr / res))
+        for dj in range(f):
+            for di in range(f):
+                jj, ii = tall[:, 0] * f + dj, tall[:, 1] * f + di
+                ok_ = (jj >= 0) & (jj < H) & (ii >= 0) & (ii < W)
+                column[jj[ok_], ii[ok_]] = True
+        occ |= ndimage.binary_dilation(column, iterations=1)
+        print(f'{len(tall)} tall thin columns (posts, poles, trunks) made solid')
     grid = (occ | fence).astype(np.uint8)
     stem = os.path.splitext(args.out)[0]
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
