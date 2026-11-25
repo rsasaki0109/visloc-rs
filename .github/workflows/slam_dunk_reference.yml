@@ -80,32 +80,29 @@ jobs:
           docker run --rm slam-dunk prepare --help || true
           docker run --rm slam-dunk refine --help || true
 
-      - name: Prepare once, refine per config
+      - name: Run each config
+        # `refine` of this release rejects the packets its own `prepare` writes ("Expected a stereo-reference-v1
+        # packet"), so each config runs end to end with `run`
         shell: bash
         run: |
           out="$GITHUB_WORKSPACE/out"
           mkdir -p "$WORK/results" "$out"
           chmod 777 "$WORK/results"
           cd "$WORK/slam-dunk"
-          sd() {
-            docker run --rm --network none --user "$(id -u):$(id -g)" \
-              --cpus "$(nproc)" --memory 12g --memory-swap 12g \
-              --read-only --tmpfs /tmp:rw,exec,size=512m \
-              -v "$WORK/data/recording:/recording:ro" -v "$WORK/results:/results" slam-dunk "$@"
-          }
-          start=$(date +%s)
-          sd prepare /recording /results/packet 2>&1 | tail -20
-          echo "prepare: $(( $(date +%s) - start )) s"
-          ls "$WORK/results/packet"
           for config in $CONFIGS; do
             start=$(date +%s)
-            if sd refine /results/packet "/results/$config" --config "configs/$config.json" 2>&1 | tail -15; then
+            if docker run --rm --network none --user "$(id -u):$(id -g)" \
+                --cpus "$(nproc)" --memory 12g --memory-swap 12g \
+                --read-only --tmpfs /tmp:rw,exec,size=512m \
+                -v "$WORK/data/recording:/recording:ro" -v "$WORK/results:/results" \
+                slam-dunk run /recording "/results/$config" --config "configs/$config.json" 2>&1 | tail -8; then
               echo "$config: $(( $(date +%s) - start )) s"
-              cp "$(find "$WORK/results/$config" -name trajectory.txt | head -1)" "$out/${SEQUENCE}_$config.txt" \
+              cp "$WORK/results/$config/estimate/trajectory.txt" "$out/${SEQUENCE}_$config.txt" \
                 || echo "::warning::$config wrote no trajectory"
             else
               echo "::warning::$config failed"
             fi
+            rm -rf "$WORK/results/$config"
           done
           ls -la "$out"
 
