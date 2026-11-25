@@ -614,6 +614,14 @@ def main() -> int:
                         help="--ba-pass-features: the tracks it applies to (default 1)")
     parser.add_argument("--ba-pass-features-serials", nargs="*", default=list(DEFAULT_PASS_FEATURES_SERIALS),
                         help="--ba-pass-features: the device serials it applies to (default 1WM093701G1276)")
+    parser.add_argument("--ba-experiment-pass-features", choices=("sift", "rootsift"), default=None,
+                        help="--ba-chain: SIFT or RootSIFT keypoints of their own for the pass by day, in the "
+                             "submitted chain only (with --ba-compare: the experiment, not the default chain)")
+    parser.add_argument("--ba-experiment-pass-feature-args", default="",
+                        help="--ba-experiment-pass-features: options of their features step (one string, e.g. "
+                             "\"--num-features 900 --kf-step 20\"; commas may stand for the spaces)")
+    parser.add_argument("--ba-experiment-pass-match-args", default="",
+                        help="--ba-experiment-pass-features: options of their match steps (e.g. \"--ratio 0.78\")")
     parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
                         help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
@@ -910,8 +918,16 @@ def main() -> int:
                             run([python, estimate_converter, "--in-tum", source,
                                  "--out-estimate", log_dir / name], check=True)
                         share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
+                    main_options = chain_options
+                    if args.ba_experiment_pass_features:  # keypoints of their own for this chain's pass
+                        log(f"{seq}: {args.ba_experiment_pass_features} keypoints of their own in the pass "
+                            f"({args.ba_experiment_pass_feature_args or 'default options'})")
+                        words = lambda option: option.replace(",", " ").split()  # noqa: E731
+                        main_options = dict(chain_options, pass_features=args.ba_experiment_pass_features,
+                                            pass_feature_args=words(args.ba_experiment_pass_feature_args),
+                                            pass_match_args=words(args.ba_experiment_pass_match_args))
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",
-                                           **chain_options, pass_args=sequence_pass_args)
+                                           **main_options, pass_args=sequence_pass_args)
                     variants = []
                     if args.ba_compare_camera_gyro:
                         camera_options = sequence_pass_args.copy()

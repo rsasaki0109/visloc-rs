@@ -81,7 +81,7 @@ def pass_work(work, pass_features=None):
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
           num_features=None, pass_features=None, pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False,
-          final=False, temperature=None):
+          final=False, temperature=None, pass_feature_args=(), pass_match_args=()):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -96,7 +96,10 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     by Lucas-Kanade flow through the frames between them (the flow step, after match) for every solve; `final`
     solves once more after the last solve with its calibration held (SLAM Dunk's final refinement, ba4.tum);
     `temperature`, the SLAM cameras' temperature over the recording (lamaria_temperature.py), lets the pass by day
-    estimate the gyroscope's bias and scale change per degree (SLAM Dunk's thermal model)."""
+    estimate the gyroscope's bias and scale change per degree (SLAM Dunk's thermal model). `pass_features` may
+    also be "sift" or "rootsift": keypoints of their own for the pass, with `pass_feature_args` (e.g. --num-features
+    900, or --kf-step 20: every second keyframe of the online windows) and `pass_match_args` for their matching
+    (e.g. --ratio 0.78)."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
@@ -117,7 +120,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
         if pass_features:
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
-            out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
+            out += keypoints(mav0, vio, calib, pw, jobs, [*feature_options(pass_features), *pass_feature_args],
+                             name="pass ", match=guide, match_args=pass_match_args)
         iters = ["--iterations", "30", "--rel-tol", "1e-5", "--est-gyro-m"] if low else ["--iterations", "60"]
         thermal = ["--imu-temp", temperature, "--est-gyro-bias-temp", "--est-gyro-scale-temp"] \
             if temperature and not low else []
@@ -137,7 +141,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
             last_work, last = again, "ba3"
             out += [
                 ("rematch", ["match", "--work", again, "--vio", work / "ba2.tum", "--calib", calib, "--jobs", jobs,
-                             "--tau-slope", "0.3", "--tau-max", "20", *match_args], again / "match.done", False),
+                             "--tau-slope", "0.3", "--tau-max", "20", *(pass_match_args if pass_features else match_args)],
+                 again / "match.done", False),
                 ("rematch loops", ["loops", "--work", again, "--vio", work / "ba2.tum", "--calib", calib, "--jobs",
                                    jobs, "--step", "4"], again / "loops.npz", False),
                 ("solve with the new matches", ["solve", "--work", again, "--vio", work / "ba2.tum", "--out",
@@ -163,7 +168,7 @@ def result(work, track, low_light=None, rematch=False, low_light_pass=True, fina
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
               pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False, final=False,
-              temperature=None, keep_matches=False):
+              temperature=None, keep_matches=False, pass_feature_args=(), pass_match_args=()):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -173,7 +178,8 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
                                            num_features, pass_features, pass_match, pass_args, low_light_pass,
-                                           match_args, flow, final, temperature):
+                                           match_args, flow, final, temperature, pass_feature_args,
+                                           pass_match_args):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -215,8 +221,12 @@ def main():
                         "matched by LightGlue")
     p.add_argument("--num-features", type=int, default=None,
                    help="keypoints per image (default: the features step's for SIFT, 1,024 for a learned extractor)")
-    p.add_argument("--pass-features", choices=("aliked", "disk", "superpoint"), default=None,
-                   help="by day, learned keypoints for the pass after the online windows (in work/<extractor>)")
+    p.add_argument("--pass-features", choices=("sift", "rootsift", "aliked", "disk", "superpoint"), default=None,
+                   help="by day, keypoints of its own for the pass after the online windows (in work/<extractor>)")
+    p.add_argument("--pass-feature-args", default="", help="--pass-features: extra options of its features step "
+                   "(one string, e.g. \"--num-features 900 --kf-step 20\")")
+    p.add_argument("--pass-match-args", default="", help="--pass-features: extra options of its match steps "
+                   "(one string, e.g. \"--ratio 0.78\")")
     p.add_argument("--pass-match", choices=PASS_MATCH, default="vio",
                    help="--pass-features: keep the matches within the VIO's epipolar band, the online result's, or "
                         "those an essential matrix explains")
@@ -237,6 +247,7 @@ def main():
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
               num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
+              pass_feature_args=a.pass_feature_args.split(), pass_match_args=a.pass_match_args.split(),
               pass_args=a.pass_args.split(), low_light_pass=not a.low_light_online,
               match_args=a.match_args.split(), flow=a.flow, final=a.final_refinement, temperature=a.temperature)
 

@@ -134,6 +134,26 @@ class StepsTest(unittest.TestCase):
         self.assertNotIn("pass features", low)  # low light: the pass on the low-light SIFT keypoints
         self.assertEqual(value(low["pass solve"], "--work"), "w")
 
+    def test_the_pass_reads_its_own_rootsift_keypoints_with_their_options(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True,
+                                                pass_features="rootsift", match_args=["--ratio", "0.9"],
+                                                pass_feature_args=["--num-features", "900", "--kf-step", "20"],
+                                                pass_match_args=["--ratio", "0.78"])}
+        self.assertNotIn("--rootsift", p["features"])
+        self.assertNotIn("--kf-step", p["features"])
+        self.assertEqual(value(p["match"], "--ratio"), "0.9")
+        own = p["pass features"]
+        self.assertIn("--rootsift", own)
+        self.assertNotIn("--extractor", own)
+        self.assertEqual(value(own, "--num-features"), "900")
+        self.assertEqual(value(own, "--kf-step"), "20")
+        self.assertEqual(value(own, "--work"), str(Path("w/rootsift")))
+        for name in ("pass match", "rematch"):
+            self.assertEqual(value(p[name], "--ratio"), "0.78")
+        self.assertEqual(value(p["pass solve"], "--work"), str(Path("w/rootsift")))
+        self.assertEqual(value(p["pass solve"], "--vio"), str(Path("w/online.tum")))
+
     def test_the_pass_matches_within_the_online_band_or_by_an_essential_matrix(self):
         def plan_with(guide):
             return {name: [str(c) for c in cmd]
