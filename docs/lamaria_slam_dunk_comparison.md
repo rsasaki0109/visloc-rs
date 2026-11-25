@@ -285,21 +285,21 @@ The [`slam_dunk_reference`](../.github/workflows/slam_dunk_reference.yml) workfl
 nothing copied) with each of its configs end to end (`run`; this release's `refine` rejects the packets its
 own `prepare` writes), and the trajectories are scored with the same evaluator
 ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45550732914); scored locally, the job's
-evaluator lacked `tqdm`). sequence_1_20 was still running at the time of writing.
+evaluator lacked `tqdm`).
 
-| SLAM Dunk config | sequence_3_17 | R_12_10cp |
-|---|---:|---:|
-| baseline (no camera path, no G; with the accelerometer, clock and thermal terms) | 52.65 | 81.09 |
-| camera_only | 64.26 | 78.42 |
-| gyro_only | 61.32 | 80.56 |
-| **full** | **87.64** | **82.13** |
-| no_clock (full without the clock offsets) | 71.60 | 81.70 |
-| no_accelerometer | 69.56 | 81.04 |
-| no_thermal | 86.96 | 82.01 |
-| no_final_refinement | 86.51 | 80.95 |
-| ladder_0 / ladder_1 / ladder_2 | 56.70 / 48.36 / 52.32 | 79.43 / 81.03 / 81.28 |
-| no_auxiliary | 54.75 | 80.94 |
-| visloc-rs, default chain | 80.35 | 63.88 |
+| SLAM Dunk config | sequence_3_17 | R_12_10cp | sequence_1_20 |
+|---|---:|---:|---:|
+| baseline (no camera path, no G; with the accelerometer, clock and thermal terms) | 52.65 | 81.09 | 95.12 |
+| camera_only | 64.26 | 78.42 | 90.73 |
+| gyro_only | 61.32 | 80.56 | 94.72 |
+| **full** | **87.64** | **82.13** | **90.83** |
+| no_clock (full without the clock offsets) | 71.60 | 81.70 | 89.99 |
+| no_accelerometer | 69.56 | 81.04 | 89.62 |
+| no_thermal | 86.96 | 82.01 | 91.20 |
+| no_final_refinement | 86.51 | 80.95 | 89.27 |
+| ladder_0 / ladder_1 / ladder_2 | 56.70 / 48.36 / 52.32 | 79.43 / 81.03 / 81.28 | 94.30 / 94.94 / 95.48 |
+| no_auxiliary | 54.75 | 80.94 | 89.24 |
+| visloc-rs, default chain | 80.35 | 63.88 | 86.70 |
 
 Two things follow:
 
@@ -308,6 +308,10 @@ Two things follow:
   out just the clock offsets (71.60) or the accelerometer intrinsics (69.56) loses most of it again.
   visloc-rs's "paper's model" pass above had no clock offsets and scored 73.93 there, next to SLAM Dunk's
   no_clock 71.60. The terms were never measured here all at once.
+- **sequence_1_20 is the paper's one loss, and it reproduces.** SLAM Dunk's baseline scores 95.12 and its
+  full model 90.83 (−4.29; the paper: −4.8), against visloc-rs's 86.70; G alone keeps it at 94.72, the camera
+  path costs it.
 - **On R_12_10cp the gap is not the model.** SLAM Dunk's baseline already scores 81.09 against visloc-rs's
-  63.88, and its full model adds 1.0. What makes the difference there is in the baseline pipeline: front
-  end, keyframes, robust passes or solver.
+  63.88, and its full model adds 1.0. What makes the difference there, and on sequence_1_20 (95.12 against 86.70), is in the baseline
+  pipeline: front end, keyframes, robust passes or solver. On sequence_3_17 the same baseline is 28 points
+  below visloc-rs's.
