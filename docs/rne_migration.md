@@ -1,6 +1,6 @@
 # Moving the street simulator to Robot Native Engine
 
-Status: P0 and P1 done (below); P2 next. This plan moves the 3DGS street simulator
+Status: P0, P1 and P2 done (below); P3 next. This plan moves the 3DGS street simulator
 (`ros2/visloc-ros2/gs/`: `gs_sim.py`, `people.py`, `kerbs.py`,
 `chase_video.py`, and Nav2) into Robot Native Engine (RNE). visloc-rs keeps the
 reconstruction and the localization.
@@ -169,3 +169,18 @@ Each phase ends with a headless test in RNE, and a short docs entry.
     chase view each simulated second, it takes 7 minutes on CPU lavapipe.
   - The trajectory hash is the same with and without rendering.
   - The robot is still a box in the chase view.
+- **P2 done.** visloc-rs `visloc_map_localize_server` (in `ros2/visloc-ros2`)
+  is `visloc_map_localize_node`'s core behind stdin and stdout. It loads the
+  map once and answers one image per line, with the estimate as the prior.
+  RNE's example 163 runs it for the whole drive with `--localizer BIN`:
+  - Wheel odometry with the simulator's errors, a fix every 0.5 s on the
+    front camera RNE renders. Fixes are gated at 0.25 m (+0.1 m/s since the
+    last one) and blended in halfway.
+  - 4/4 goals with no contacts in both runs. 529 of 572 and 538 of 575
+    fixes. Pose error RMSE 8.6 and 5.5 cm, median 2.0 cm. Nav2's thirteenth
+    run: 8.9 / 2.3 cm.
+  - The map was built from `gsplat_render_server` renders; RNE's renders
+    still localize (97 % of frames with the prior).
+  - Runs with fixes are not bit-for-bit repeatable. The localizer is
+    deterministic on the same images, but RNE's splat renders on CPU
+    lavapipe vary slightly between runs.
