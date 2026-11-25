@@ -672,11 +672,16 @@ localizations, 692 were by projection.
 
 Video: [media/gs_street_360.mp4](media/gs_street_360.mp4). A 12 s GIF of it:
 [assets/hero_real2sim_street.gif](assets/hero_real2sim_street.gif). Both show
-OverMaps360 footage (CC BY-NC 4.0). First, the
+OverMaps360 footage (CC BY-NC 4.0), credited in every frame. First, the
 real 360° frames against the simulator at the same spots. Then the robot's
 drive, filmed by a chase camera in the splat 3.2 m behind it and 2.75 m up,
 near the capture height. The robot is a 3D model of a delivery robot drawn into the
-render, hidden where the splat's depth is in front of it.
+render, hidden where the splat's depth is in front of it. Both now show the
+latest drive (the thirteenth run below: walkers, cyclists, cars, the lane, posts,
+kerbs, people off the road and along the walk, and room round the robot's
+body), not this table's. The chase camera skips the splat within 1.5 m
+of it (`gsplat_render_server --near`, `chase_video.py --near`), so a street
+sign it passes close by does not fill the frame.
 
 The overlays show the localization itself:
 
@@ -881,6 +886,26 @@ keeping right.
   15 cm), never a car. Offline over 600 s with 4 seeds: no one more than
   5 cm into a car body; nobody stood still longer than 20 s (cars 11 s,
   a red light).
+- **Pavement**: people and bikes keep to the pavement. Where it is
+  narrow, their side offsets (±1.6 m from the walk, plus dodging) took
+  them up to 1.6 m onto the road. `people.pavement_edges` scans out from
+  the walk, every metre along the road stretches, and puts the kerb where
+  the warm flags end (grey, or 0.75 m with no ground: plain asphalt has
+  few gaussians). Here it is 0.15 to 2.9 m from the walk. Only on the
+  crossing do they step past it. Offline, 3 seeds × 400 s: from 20-40%
+  of samples past the edge to none, and nobody stood still longer than
+  before (24 s, at the crossing).
+- **Along the walk**: people walk along the line the 360 video was walked
+  (scene.json's `walk`, which `real2sim.py` writes from the lane's walk),
+  each at its own side offset from it (`people.walk_offsets`). Before,
+  they followed the straight lines between the goals, which at the side
+  street's mouth run 1.2-1.7 m on the road side of the pavement: people
+  walked lengthwise along the real zebra crossing in the splat. Between
+  the kerbs they keep within 0.9 m of the walk, as the robot does, rather
+  than out into the side street. Offline, 4 seeds × 400 s: nobody on the
+  road except on the crossing, at most 0.91 m from the walk between the
+  kerbs, nobody more than 5 cm into a car, and nobody still for longer
+  than 21 s.
 - **Speed**: they speed up at 2 m/s² and brake at up to 6 m/s². They brake
   smoothly to stop 1 m behind the car in front, and at 3 m/s² for the line
   on red. On amber, a car that cannot stop at 4.5 m/s² drives on. They
@@ -924,6 +949,9 @@ walkers crossed, cars stopped on every red, and no footprints overlapped.
 | the same, the side street crossed at its mouth (below) | 4/4, all at the first try | 0 | 727 of 800 | 6.9 / 2.5 / 41 cm |
 | the same, posts and trunks solid (below) | 4/4, goal 2 at the second try | 0 | 805 of 900 | 4.6 / 2.3 / 24 cm |
 | the same, kerbs (below) | 4/4, all at the first try | 0 | 791 of 850 | 5.6 / 2.3 / 32 cm |
+| the same, people kept off the road (above) | 4/4, all at the first try | 0 | 742 of 800 | 4.9 / 2.3 / 26 cm |
+| the same, people along the walk (above) | 4/4, all at the first try | 0 | 697 of 800 | 6.0 / 2.4 / 22 cm |
+| the same, Nav2's footprint the robot's body (below) | 4/4, all at the first try | 0 | 719 of 800 | 8.9 / 2.3 / 72 cm |
 
 That is 4 walkers, 2 cyclists, a dog walker, a pushchair and 3 cars. In
 the first run, a car held up behind another at the light counted as stuck
@@ -1035,8 +1063,26 @@ pavement is warm beige flags and the road neutral grey.
   (`--kerb-speed`). `chase_video.py` draws the robot pitched.
 
 In the tenth run the robot spent 9.6 s on the two kerbs, at no more than
-0.12 m/s, and kept at least 0.51 m from any solid cell. Video (the tenth
-run): [media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
+0.12 m/s, and kept at least 0.51 m from any solid cell. In the eleventh,
+with people kept to the pavement, 9.7 s on the kerbs and at least 0.50 m
+from a solid cell; of 3,384 recorded positions of people and bikes along
+the road, none was past the pavement's edge. In the twelfth, with people
+along the walk, 9.7 s on the kerbs; of 32,096 positions of people and
+bikes none was within 3.2 m of the road's centre line, and between the
+kerbs none was more than 0.91 m from the walk.
+
+**Room round the robot.** In the video a cyclist rode through the robot.
+The robot drawn there is 0.87 by 0.70 m, but Nav2 and the people took it
+for a 0.2 m circle (scene.json's `robot_radius`): bikes came up to 0.30 m
+into its body, walkers 0.16 m, and the robot squeezed between a walker and
+a cyclist. Now `gs_sim.py` keeps people 0.6 m from its centre
+(`--robot-body`), and `gs_nav.launch.py robot_radius:=0.45` gives Nav2 a
+footprint the body's size (inflation 0.70 m). In the thirteenth run nobody
+came within 0.10 m of the body, the robot kept at least 0.74 m from any
+solid cell, and it still reached 4/4 goals at the first try with no
+contacts. Its pose error was over 0.3 m for 3 s (up to 72 cm, at 84 s,
+then back under 0.3 m), hence the larger RMSE. Video (the thirteenth run):
+[media/gs_street_crossing.mp4](media/gs_street_crossing.mp4).
 
 <p align="center"><img src="assets/real2sim_lane.png" alt="Top-down: the 360 camera's walk in green and the robot's path in red over the occupancy map. Above, with the whole map, the robot cuts the lawn and swings up to 2.5 m off the walk. Below, with a 2 m lane along the walk (blue), it follows the walk." width="720"></p>
 

@@ -43,8 +43,9 @@ pub struct ProjectUniforms {
     pub lens_kind: u32,
     /// Widest ray angle the lens is followed to (radians; `Lens::max_theta`).
     pub max_theta: f32,
-    /// Padding: the distortion starts on a 16-byte boundary.
-    pub _pad: u32,
+    /// Nearest depth drawn (m); anything at or below 0.1 is 0.1, the default.
+    /// Also keeps the distortion on a 16-byte boundary.
+    pub near_plane: f32,
     /// Distortion `[k1, k2, k3, k4, p1, p2, sx1, sy1]`.
     pub lens: [f32; 8],
 }
@@ -119,7 +120,7 @@ impl ProjectUniforms {
             sh_active_degree: sh_degree,
             lens_kind: view.camera.lens.kind(),
             max_theta: view.camera.lens.max_theta,
-            _pad: 0,
+            near_plane: 0.0,
             lens: view.camera.lens.coeffs,
         }
     }

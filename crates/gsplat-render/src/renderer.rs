@@ -590,6 +590,8 @@ pub struct Renderer {
     skip_readback: bool,
     /// Evaluated SH degree override (see `set_active_sh_degree`).
     active_sh_degree: Option<u32>,
+    /// Nearest depth drawn (see `set_near_plane`).
+    near_plane: f32,
     /// The caller zeroes the parameter gradients after consuming them (e.g.
     /// a fused optimizer step), so `backward` need not clear them.
     pub(crate) grads_zeroed_by_caller: bool,
@@ -886,6 +888,7 @@ impl Renderer {
             max_isects_limit,
             skip_readback: false,
             active_sh_degree: None,
+            near_plane: 0.0,
             grads_zeroed_by_caller: false,
             last_frame: FrameCounts::default(),
             backward: None,
@@ -946,6 +949,13 @@ impl Renderer {
     /// trainer's Adam step does), which saves a full clear per step.
     pub fn set_grads_zeroed_by_caller(&mut self, zeroed: bool) {
         self.grads_zeroed_by_caller = zeroed;
+    }
+
+    /// Skip gaussians nearer to the camera than `near` m (0, the default, keeps
+    /// the usual 0.1). A chase camera passing a sign uses it, so the sign does not
+    /// fill the frame for a moment.
+    pub fn set_near_plane(&mut self, near: f32) {
+        self.near_plane = near;
     }
 
     /// Evaluate spherical harmonics only up to `degree` (clamped to the
@@ -1075,6 +1085,7 @@ impl Renderer {
         );
         let mut prof = StageTimer::from_env();
         let mut u = ProjectUniforms::from_view(view, self.sh_degree, self.num_gaussians() as u32);
+        u.near_plane = self.near_plane;
         u.sh_active_degree = self
             .active_sh_degree
             .map_or(self.sh_degree, |d| d.min(self.sh_degree));

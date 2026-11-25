@@ -560,8 +560,8 @@ reaches all goals at the first try. Not yet tried on a real robot. See
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero_real2sim_street.gif" alt="Real to sim. First, a real 360-degree video frame of a town street above the same spot rendered from a 3D Gaussian splat that visloc-rs's own SfM and 3DGS built from that video. Then a third-person view inside the splat: a small delivery robot with a camera mast drives the street with Nav2. Green rays run from its camera to the map features visloc matched in its latest image, an inset shows that image with the matched features circled, a cyan ring marks where visloc puts the robot, and a minimap shows goals turning green." width="640"><br>
-  <sub>Real to sim: a public 360° street walk rebuilt by visloc-rs's SfM + 3DGS on a CPU, and a robot localizing in it with visloc while Nav2 drives: 4/4 goals over 121 m, camera 1.2 m up, 97% of its images localized. Green: the map features it matched (<a href="docs/navigation.md#real-to-sim-a-simulator-made-of-a-3d-gaussian-splat-of-real-photos">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
+  <img src="docs/assets/hero_real2sim_street.gif" alt="Real to sim. First, a real 360-degree video frame of a town street above the same spot rendered from a 3D Gaussian splat that visloc-rs's own SfM and 3DGS built from that video. Then a third-person view inside the splat: a small delivery robot with a camera mast drives the street with Nav2. Green rays run from its camera to the map features visloc matched in its latest image, an inset shows that image with the matched features circled, a cyan ring marks where visloc puts the robot, and a minimap shows goals turning green. Walkers, cyclists and cars share the street; the robot keeps to the pavement." width="640"><br>
+  <sub>Real to sim: a public 360° street walk rebuilt by visloc-rs's SfM + 3DGS on a CPU, and a robot localizing in it with visloc while Nav2 drives among walkers, cyclists and cars: 4/4 goals over 114 m, camera 1.2 m up, 93% of its images localized, no contacts. Green: the map features it matched (<a href="docs/navigation.md#real-to-sim-a-simulator-made-of-a-3d-gaussian-splat-of-real-photos">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
 </p>
 
 <p align="center">
@@ -571,7 +571,7 @@ reaches all goals at the first try. Not yet tried on a real robot. See
 
 <p align="center">
   <img src="docs/assets/real2sim_cars.gif" alt="The same street with cars, a cyclist and walkers, all made of 3D Gaussians: a car overtakes the delivery robot on the road beside the pavement, cars drive both ways, and the robot passes a zebra crossing with a traffic light while it drives with Nav2 and localizes with visloc." width="480"><br>
-  <sub>Add cars on a road the sim finds in the splat by itself, and a zebra crossing with a traffic light. Cars drive along the street's own line, keep right, and brake and pull away smoothly. The robot keeps to the pavement, steps down and up the kerbs slowly to cross the side street at its mouth, and goes round posts and trees: 4/4 goals at the first try, no contacts, and nobody walks into a car (<a href="docs/navigation.md#with-people-walking-the-street">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
+  <sub>Add cars on a road the sim finds in the splat by itself, and a zebra crossing with a traffic light. Cars drive along the street's own line, keep right, and brake and pull away smoothly. The robot keeps to the pavement, steps down and up the kerbs slowly to cross the side street at its mouth, and goes round posts and trees, while people keep to the pavement: 4/4 goals at the first try, no contacts, and nobody walks into a car (<a href="docs/navigation.md#with-people-walking-the-street">notes</a>). Footage: OverMaps360 (OverTheReality), CC BY-NC 4.0.</sub>
 </p>
 
 **A 360° video to a busy simulator in one command.** `real2sim.py` runs every

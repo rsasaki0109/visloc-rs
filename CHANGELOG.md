@@ -416,6 +416,32 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- The README's street GIFs credit OverMaps360 (OverTheReality), CC BY-NC
+  4.0 in every frame, and show the latest drive: the hero no longer has
+  the robot down the side street, and the cars GIF shows what its caption
+  says (cars passing, the crossing and its light). The chase camera skips
+  the splat within 1.5 m (`--near`, new in `gsplat_render_server` and
+  `Renderer::set_near_plane`), so a sign it passes no longer fills the frame.
+- 3DGS sim people keep off the road. Their side offsets (±1.6 m from the
+  walk, plus dodging) took them up to 1.6 m onto the road where the
+  pavement is narrow. `people.pavement_edges` finds where the pavement
+  ends on the road side, along the route, from the splat's colours (warm
+  flags until grey or no ground). `gs_sim.py` hands it to the crowd, and
+  people and bikes, except on the crossing, stay on their side of it.
+  Offline, 3 seeds × 400 s: from 20-40% of samples past the edge (up to
+  1.6 m) to none, and nobody stood still longer than before (24 s).
+- 3DGS sim people walk along the walk (the line the 360 video was walked,
+  scene.json's new `walk`, written by `real2sim.py`), not along the
+  straight lines between the goals. At the side street's mouth those cut
+  1.2-1.7 m towards the road, so people walked along the real zebra
+  crossing in the splat. Between kerbs they keep within 0.9 m of the walk
+  (`people.kerb_spans`), as on a crossing, not out into the side street.
+- 3DGS sim: room round the robot's body. People kept clear of a 0.2 m
+  circle while the robot drawn in the video is 0.87 x 0.70 m, so a bike
+  rode through it. `gs_sim.py --robot-body` (0.6 m) keeps people off the
+  body, and `gs_nav.launch.py robot_radius:=` sets Nav2's footprint (0.45
+  m for this robot), so it no longer squeezes between people.
+
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it
   crosses over. Cars wait, keep right, and U-turn only at the road's
