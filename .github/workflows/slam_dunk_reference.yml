@@ -1,0 +1,127 @@
+# SLAM Dunk (github.com/jacobvm04/slam-dunk, AGPL-3.0) run as published, for comparison only: the job clones it,
+# builds its Docker image and runs its CLI on LaMAria training recordings, then scores the trajectories with the
+# official control-point evaluator. Nothing of SLAM Dunk is copied into this repository; its code is only
+# executed here. See docs/lamaria_slam_dunk_comparison.md.
+name: SLAM Dunk reference runs
+
+on:
+  push:
+    branches: [claude/determined-lovelace-pwgdae]
+    paths: [.github/workflows/slam_dunk_reference.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SPLIT: training
+  # SLAM Dunk configs to run on each recording (configs/<name>.json in its repository)
+  CONFIGS: full
+
+jobs:
+  recording:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        sequence: [sequence_3_17, sequence_1_20, R_12_10cp]
+    env:
+      SEQUENCE: ${{ matrix.sequence }}
+    steps:
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          df -h / /mnt
+          sudo mkdir -p /mnt/sd && sudo chown "$USER" /mnt/sd
+          echo "WORK=/mnt/sd" >> "$GITHUB_ENV"
+          nproc; free -g; grep -o -m1 avx2 /proc/cpuinfo
+
+      - name: Clone SLAM Dunk
+        shell: bash
+        run: |
+          git clone -q --depth 1 https://github.com/jacobvm04/slam-dunk.git "$WORK/slam-dunk"
+          git -C "$WORK/slam-dunk" log -1 --format='SLAM Dunk commit %H (%cs)'
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the recording
+        shell: bash
+        run: |
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          mkdir -p "$WORK/in"
+          curl -fsSL --retry 5 --retry-all-errors "$data/raw_data/$SPLIT/$SEQUENCE.vrs" -o "$WORK/in/recording.vrs"
+          curl -fsSL --retry 5 --retry-all-errors "$data/aria_calibrations/$SPLIT/$SEQUENCE.json" \
+            -o "$WORK/in/calibration.json"
+          ls -la "$WORK/in"; df -h /mnt
+
+      - name: Extract (SLAM Dunk's tools/extract_recording.py)
+        shell: bash
+        run: |
+          cd "$WORK/slam-dunk"
+          python3.12 -m venv .venv-extract
+          .venv-extract/bin/pip install --quiet -r tools/requirements.txt
+          .venv-extract/bin/python tools/extract_recording.py "$WORK/in/recording.vrs" "$WORK/data/recording" \
+            --calibration "$WORK/in/calibration.json"
+          rm -f "$WORK/in/recording.vrs"
+          du -sh "$WORK/data/recording"; df -h /mnt
+
+      - name: Build the image
+        shell: bash
+        run: |
+          cd "$WORK/slam-dunk"
+          docker build -q -t slam-dunk .
+          docker run --rm slam-dunk --help || true
+          docker run --rm slam-dunk run --help || true
+          docker run --rm slam-dunk prepare --help || true
+          docker run --rm slam-dunk refine --help || true
+
+      - name: Run
+        shell: bash
+        run: |
+          mkdir -p "$WORK/results" out
+          chmod 777 "$WORK/results"
+          cd "$WORK/slam-dunk"
+          for config in $CONFIGS; do
+            start=$(date +%s)
+            docker run --rm --network none --user "$(id -u):$(id -g)" \
+              --cpus "$(nproc)" --memory 12g --memory-swap 12g \
+              --read-only --tmpfs /tmp:rw,exec,size=512m \
+              -v "$WORK/data/recording:/recording:ro" -v "$WORK/results:/results" \
+              slam-dunk run /recording "/results/$config" --config "configs/$config.json" 2>&1 | tail -40
+            echo "$config: $(( $(date +%s) - start )) s"
+            cp "$WORK/results/$config/estimate/trajectory.txt" "out/${SEQUENCE}_$config.txt"
+          done
+
+      - name: Score control points
+        shell: bash
+        run: |
+          evaluator="$RUNNER_TEMP/lamaria-eval"
+          git init -q "$evaluator"
+          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          python -m pip install --quiet --disable-pip-version-check --retries 10 --timeout 60 \
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          curl -fsSL --retry 5 "$data/ground_truth/sparse/$SEQUENCE.json" -o cp.json
+          curl -fsSL --retry 5 "$data/aria_calibrations/$SPLIT/$SEQUENCE.json" -o calib.json
+          head -2 out/*.txt
+          for config in $CONFIGS; do
+            python "$evaluator/evaluate_wrt_control_points.py" --estimate "out/${SEQUENCE}_$config.txt" \
+              --cp_json_file cp.json --device_calibration_json calib.json --corresponding_sensor imu \
+              --output_path "out/cp_$config" 2>&1 | tee "out/cp_$config.log" | grep -E "CP Score|Recall"
+            echo "| $SEQUENCE | $config | $(sed -n 's/.*CP Score: //p' "out/cp_$config.log") |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: slam-dunk-${{ matrix.sequence }}
+          path: out
+          if-no-files-found: warn
+          retention-days: 14
