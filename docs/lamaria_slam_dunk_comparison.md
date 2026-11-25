@@ -315,3 +315,34 @@ Two things follow:
   63.88, and its full model adds 1.0. What makes the difference there, and on sequence_1_20 (95.12 against 86.70), is in the baseline
   pipeline: front end, keyframes, robust passes or solver. On sequence_3_17 the same baseline is 28 points
   below visloc-rs's.
+
+## All of the paper's terms at once
+
+The pass SLAM Dunk's full config corresponds to, as far as visloc-rs has it: the fisheye model, the camera
+path with the paper's priors (cam0 as the reference), the gyro and accelerometer intrinsics and the clock
+offsets, all in one pass, paired against the default chain from the same VIO, online windows and first matching
+on the thirteen (`EXPERIMENT_ARGS="--ba-fisheye-model --ba-stereo-reference 0 --ba-stereo-paper-priors
+--ba-est-gyro-m --ba-est-accel-m --ba-est-time-offsets"`, run 45573280189).
+
+| Recording | Default CP | All terms | Change | Recall at 1 m, default → all (%) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 87.90 | 85.77 | −2.13 | 100.0 → 100.0 |
+| R_12_10cp | 63.74 | 57.96 | −5.78 | 60.0 → 40.0 |
+| R_13_15cp | 78.10 | 78.30 | +0.20 | 93.3 → 93.3 |
+| sequence_1_19 | 85.34 | 83.36 | −1.99 | 100.0 → 100.0 |
+| sequence_1_20 | 86.70 | 82.78 | −3.92 | 100.0 → 100.0 |
+| sequence_2_11 | 88.47 | 79.03 | −9.44 | 100.0 → 100.0 |
+| sequence_2_12 | 51.16 | 60.45 | +9.29 | 25.0 → 60.0 |
+| sequence_3_17 | 80.33 | 75.21 | −5.12 | 100.0 → 70.4 |
+| sequence_3_18 | 57.78 | 54.65 | −3.13 | 41.7 → 33.3 |
+| sequence_4_10 | 68.23 | 67.81 | −0.42 | 81.2 → 75.0 |
+| sequence_4_11 | 76.05 | 75.39 | −0.66 | 100.0 → 100.0 |
+| sequence_5_11 | 65.03 | 71.32 | +6.29 | 71.4 → 78.6 |
+| sequence_5_12 | 6.34 | 6.30 | −0.05 | 0.0 → 0.0 |
+
+Mean of the thirteen 68.86 → 67.56 (**−1.30**), 3 of 13 gain: not kept. On sequence_3_17 the pass scores 75.21,
+below the default chain's 80.33 and far from SLAM Dunk's full 87.64; it sits with SLAM Dunk's no_clock (71.60)
+and visloc-rs's earlier pass without the clock offsets (73.93), so the clock offsets add little here. The terms
+that lift SLAM Dunk's own baseline by 35 points on sequence_3_17 do not lift visloc-rs's; together with
+R_12_10cp and sequence_1_20, where SLAM Dunk's baseline alone is 17 and 8 points ahead, the gap points at the
+pipeline the terms sit on (front end, keyframes, robust passes) rather than at the calibration model.
