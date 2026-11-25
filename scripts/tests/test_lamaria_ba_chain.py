@@ -53,6 +53,19 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(value(p["online"], "--gyro-rw-warmup"), "10")
         self.assertEqual(chain.result("w", 4, low_light=False), Path("w/ba2.tum"))
 
+    def test_one_camera_reaches_the_features_steps_only(self):
+        for track in (2, 4):
+            mono = {name: [str(c) for c in cmd]
+                    for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", track, "w", 4,
+                                                       rematch=True, cameras=1)}
+            for name, cmd in mono.items():
+                if name == "features":
+                    self.assertEqual(value(cmd, "--cameras"), "1")
+                else:
+                    self.assertNotIn("--cameras", cmd)
+        for cmd in plan(2).values():  # two cameras, the default: no option at all
+            self.assertNotIn("--cameras", cmd)
+
     def test_no_focal_lengths_on_the_moving_platform(self):
         for cmd in plan(5).values():
             self.assertNotIn("--est-focal", cmd)

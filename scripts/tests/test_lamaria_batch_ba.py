@@ -634,6 +634,40 @@ class MatchingTest(unittest.TestCase):
             self.assertEqual(wh.tolist(), [[758, 572], [757, 569]])
 
 
+class CameraCountTest(unittest.TestCase):
+    def test_the_features_set_the_camera_count_and_the_calibration_follows(self):
+        import tempfile
+        cams = [{"name": "cam0"}, {"name": "cam1"}]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                f = pathlib.Path(d) / "features.npz"
+                empty = dict(kf_ns=np.zeros(2, np.int64), offsets=np.zeros(3, np.int64), xy=np.zeros((0, 2)),
+                             desc=np.zeros((0, 128), np.float32))
+                np.savez(f, **empty)  # written before the count was recorded: two cameras
+                lb.load_features(d)
+                self.assertEqual(lb.NC, 2)
+                self.assertEqual(lb.first_cameras(cams), cams)
+                np.savez(f, cameras=np.array(1), **empty)
+                lb.load_features(d)
+                self.assertEqual(lb.NC, 1)
+                self.assertEqual(lb.first_cameras(cams), cams[:1])
+        finally:
+            lb.NC = 2
+
+    def test_one_camera_indexes_one_image_per_keyframe(self):
+        offsets = np.array([0, 2, 4, 6])  # three keyframes of one camera, two keypoints each
+        pairs = np.array([[0, 0, 1, 0], [1, 0, 2, 0]])
+        matches = np.array([[0, 1], [1, 0]])
+        try:
+            lb.NC = 1
+            tracks, image_of, conflicts = lb.build_tracks(offsets, pairs, matches, 10)
+        finally:
+            lb.NC = 2
+        self.assertEqual(conflicts, 0)
+        self.assertEqual(sorted(sorted(t.tolist()) for t in tracks), [[0, 3, 4]])
+        self.assertEqual(image_of.tolist(), [0, 0, 1, 1, 2, 2])
+
+
 @unittest.skipUnless(HAVE_CV2, "needs opencv-python")
 class LoopEdgeTest(unittest.TestCase):
     def test_pnp_body_pose_recovers_the_body(self):
