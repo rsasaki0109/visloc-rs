@@ -71,6 +71,27 @@ path is unchanged.
 - The chain matters more with one camera: on sequence_1_19 it lifts the
   monocular VIO from 62.6 to 75.2.
 
+## Low light: what did not help
+
+On sequence_4_10 the chain lifts the monocular VIO only from 35.47 to
+37.92: in low light it runs the online windows and no batch pass
+([lamaria_batch_ba.md](lamaria_batch_ba.md#low-light-features-after-denoising)).
+Two tries, by hand on the same run, did not help:
+
+| sequence_4_10, cam0 + IMU | CP Score | Pose recall @ 1 m |
+|---|---:|---:|
+| VIO alone | 35.47 | 11.6% |
+| **The chain (online windows)** | **37.92** | 20.2% |
+| + the day's batch pass after it (first solve) | 28.11 | 0.4% |
+| + its second solve with the revisits | 28.31 | 0.4% |
+| VIO alone on cam1 instead (`config.vio_mono_camera: 1`) | 6.25 | 2.7% |
+
+- The batch pass with one camera's denoised low-light keypoints pulls the
+  trajectory further off than the online windows leave it, so the chain's
+  rule (no pass in low light) holds for mono too.
+- On cam1 the monocular VIO diverges (3,400 km of trajectory over a 1.5 km
+  walk). cam0 stays the camera.
+
 ## Reproduce
 
 ```bash
