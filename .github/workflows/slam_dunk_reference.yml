@@ -15,8 +15,8 @@ permissions:
 
 env:
   SPLIT: training
-  # SLAM Dunk configs to refine from one prepared packet per recording (configs/<name>.json in its repository)
-  CONFIGS: full baseline camera_only gyro_only ladder_0 ladder_1 ladder_2 no_accelerometer no_auxiliary no_clock no_final_refinement no_thermal
+  # SLAM Dunk configs to run on each recording, most telling first (configs/<name>.json in its repository)
+  CONFIGS: baseline full camera_only gyro_only no_clock no_accelerometer no_thermal no_final_refinement ladder_0 ladder_1 ladder_2 no_auxiliary
 
 jobs:
   recording:
@@ -80,9 +80,24 @@ jobs:
           docker run --rm slam-dunk prepare --help || true
           docker run --rm slam-dunk refine --help || true
 
-      - name: Run each config
+      - name: Install the evaluator
+        shell: bash
+        run: |
+          evaluator="$RUNNER_TEMP/lamaria-eval"
+          git init -q "$evaluator"
+          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
+          git -C "$evaluator" checkout -q --detach FETCH_HEAD
+          python -m pip install --quiet --disable-pip-version-check --retries 10 --timeout 60 \
+            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
+          data=https://cvg-data.inf.ethz.ch/lamaria
+          curl -fsSL --retry 5 "$data/ground_truth/sparse/$SEQUENCE.json" -o "$RUNNER_TEMP/cp.json"
+          curl -fsSL --retry 5 "$data/aria_calibrations/$SPLIT/$SEQUENCE.json" -o "$RUNNER_TEMP/calib.json"
+          echo "EVALUATOR=$evaluator" >> "$GITHUB_ENV"
+
+      - name: Run and score each config
         # `refine` of this release rejects the packets its own `prepare` writes ("Expected a stereo-reference-v1
-        # packet"), so each config runs end to end with `run`
+        # packet"), so each config runs end to end with `run`; each is scored at once, so a timeout keeps the
+        # configs before it
         shell: bash
         run: |
           out="$GITHUB_WORKSPACE/out"
@@ -95,36 +110,18 @@ jobs:
                 --cpus "$(nproc)" --memory 12g --memory-swap 12g \
                 --read-only --tmpfs /tmp:rw,exec,size=512m \
                 -v "$WORK/data/recording:/recording:ro" -v "$WORK/results:/results" \
-                slam-dunk run /recording "/results/$config" --config "configs/$config.json" 2>&1 | tail -8; then
-              echo "$config: $(( $(date +%s) - start )) s"
-              cp "$WORK/results/$config/estimate/trajectory.txt" "$out/${SEQUENCE}_$config.txt" \
-                || echo "::warning::$config wrote no trajectory"
+                slam-dunk run /recording "/results/$config" --config "configs/$config.json" 2>&1 | tail -8 \
+               && cp "$WORK/results/$config/estimate/trajectory.txt" "$out/${SEQUENCE}_$config.txt"; then
+              python "$EVALUATOR/evaluate_wrt_control_points.py" --estimate "$out/${SEQUENCE}_$config.txt" \
+                --cp_json_file "$RUNNER_TEMP/cp.json" --device_calibration_json "$RUNNER_TEMP/calib.json" \
+                --corresponding_sensor imu --output_path "$out/cp_$config" > "$out/cp_$config.log" 2>&1 || true
+              score=$(sed -n 's/.*CP Score: //p' "$out/cp_$config.log")
+              echo "$config: CP $score, $(( $(date +%s) - start )) s"
+              echo "| $SEQUENCE | $config | $score |" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "::warning::$config failed"
             fi
             rm -rf "$WORK/results/$config"
-          done
-          ls -la "$out"
-
-      - name: Score control points
-        shell: bash
-        run: |
-          evaluator="$RUNNER_TEMP/lamaria-eval"
-          git init -q "$evaluator"
-          git -C "$evaluator" fetch -q --depth=1 https://github.com/cvg/lamaria.git 238b6cad307a10183277388c9c0a8406cde48197
-          git -C "$evaluator" checkout -q --detach FETCH_HEAD
-          python -m pip install --quiet --disable-pip-version-check --retries 10 --timeout 60 \
-            --find-links https://cvg-data.inf.ethz.ch/lamaria/packages/pycolmap/ pycolmap==3.13.0.dev0 pyceres==2.6
-          data=https://cvg-data.inf.ethz.ch/lamaria
-          curl -fsSL --retry 5 "$data/ground_truth/sparse/$SEQUENCE.json" -o cp.json
-          curl -fsSL --retry 5 "$data/aria_calibrations/$SPLIT/$SEQUENCE.json" -o calib.json
-          head -2 out/*.txt
-          for config in $CONFIGS; do
-            test -s "out/${SEQUENCE}_$config.txt" || continue
-            python "$evaluator/evaluate_wrt_control_points.py" --estimate "out/${SEQUENCE}_$config.txt" \
-              --cp_json_file cp.json --device_calibration_json calib.json --corresponding_sensor imu \
-              --output_path "out/cp_$config" 2>&1 | tee "out/cp_$config.log" | grep -E "CP Score|Recall"
-            echo "| $SEQUENCE | $config | $(sed -n 's/.*CP Score: //p' "out/cp_$config.log") |" >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Upload
