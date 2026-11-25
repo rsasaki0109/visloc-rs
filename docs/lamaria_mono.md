@@ -158,6 +158,30 @@ Two tries, by hand on the same run, did not help:
 - On cam1 the monocular VIO diverges (3,400 km of trajectory over a 1.5 km
   walk). cam0 stays the camera.
 
+## A bigger VIO window: mixed
+
+sequence_1_2 (test, 7.5 on the leaderboard against bino's 29.0) does not
+diverge. Against the recording's own GPS (diagnosis only, not used for the
+submission) its chain result sits 11.4 m from the fixes at the median,
+against 2–3 m for sequences that score well, with the gap opening after
+about four minutes. With the VIO's window enlarged to 10 states and 30
+keyframes (`euroc_config_big_window.json`; a low-light copy of it on track
+4), sequence_1_2 comes to 5.8 m. On the training sequences, scored against
+the pseudo-GT, it is a gain on one and a loss on two:
+
+| | Default window | 10 states / 30 keyframes |
+|---|---:|---:|
+| sequence_1_2 (test), median distance to GPS | 11.4 m | **5.8 m** |
+| sequence_1_19, CP Score | 75.22 | **78.98** |
+| sequence_2_11, CP Score | **76.72** | 57.67 |
+| sequence_4_10, CP Score | **37.92** | 20.60 |
+
+On sequence_2_11 the loss is already in the VIO: the pass before the rematch
+scores 54.60. The window stays at the default; sequence_3_17 and 5_11 were
+not run. Windowed scale against GPS is no measure here: on training
+sequences whose scale the pseudo-GT shows within 1 %, 120 s windows of GPS
+swing it by 10–27 %.
+
 ## Reproduce
 
 ```bash
