@@ -72,7 +72,7 @@ def pass_work(work, pass_features=None):
 
 
 def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
-          num_features=None, pass_features=None, pass_match="vio"):
+          num_features=None, pass_features=None, pass_match="vio", cameras=2):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
@@ -81,12 +81,14 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     `pass_features` gives the pass by day keypoints of its own: a learned extractor's, in work/<extractor>, matched
     and searched for revisits guided by the VIO like the online windows' (the rematch then goes there too);
     `pass_match` keeps those matches within the VIO's epipolar band ("vio"), the online result's ("online"), or
-    those an essential matrix explains ("essential")."""
+    those an essential matrix explains ("essential"); `cameras` is 2 (both SLAM cameras) or 1 (cam0 only, the
+    keypoints of a monocular-inertial run, docs/lamaria_mono.md)."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
     solve += [] if track == MOVING else ["--est-focal"]
     feats = ["--clahe", "--denoise", "7"] if low else []
+    feats += [] if cameras == 2 else ["--cameras", str(cameras)]
     out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)])
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
                            *([] if low else WARMUP)], work / "online.done", True))
@@ -95,7 +97,9 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
         if pass_features:
             guide = {"vio": (), "online": ("--vio", work / "online.tum"),
                      "essential": ("--vio", vio, "--verify", "essential")}[pass_match]
-            out += keypoints(mav0, vio, calib, pw, jobs, feature_options(pass_features), name="pass ", match=guide)
+            out += keypoints(mav0, vio, calib, pw, jobs,
+                             [*feature_options(pass_features), *([] if cameras == 2 else ["--cameras", str(cameras)])],
+                             name="pass ", match=guide)
         pas = [*solve, "--iterations", "60", "--gyro-rw-scale", "10", *WARMUP]
         out += [
             ("pass solve", ["solve", "--work", pw, "--vio", work / "online.tum", "--out", work / "ba1.tum",
@@ -127,7 +131,7 @@ def result(work, track, low_light=None, rematch=False):
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
               low_light=None, rematch=False, features="sift", num_features=None, pass_features=None,
-              pass_match="vio"):
+              pass_match="vio", cameras=2):
     work = Path(work)
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
@@ -136,7 +140,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
         if not (pw / "rematch" / "features.npz").is_symlink():
             (pw / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
     for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
-                                           num_features, pass_features, pass_match):
+                                           num_features, pass_features, pass_match, cameras):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -178,11 +182,14 @@ def main():
     p.add_argument("--pass-match", choices=PASS_MATCH, default="vio",
                    help="--pass-features: keep the matches within the VIO's epipolar band, the online result's, or "
                         "those an essential matrix explains")
+    p.add_argument("--cameras", type=int, choices=(1, 2), default=2,
+                   help="cameras per keyframe: 2, or 1 for cam0 only (a monocular-inertial run)")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
               low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
-              num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match)
+              num_features=a.num_features, pass_features=a.pass_features, pass_match=a.pass_match,
+              cameras=a.cameras)
 
 
 if __name__ == "__main__":

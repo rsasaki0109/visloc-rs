@@ -280,10 +280,11 @@ def estimator_command(args, inner: Path, calibration: Path, out_dir: Path,
         # 5 deg drops only broken two-view estimates
         # (docs/lamaria_online_mapper.md#loop-rotation-gate).
         trajectories = [out_dir / "trajectory_online.tum", out_dir / "trajectory_vio.tum"]
-        return ([args.slam_exe, *common, "--no-urgent-keyframes",
+        return ([args.slam_exe, *common, *(["--mono"] if args.mono else []), "--no-urgent-keyframes",
                  "--loop-match-max-rot-error", LOOP_MATCH_MAX_ROT_ERROR_DEG],
                 trajectories[1:] if submit_vio else trajectories)
-    return ([args.vio_exe, *common, "--pipeline", "--no-trace", "--no-marg-data"],
+    mono = ["--mono"] if args.mono else []
+    return ([args.vio_exe, *common, *mono, "--pipeline", "--no-trace", "--no-marg-data"],
             [out_dir / "trajectory.tum"])
 
 
@@ -509,6 +510,9 @@ def main() -> int:
     parser.add_argument("--platform-multicam", action=argparse.BooleanOptionalAction, default=True,
                         help="on --platform-tracks, the VIO tracks both cameras' features (MULTICAM), so the "
                              "filter sees the street through the windows on either side (default on)")
+    parser.add_argument("--mono", action="store_true",
+                        help="one SLAM camera (cam0) and the IMU: a monocular-inertial VIO and a one-camera BA "
+                             "chain; the leaderboard's 'mono + imu' (docs/lamaria_mono.md)")
     parser.add_argument("--low-light-config",
                         help=f"config for Low light (track 4) sequences (default {DEFAULT_LOW_LIGHT_CONFIG}; "
                              f"with --ba-chain {BA_CHAIN_LOW_LIGHT_CONFIG}); 'none' uses --config")
@@ -634,7 +638,7 @@ def main() -> int:
             if track in args.platform_tracks:
                 config = config_with(config, work / f"{config.stem}_platform.json",
                                      {"config.vio_platform_filter": True})
-                if args.platform_multicam:  # test sequence_5_9: the tram's street is in cam1's door window
+                if args.platform_multicam and not args.mono:  # test sequence_5_9: the tram's street is in cam1's door window
                     config = multicam_config(config, work / f"{config.stem}_multicam.json")
             submit_vio = track in args.vio_tracks or args.ba_chain  # the BA chain starts from the VIO
             log(f"{seq}: {'VIO' if submit_vio or not args.slam_exe else 'VIO + online mapper'}"
@@ -652,11 +656,14 @@ def main() -> int:
                 log(f"{seq}: WARN {candidates[0].name} missing; submitting {trajectory.name}")
             if vio_failure(trajectory, track):  # test sequence_1_9: the default config's VIO runs away from the start
                 attempts = [(vio_failure(trajectory, track), keep_attempt(trajectory, work / "vio_default.tum"))]
-                fallback = multicam_config(config, work / f"{config.stem}_multicam.json")
-                log(f"{seq}: WARN the VIO diverged; again with both cameras' features ({fallback.name})")
-                command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
-                run(command, check=True)
-                trajectory = next(t for t in candidates if t.is_file())
+                if args.mono:  # one camera: no second camera's features to fall back on, straight to late starts
+                    fallback = config
+                else:
+                    fallback = multicam_config(config, work / f"{config.stem}_multicam.json")
+                    log(f"{seq}: WARN the VIO diverged; again with both cameras' features ({fallback.name})")
+                    command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
+                    run(command, check=True)
+                    trajectory = next(t for t in candidates if t.is_file())
                 starts, tried, after_runaway = list(LATE_STARTS_S), 0, False
                 while vio_failure(trajectory, track) and starts:  # test sequence_1_15: the head shakes over the first seconds
                     attempts.append((vio_failure(trajectory, track),
@@ -689,7 +696,7 @@ def main() -> int:
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
                                            low_light=low_light, rematch=args.ba_rematch, pass_features=learned,
-                                           pass_match=args.ba_pass_match)
+                                           pass_match=args.ba_pass_match, cameras=1 if args.mono else 2)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = work / "ba" / "ba2.tum"

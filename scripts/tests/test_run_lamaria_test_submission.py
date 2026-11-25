@@ -9,7 +9,7 @@ import run_lamaria_test_submission as submission
 
 def make_args(**overrides):
     args = argparse.Namespace(vio_exe=Path("vio_demo"), slam_exe=None,
-                              config=Path("cfg.json"), threads=12)
+                              config=Path("cfg.json"), threads=12, mono=False)
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
@@ -23,6 +23,14 @@ class EstimatorCommandTests(unittest.TestCase):
         for flag in ("--pipeline", "--no-trace", "--no-marg-data"):
             self.assertIn(flag, command)
         self.assertEqual(trajectories, [Path("out/trajectory.tum")])
+
+    def test_mono_runs_the_vio_on_one_camera(self):
+        for exe in ("vio_exe", "slam_exe"):
+            command, _ = submission.estimator_command(
+                make_args(mono=True, **{exe: Path("demo")}), Path("seq"), Path("calib.json"), Path("out"))
+            self.assertIn("--mono", command)
+        command, _ = submission.estimator_command(make_args(), Path("seq"), Path("calib.json"), Path("out"))
+        self.assertNotIn("--mono", command)
 
     def test_online_mapper_takes_precedence(self):
         command, trajectories = submission.estimator_command(
