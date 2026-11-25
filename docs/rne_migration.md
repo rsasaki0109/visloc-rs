@@ -1,6 +1,6 @@
 # Moving the street simulator to Robot Native Engine
 
-Status: P0, P1 and P2 done (below); P3 next. This plan moves the 3DGS street simulator
+Status: P0 to P3 done (below); P4 (media, docs, retiring the ROS 2 path) next. This plan moves the 3DGS street simulator
 (`ros2/visloc-ros2/gs/`: `gs_sim.py`, `people.py`, `kerbs.py`,
 `chase_video.py`, and Nav2) into Robot Native Engine (RNE). visloc-rs keeps the
 reconstruction and the localization.
@@ -184,3 +184,17 @@ Each phase ends with a headless test in RNE, and a short docs entry.
   - Runs with fixes are not bit-for-bit repeatable. The localizer is
     deterministic on the same images, but RNE's splat renders on CPU
     lavapipe vary slightly between runs.
+- **P3 done.** `rne_crowd.py` writes the bundle's `crowd.json` (the start of
+  `people.Crowd` with the run's seed) and `crowd/*.ply` (every agent at 12
+  gait phases, the crossing at each light state). RNE's `crowd.rs` ports
+  `Crowd.step`, and `replace_actor_asset` (new in `rne_render_3dgs`) swaps
+  the gait phase in place, so the crowd adds 41,000 gaussians. The robot
+  bends its command round people with `rne_nav::avoid_velocities`. Over 4
+  seeds on ground truth:
+  - 4/4 goals with no contacts with walls or people.
+  - Nobody on the road off the crossing.
+  - People at least 6 cm clear of the robot's body, and none in a car.
+  - The longest anyone stood still: 27 to 45 s.
+  - Runs take 470 to 536 s, against 284 s without the crowd. The robot
+    waits by a sign post when a cyclist and a stroller come the other way:
+    it has no recoveries (backing up, turning round) as Nav2 has.
