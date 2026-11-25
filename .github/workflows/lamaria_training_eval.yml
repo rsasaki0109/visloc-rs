@@ -22,9 +22,9 @@ env:
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
   PASS_ARGS: ""
   # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
-  EXPERIMENT_ARGS: "--ba-fisheye-model --ba-stereo-reference 0 --ba-stereo-paper-priors --ba-est-gyro-m --ba-est-accel-m"
+  EXPERIMENT_ARGS: "--ba-fisheye-model --ba-stereo-reference 0 --ba-stereo-paper-priors --ba-est-gyro-m --ba-est-accel-m --ba-est-time-offsets"
   # options of the batch pass's solves in both chains, e.g. an IMU model to compare the experiment on top of
-  COMMON_PASS_ARGS: "--accel-noise 3e-3 --gyro-noise 5e-4 --bias-chunk-seconds 5 --bias-chunk-accel 0.005 --bias-chunk-gyro 2e-5"
+  COMMON_PASS_ARGS: ""
   # further driver options for both chains, e.g. "--no-ba-temperature"
   DRIVER_ARGS: ""
 
