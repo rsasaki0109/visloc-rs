@@ -24,6 +24,10 @@ download ASL zip + pinhole calibration
 With `--mono` it runs on the left SLAM camera and the IMU alone, for a mono + IMU
 entry ([lamaria_mono.md](lamaria_mono.md)).
 
+The workflow's `submission` artifact downloads as a zip around
+`submission.zip`. Upload the inner zip, whose root holds only `slam/`; the
+outer one fails the leaderboard's evaluation.
+
 It is resumable: a sequence whose estimate already exists in `--slam-dir` is
 skipped, so an interrupted run can be restarted unchanged.
 

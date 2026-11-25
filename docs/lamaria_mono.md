@@ -3,9 +3,10 @@
 The LaMAria leaderboard lists each method's sensors: mono, bino, imu. The
 visloc-rs entry so far is bino + IMU (both SLAM cameras). This page runs the
 same pipeline on the left SLAM camera (cam0) and the IMU alone, for a
-mono + IMU entry. On 2026-10-17 the best mono + IMU methods on the
-leaderboard averaged 33.5 (AnonSLAM) and 33.4 (Mighty Camera) over the five
-challenges ([lamaria_plan.md](lamaria_plan.md)).
+mono + IMU entry, listed as "visloc-rs (mono)" (submission 77, uploaded
+2026-11-25). On the test set it scores **52.9** on average over the five
+challenges, against 57.8 for the bino entry
+([Test set](#test-set)).
 
 ## What changed
 
@@ -63,13 +64,78 @@ path is unchanged.
   loss is small on the Short and Medium tracks (7 and 12 points). It is
   largest in low light (30 points): there cam0 alone often sees too little
   texture. On the Long track it loses 24 points.
-- **Mono + IMU is still far above the leaderboard's mono + IMU entries.**
-  The bino chain scored 64.35 per track on the ten training sequences and
-  57.8 on the test set. If mono loses on the test set the 17 points it
-  loses here, a mono + IMU submission would land around 41, against 33.5
-  for the best mono + IMU method listed. Only a test-set run says how it does there.
+- **The test set did not show this gap** ([below](#test-set)): there mono is
+  within about a point of bino on three of the five challenges. One
+  training sequence per track was too few to predict it.
 - The chain matters more with one camera: on sequence_1_19 it lifts the
   monocular VIO from 62.6 to 75.2.
+
+## Test set
+
+[LaMAria submission run 35](https://github.com/rsasaki0109/visloc-rs/actions/runs/45524186572)
+(`--mono`, all 63 test sequences, every job succeeded), scored by the
+leaderboard. Mean score per challenge:
+
+| | Short | Medium | Long | Low light | Moving platform | Mean |
+|---|---:|---:|---:|---:|---:|---:|
+| **Mono + IMU** | **65.3** | **56.2** | **55.2** | **61.6** | **25.9** | **52.9** |
+| Bino + IMU, submission 4 (CPU only, no GPS) | 68.9 | 56.8 | 54.1 | 60.6 | 30.6 | 54.2 |
+| Bino + IMU, submission 10 (the bino entry) | 69.7 | 56.8 | 54.1 | 61.1 | 47.3 | 57.8 |
+
+Submission 4 is the closest comparison: the same pipeline on CPU, before
+five Short sequences were rerun with learned features on a GPU (submission
+5) and before the Moving platform track was bridged with GPS (submission 7);
+see [lamaria_test_results.md](lamaria_test_results.md).
+
+- **One camera costs 1.3 points on average.** Medium, Long and Low light
+  are within a point of bino (Long +1.1, Low light +1.0 above submission 4).
+  The loss is on the Short track (−3.6) and the Moving platform (−4.7).
+- **The training sequences overstated the loss** (17 points there). Each
+  track's training sequence is the one the bino pipeline was developed on,
+  so bino scores high there; the test set behaves like the second training
+  sequences ([lamaria_batch_ba.md](lamaria_batch_ba.md#two-sequences-per-track)).
+- **A handful of sequences fail outright** (score below 10): sequence_1_2
+  (7.5), sequence_4_3 (4.7), and sequence_5_5, 5_6 and 5_9 (1.4–2.0). They
+  are where to look next: a mono VIO that diverges, or a ride the platform
+  filter does not keep out.
+
+Per sequence (CP score, CP recall at 1 m, pose recall at 5 m; the Moving
+platform track has no pseudo-GT):
+
+| Sequence | Score | CP@1m | R@5m | Sequence | Score | CP@1m | R@5m |
+|---|---:|---:|---:|---|---:|---:|---:|
+| sequence_1_1 | 67.8 | 75.0 | 100.0 | sequence_3_5 | 77.1 | 88.9 | 100.0 |
+| sequence_1_2 | 7.5 | 0.0 | 13.2 | sequence_3_6 | 52.5 | 25.9 | 99.9 |
+| sequence_1_3 | 42.9 | 15.4 | 94.6 | sequence_3_7 | 73.2 | 92.0 | 100.0 |
+| sequence_1_4 | 52.3 | 20.0 | 99.6 | sequence_3_8 | 48.0 | 13.3 | 92.1 |
+| sequence_1_5 | 81.5 | 100.0 | 100.0 | sequence_3_9 | 73.9 | 96.2 | 100.0 |
+| sequence_1_6 | 78.0 | 100.0 | 100.0 | sequence_3_10 | 72.6 | 89.3 | 100.0 |
+| sequence_1_7 | 74.1 | 85.7 | 100.0 | sequence_3_11 | 73.9 | 88.9 | 100.0 |
+| sequence_1_8 | 75.3 | 92.9 | 99.8 | sequence_3_12 | 38.1 | 10.7 | 90.8 |
+| sequence_1_9 | 92.2 | 100.0 | 100.0 | sequence_3_13 | 55.9 | 30.8 | 100.0 |
+| sequence_1_10 | 73.5 | 93.3 | 100.0 | sequence_3_14 | 65.3 | 73.1 | 100.0 |
+| sequence_1_11 | 82.3 | 100.0 | 100.0 | sequence_3_15 | 51.6 | 34.6 | 99.9 |
+| sequence_1_12 | 69.1 | 84.6 | 100.0 | sequence_3_16 | 28.9 | 3.7 | 76.0 |
+| sequence_1_13 | 63.5 | 57.1 | 95.7 | sequence_4_1 | 69.9 | 83.3 | 100.0 |
+| sequence_1_14 | 82.8 | 100.0 | 100.0 | sequence_4_2 | 56.8 | 37.5 | 99.1 |
+| sequence_1_15 | 81.4 | 100.0 | 99.8 | sequence_4_3 | 4.7 | 0.0 | 0.2 |
+| sequence_1_16 | 33.0 | 14.3 | 67.6 | sequence_4_4 | 49.1 | 25.0 | 94.8 |
+| sequence_1_17 | 60.7 | 53.3 | 100.0 | sequence_4_5 | 54.9 | 40.0 | 95.5 |
+| sequence_1_18 | 57.6 | 60.0 | 100.0 | sequence_4_6 | 82.7 | 100.0 | 100.0 |
+| sequence_2_1 | 45.3 | 19.0 | 92.6 | sequence_4_7 | 72.8 | 93.8 | 100.0 |
+| sequence_2_2 | 35.7 | 0.0 | 75.4 | sequence_4_8 | 78.0 | 78.6 | 100.0 |
+| sequence_2_3 | 45.2 | 23.5 | 83.8 | sequence_4_9 | 85.7 | 100.0 | 100.0 |
+| sequence_2_4 | 45.2 | 21.1 | 99.9 | sequence_5_1 | 40.8 | 20.0 | – |
+| sequence_2_5 | 40.7 | 5.0 | 99.7 | sequence_5_2 | 55.3 | 33.3 | – |
+| sequence_2_6 | 62.7 | 56.3 | 99.8 | sequence_5_3 | 24.8 | 3.7 | – |
+| sequence_2_7 | 57.9 | 37.5 | 100.0 | sequence_5_4 | 31.4 | 13.6 | – |
+| sequence_2_8 | 79.3 | 93.8 | 100.0 | sequence_5_5 | 1.4 | 0.0 | – |
+| sequence_2_9 | 66.1 | 77.8 | 100.0 | sequence_5_6 | 1.4 | 0.0 | – |
+| sequence_2_10 | 84.1 | 100.0 | 100.0 | sequence_5_7 | 26.2 | 6.7 | – |
+| sequence_3_1 | 41.3 | 14.8 | 94.4 | sequence_5_8 | 60.0 | 60.0 | – |
+| sequence_3_2 | 60.2 | 38.5 | 100.0 | sequence_5_9 | 2.0 | 0.0 | – |
+| sequence_3_3 | 19.2 | 0.0 | 39.4 | sequence_5_10 | 16.1 | 0.0 | – |
+| sequence_3_4 | 51.6 | 29.6 | 100.0 |  | | |  |
 
 ## Low light: what did not help
 
@@ -104,11 +170,13 @@ python scripts/run_lamaria_test_submission.py --split training --sequences seque
 
 The test set: Actions > LaMAria submission > Run workflow, split `test`,
 `driver_args` `--mono`. The zip goes to the leaderboard by hand, as a
-separate method whose sensors are mono + imu.
+separate method whose sensors are mono + imu. The run's `submission`
+artifact downloads as a zip around `submission.zip`: upload the inner one,
+whose root holds only `slam/`. The outer one fails the evaluation.
 
 ## Limits
 
-- One training sequence per track, each run once. The bino chain's
-  training scores ran 6–7 points above its test scores.
+- One training sequence per track, each run once; they overstated the
+  loss from one camera (17 points against 1.3 on the test set).
 - Nothing was tuned for one camera: the VIO config, the chain's options and
   the low-light options are the bino ones.
