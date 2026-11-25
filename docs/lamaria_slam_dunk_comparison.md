@@ -244,3 +244,36 @@ Five of thirteen gain: not kept, but the closest of the paper's terms so far. Wi
 recordings (whose pass has its own settings) and sequence_2_12, the ten gain 0.61 on average, five of them.
 sequence_2_12 loses 7.6–9.9 under every run with the paper's noise; R_12_10cp, sequence_1_19 and 3_18
 gain with the chunked biases.
+
+## The paper's camera path on the paper's IMU model
+
+Both chains on the paper's IMU model (its noise, biases per 5 s chunk; the driver's `--ba-common-pass-args`),
+the experiment adding the paper's camera path as before (fisheye model, cam1 per 5 s against cam0, both focal
+lengths per 5 s, the gyroscope and accelerometer matrices;
+[run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45438023214), commit `52632ba`):
+
+| Recording | Paper's IMU model | With the camera path | Change | Same camera path, default IMU (above) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 82.05 | 84.20 | +2.15 | −1.90 |
+| R_12_10cp | 69.45 | 56.30 | −13.15 | −6.51 |
+| R_13_15cp | 77.58 | 78.93 | +1.35 | −2.51 |
+| sequence_1_19 | 90.65 | 87.34 | −3.31 | −1.42 |
+| sequence_1_20 | 85.37 | 69.45 | −15.92 | −4.90 |
+| sequence_2_11 | 87.42 | 82.26 | −5.16 | −4.26 |
+| sequence_2_12 | 41.09 | 56.14 | +15.05 | +10.31 |
+| sequence_3_17 | 80.10 | 73.72 | −6.38 | −6.45 |
+| sequence_3_18 | 59.41 | 52.59 | −6.82 | −3.84 |
+| sequence_4_10 | 63.36 | 61.73 | −1.63 | −0.52 |
+| sequence_4_11 | 73.24 | 70.76 | −2.48 | −0.07 |
+| sequence_5_11 | 68.02 | 70.12 | +2.10 | +1.94 |
+| sequence_5_12 | 6.68 | 6.49 | −0.18 | +0.15 |
+| Mean of thirteen | 68.03 | 65.39 | **−2.64** | |
+
+Four of thirteen gain: not kept. With the IMU side of the objective moved to the paper's, the camera terms
+lose more than on visloc-rs's own IMU model, and lose most on R_12_10cp and sequence_1_20 (−13, −16). The
+IMU model alone reproduces its earlier run (68.03 against 68.00). So the paper's hypothesis, that the
+remaining gap is the camera calibration's drift and the gyroscope's intrinsics, does not carry over to this
+pipeline even with the paper's camera model, priors, IMU noise and bias model: whatever makes those terms
+pay in SLAM Dunk lies in the parts not reproduced here (the robust passes and the frozen-calibration
+refinement, the fixed whitening floors, the 0.6–1.2 s keyframes, the RootSIFT front end with flow tracks,
+the fused accelerometers, Ceres).
