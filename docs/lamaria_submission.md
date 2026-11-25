@@ -21,6 +21,9 @@ download ASL zip + pinhole calibration
   -> append `slam/<sequence>.txt`, then delete the sequence data
 ```
 
+With `--mono` it runs on the left SLAM camera and the IMU alone, for a mono + IMU
+entry ([lamaria_mono.md](lamaria_mono.md)).
+
 It is resumable: a sequence whose estimate already exists in `--slam-dir` is
 skipped, so an interrupted run can be restarted unchanged.
 
