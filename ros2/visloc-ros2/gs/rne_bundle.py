@@ -23,6 +23,8 @@ colours. All coordinates stay in the visloc-rs map frame (z up, metres).
   its PGM, so free on the lane, 0.90 off it (costly, not lethal), 1 at walls.
 - `ground.f32` and its shape in `street.json`: the ground height grid
   (float32, little-endian, row j = y0 + j * resolution).
+- `robot.ply`: the delivery robot drawn in the videos (robot_model.py), as gaussians in its
+  own frame (x forward, y left, z up, on the ground at 0), for the chase view.
 - `map`: a link to the visloc-rs localization map, and `CREDIT.txt`.
 """
 
@@ -115,6 +117,12 @@ def main():
         street.update({'road_offset': meta.get('road_offset'), 'road_lines': meta.get('road_lines'),
                        'pavement': meta.get('pavement'), 'walk_offsets': meta.get('walk'),
                        'kerb_spans': meta.get('narrow'), 'crossing': bool(meta.get('crossing'))})
+    import robot_model  # noqa: PLC0415
+    from people import mesh_splats  # noqa: PLC0415
+    from rne_crowd import write_ply  # noqa: PLC0415
+    write_ply(os.path.join(args.out, 'robot.ply'),
+              mesh_splats(robot_model.Model(camera_height=scene.get('camera_height', 1.2))))
+    street['robot_actor'] = 'robot.ply'
     with open(os.path.join(args.out, 'street.json'), 'w', encoding='utf-8') as f:
         json.dump(street, f, indent=1)
 
