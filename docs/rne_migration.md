@@ -1,6 +1,6 @@
 # Moving the street simulator to Robot Native Engine
 
-Status: design, not started. This plan moves the 3DGS street simulator
+Status: P0 and P1 done (below); P2 next. This plan moves the 3DGS street simulator
 (`ros2/visloc-ros2/gs/`: `gs_sim.py`, `people.py`, `kerbs.py`,
 `chase_video.py`, and Nav2) into Robot Native Engine (RNE). visloc-rs keeps the
 reconstruction and the localization.
@@ -153,9 +153,19 @@ Each phase ends with a headless test in RNE, and a short docs entry.
   possible through RNE's ROS 2 adapter (`adapters/ros2`) later. It is not part
   of this plan.
 
-## First step
+## Progress
 
-P0 and P1 can start together: the bundle export in visloc-rs, and the RNE
-package loading it, with the robot on ground truth and no people. That needs
-write access to RNE in this session (the branch would be
-`claude/relaxed-wright-6pvra7` there too).
+- **P0 done.** `rne_bundle.py` (and `real2sim.py --export-rne DIR`) writes the
+  bundle, and `rne_bundle_test.py` checks it. The street's road and pavement
+  come from a run's `people.json` (`--people-json`). Moving that analysis
+  into the export itself is still to do.
+- **P1 done**, in RNE `examples/163_street_splat_nav` (`docs/STREET_SPLAT_NAV.md`
+  there). On the OverMaps360 street, on ground truth:
+  - 4/4 goals over 111 m in 284 s, with no contacts.
+  - 9.9 s on the kerbs at no more than 0.12 m/s.
+  - At least 0.61 m from any solid cell.
+  - 0.30 m median and 1.03 m largest distance from the walk.
+  - Headless the drive takes 2 s of wall time. With a front camera and a
+    chase view each simulated second, it takes 7 minutes on CPU lavapipe.
+  - The trajectory hash is the same with and without rendering.
+  - The robot is still a box in the chase view.
