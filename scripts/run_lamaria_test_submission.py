@@ -714,7 +714,7 @@ def main() -> int:
     if args.ba_compare and not (args.ba_chain and args.log_dir
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m or args.ba_pass_args
                                      or args.ba_fisheye_model or args.ba_est_time_offsets
-                                     or args.ba_fuse_accelerometers)):
+                                     or args.ba_fuse_accelerometers or args.ba_experiment_pass_features)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
     if args.ba_compare_camera_gyro and not (
             args.ba_compare and args.ba_stereo_reference is not None and args.ba_est_gyro_m
