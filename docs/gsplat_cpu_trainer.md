@@ -134,6 +134,16 @@ the first part of the run, 2x for the next, then full. Same protocol (780x520,
 - **0.3,0.7 is 0.15 dB lower**: full resolution for the last 30% of the
   run is too little.
 
+The same schedule on two more scenes (3,000 steps, cap 400k):
+
+| Scene | Full resolution | `--res-schedule 0.2,0.5` |
+| --- | --- | --- |
+| garden `images_8` (648x420, outdoors) | 26.43 dB, 521 s | 26.15 dB, 432 s (-17%) |
+| bonsai `images_8` (390x260) | 29.47 dB, 511 s | 29.16 dB, 459 s (-10%) |
+
+- **0.3 dB lower on both.** Only bonsai at 780x520 kept its PSNR, so the
+  schedule stays opt-in: a trade of ~0.3 dB for 10-17%, not a free gain.
+
 ## The local Newton step
 
 Each iteration renders the primary view at full resolution and its 3
