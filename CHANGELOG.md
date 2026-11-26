@@ -6,6 +6,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- The wgpu trainer takes a depth prior, as gsplat-cuda's: `gsplat_train
+  --depth-prior DIR --depth-weight W --depth-every N` trains the rendered
+  depth against `DIR/<image stem>.bin` (e.g. a LiDAR scan projected into each
+  view) with a relative L1. On three KITTI street segments posed by LiDAR SLAM
+  (w = 10 chosen on one, every 4th step), the held-out median depth error
+  against the projected scans falls from 6.1 % to 2.3-2.7 % with eval PSNR
+  within -0.03..+0.35 dB; training takes ~1.6x as long on lavapipe.
 - The 3DGS street simulator moves to Robot Native Engine (RNE)
   (`docs/rne_migration.md`). The ROS 2 simulator (`gs_sim.py` with Nav2) is
   frozen as the reference.
