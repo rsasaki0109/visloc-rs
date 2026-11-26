@@ -1589,6 +1589,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "visloc-gsplat-cpu"
+version = "0.5.0"
+dependencies = [
+ "nalgebra",
+ "rayon",
+ "visloc-gsplat-core",
+ "visloc-gsplat-train",
+]
+
+[[package]]
 name = "visloc-gsplat-cuda"
 version = "0.5.0"
 dependencies = [
