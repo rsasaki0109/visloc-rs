@@ -150,6 +150,92 @@ are averaged into the correction.
   out yet: no masks for TUM.
 - **F4, dirty odometry.** Not tested: the odometry here is synthetic.
 
+## Phase 1, first levers: fix quality and the correction's start
+
+Two opt-in switches in `basalt_euroc_localize_demo`, both off by default
+(outputs unchanged with them off, checked on walking_xyz):
+
+- `--min-inlier-cells K` (lever D1, `visloc_localization::apply_inlier_spread_gate`):
+  a localization whose inliers occupy fewer than K cells of the 4 × 4 grid
+  is turned down as if it had too few inliers (it can still be a weak fix).
+- `--min-inlier-ratio R`: the same below an inlier ratio R
+  (`LocalizationConfig::min_inlier_ratio`, now exposed).
+- `--init-fixes N`, `--reset-after N`: `OdomCorrectionConfig`'s agreeing
+  fixes that start the correction (2) and that replace it (3).
+
+### Single image: inlier cells are a weaker test than the inlier ratio
+
+Wrong fixes are the fixes more than 10 cm off; the four walking sequences
+together have 332 wrong and 2,095 good fixes without a gate.
+
+| Gate | Wrong fixes | Good fixes |
+| --- | ---: | ---: |
+| none | 332 | 2,095 |
+| `--min-inlier-cells 5` | 280 (−16%) | −2% |
+| `--min-inlier-cells 6` | 213 (−36%) | −9% |
+| `--min-inlier-cells 7` | 135 (−59%) | −21% |
+| `--min-inlier-cells 8` | 68 (−80%) | −41% |
+
+Ranking the same fixes by each feature, at the threshold that loses 10% of
+the good fixes:
+
+| Feature | Wrong fixes removed at 10% good lost |
+| --- | ---: |
+| inlier ratio (≥ 0.165) | 63% |
+| inlier count (≥ 32) | 58% |
+| inliers' convex hull (≥ 13% of the image) | 46% |
+| inlier cells (≥ 6) | 36% |
+| mapped cells without an inlier | 18% |
+
+A grid search over all three together does no better than the inlier
+ratio alone (61% at 9.4% lost). The thresholds were picked on the same four
+sequences they score, so these numbers are optimistic. **The cell count,
+the lever the plan proposed, is the weakest of the three**: the wrong fixes
+bunch their inliers, but they also have few and a low share of them, and
+those two say it better.
+
+### With an odometry: the gates help walking_xyz, not walking_rpy
+
+Median of three seeds (range in brackets); the control (sitting_static) is
+unchanged by every setting (1.5–1.6 cm, no wrong fix used).
+
+| Setting | walking_xyz RMSE / wrong used | walking_halfsphere RMSE / wrong used | walking_rpy RMSE / wrong used |
+| --- | --- | --- | --- |
+| none | 2.0 (1.7–4.8) cm / 12 | 3.1 (2.8–4.4) cm / 13 | 10.0 cm / 27 |
+| `--min-inlier-cells 6` | 1.7 (1.6–1.9) cm / 6 | 2.8 (2.7–4.1) cm / 11 | 9.5 cm / 16 |
+| `--min-inlier-cells 7` | 1.7 (1.5–1.8) cm / 3 | 3.1 (2.7–3.4) cm / 9 | 11.1 cm / 9 |
+| `--min-inlier-ratio 0.16` | 2.0 (1.6–4.8) cm / 11 | 3.0 (2.8–3.6) cm / 10 | 10.9 cm / 19 |
+| `--init-fixes 4` | 2.5 (2.2–4.0) cm / 12 | 3.0 (2.7–3.6) cm / 11 | 7.8 cm / 27 |
+| `--init-fixes 3 --reset-after 2` | 3.2 (1.6–5.0) cm / 10 | 3.7 (3.4–5.2) cm / 15 | 7.5 (5.8–7.8) cm / 24 |
+| `--init-fixes 4 --min-inlier-cells 6` | 1.7 (1.7–1.9) cm / 6 | 2.8 (2.7–3.4) cm / 9 | 8.9 cm / 16 |
+
+With the projection search, the inlier ratio is high for most images, so
+the ratio gate does little here. The cell gate halves the wrong fixes used
+on walking_xyz and brings its worst seed from 4.8 to 1.9 cm, at the cost of
+fewer localized images (88% → 76% with 6 cells, 59% with 7). None reaches
+the target of no wrong fix used.
+
+**walking_rpy's 10 cm is its start, not stray wrong fixes.** In the first 2 s
+every fix is 11–25 cm off in the same direction (21–29 inliers, a view of
+the partition with people in front), so they agree with each other and set
+the correction; the good fixes that follow (1–3 cm) disagree with it and
+are rejected, mixed with more wrong ones, until a reset at 7 s. From 8 s on
+the map pose stays at 2.5–5.7 cm (median per 2 s). A rule that trusts
+agreeing fixes cannot tell a consistent bias from the truth, so neither
+more initial fixes nor a quicker reset fixes it (7.5–7.8 cm at best, and a
+quicker reset hurts the other sequences).
+
+### Where this leaves D1
+
+- No default changes. `--min-inlier-cells 6` is a reasonable opt-in with an
+  odometry (lower error and fewer wrong fixes used on xyz and halfsphere,
+  control unchanged, fewer localized images); without one, the inlier ratio
+  is the better test.
+- The start-up bias needs something other than agreement: an independent
+  check of the first fixes (more inliers than later fixes need, or
+  agreement across views far apart), or a correction that can revise its
+  start once better fixes arrive (a sliding-window fit such as `MapFusion`).
+
 ## Not yet measured
 
 - **Bonn RGB-D Dynamic.** Downloaded (crowd, crowd2, person_tracking,
@@ -160,10 +246,9 @@ are averaged into the correction.
 - **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware.
 
-## Proposed next step and targets
+## Targets (proposed with Phase 0)
 
-D1 first (inlier spread as a fix-quality test), measured on these tables.
-Proposed targets on the walking sequences, against the tables above:
+On the walking sequences, against the Phase 0 tables:
 
 - single image: fixes more than 10 cm off down by at least half, losing at
   most a tenth of the good fixes;
