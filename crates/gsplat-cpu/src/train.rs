@@ -265,13 +265,17 @@ struct AdamState {
 const B1: f32 = 0.9;
 const B2: f32 = 0.999;
 
-/// Moments below 1e-30 are flushed to zero: a gaussian that gets no
-/// gradient for a few hundred steps (e.g. culled after an opacity reset)
-/// would otherwise decay into subnormals, which x86 computes on a slow path
-/// (the GPU flushes them).
+/// Subnormal moments are flushed to zero, as the GPU does: a gaussian that
+/// gets no gradient for a few hundred steps (e.g. culled after an opacity
+/// reset) would otherwise decay into subnormals, which x86 computes on a
+/// slow path. Only subnormals: brush's aux losses give unseen gaussians
+/// gradients near 1e-14, whose second moments (~1e-30) are normal floats;
+/// flushing those (an earlier threshold of 1e-30) left `m / (sqrt(v) + eps)`
+/// with `v = 0`, steps several times the learning rate, and the log-scales
+/// of unseen gaussians collapsing.
 #[inline(always)]
 fn ftz(x: f32) -> f32 {
-    if x.abs() < 1e-30 {
+    if x.abs() < f32::MIN_POSITIVE {
         0.0
     } else {
         x
