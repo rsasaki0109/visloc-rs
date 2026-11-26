@@ -215,6 +215,12 @@ the VIO is still far off, a 3 px gate drops a fifth to a third of the
 observations, and the solve comes apart; the thresholds that help one
 training sequence cost the other.
 
+On the nine Low light test sequences ([run 36](https://github.com/rsasaki0109/visloc-rs/actions/runs/45741004162),
+`--mono`) the gate fires on sequence_4_3 alone, with the result above. Five of
+the other eight come out bit for bit as in run 35; 4_4, 4_7 and 4_9 differ by
+at most 0.3 m from one runner to another, without the gate. The resubmission
+is run 35 with sequence_4_3 replaced.
+
 ## Reproduce
 
 ```bash
