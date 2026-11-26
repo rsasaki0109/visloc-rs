@@ -31,9 +31,10 @@ Scores are the leaderboard's means per challenge.
 | 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
 | 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
 | 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | 57.7 |
-| 10 (2026-11-12) | 69.7 | 56.8 | **54.1** | 61.1 | **47.3** | 57.8 |
-| 11 (2026-11-21) | **70.6** | **57.0** | 53.5 | **65.8** | 44.7 | 58.3 |
-| 12 (2026-11-22) | **70.6** | **57.0** | 53.5 | **65.8** | 46.8 | **58.7** |
+| 10 (2026-11-12) | 69.7 | 56.8 | 54.1 | 61.1 | **47.3** | 57.8 |
+| 11 (2026-11-21) | 70.6 | 57.0 | 53.5 | 65.8 | 44.7 | 58.3 |
+| 12 (2026-11-22) | 70.6 | 57.0 | 53.5 | 65.8 | 46.8 | 58.7 |
+| 13 (2026-11-27) | **75.4** | **58.9** | **56.0** | **68.2** | 46.0 | **60.9** |
 | Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | FlexVIO (listed 2026-11-13) | 88.5 | 81.8 | 79.3 | 82.4 | 34.0 | 73.2 |
@@ -296,7 +297,7 @@ The mean rises from 57.8 to 58.3, still sixth.
 as in submission 7). The three score as before (43.4, 63.7, 32.8), the Moving platform track goes from 44.7
 to 46.8 and the mean from 58.3 to 58.7.
 
-**Submission 13** (score pending). All 63 sequences on GitHub Actions at commit `9af669f`
+**Submission 13.** All 63 sequences on GitHub Actions at commit `9af669f`
 ([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45785530920); 22 Medium, Long and Low light jobs
 failed while the ETH server refused connections from 12:44 to 14:02 UTC and ran again unchanged in
 [a second run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45852852367)). Against submission 11:
@@ -306,6 +307,12 @@ failed while the ETH server refused connections from 12:44 to 14:02 UTC and ran 
 - **Moving platform** bridged with the GPS as in submission 7, by the same script: sequence_5_3's largest step is
   now 23.8 m, under the 25 m threshold, so it is no longer bridged; sequence_5_8 and 5_10 have no step.
 - An alternative zip keeps submission 12's sequence_5_1, 5_5 and 5_10.
+
+Short 70.6 → 75.4, Medium 57.0 → 58.9, Long 53.5 → 56.0, Low light 65.8 → 68.2, Moving platform 46.8 → 46.0; the mean
+rises from 58.7 to 60.9, still sixth. The RootSIFT pass gains on every track it runs on, by more on the test set
+(Short +4.8) than on the training recordings (track 1 +2.6). Low light runs the same chain as in submission 11 and
+moves by +2.4 from new VIO and chain runs alone. On the Moving platform track sequence_5_1 (43.4 → 36.5), 5_5
+(63.7 → 62.0) and 5_10 (32.8 → 21.1) again score below submission 10's estimates, as in submission 11.
 
 ## Against GroundedSLAM, sequence by sequence
 
