@@ -346,3 +346,40 @@ and visloc-rs's earlier pass without the clock offsets (73.93), so the clock off
 that lift SLAM Dunk's own baseline by 35 points on sequence_3_17 do not lift visloc-rs's; together with
 R_12_10cp and sequence_1_20, where SLAM Dunk's baseline alone is 17 and 8 points ahead, the gap points at the
 pipeline the terms sit on (front end, keyframes, robust passes) rather than at the calibration model.
+
+## The paper's front end in the pass: RootSIFT and the keyframe spacing
+
+With the calibration terms ruled out as the gap, the pass by day gets keypoints of its own
+(`--ba-experiment-pass-features`, lamaria_ba_chain.py `--pass-features sift|rootsift` with `--pass-feature-args`
+and `--pass-match-args`), paired against the default chain from the same VIO and online windows. The online
+windows keep the default SIFT; in low light (track 4) the pass keeps the low-light keypoints, so there the
+experiment is the default chain (change 0; the first runs failed there on a rematch bug, fixed in 21bdd1c).
+
+**900 RootSIFT keypoints per image, ratio test 0.78** (the paper's count and ratio; RootSIFT's distance limit
+225; run 45714906572):
+
+| Recording | Default CP | RootSIFT 900 | Change | Recall at 1 m, default → RootSIFT (%) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 87.90 | 85.10 | −2.80 | 100.0 → 100.0 |
+| R_12_10cp | 63.74 | 74.72 | +10.98 | 60.0 → 80.0 |
+| R_13_15cp | 78.14 | 78.97 | +0.83 | 93.3 → 100.0 |
+| sequence_1_19 | 85.34 | 91.30 | +5.96 | 100.0 → 100.0 |
+| sequence_1_20 | 86.69 | 87.55 | +0.85 | 100.0 → 100.0 |
+| sequence_2_11 | 88.47 | 83.03 | −5.45 | 100.0 → 100.0 |
+| sequence_2_12 | 51.02 | 46.11 | −4.91 | 25.0 → 30.0 |
+| sequence_3_17 | 80.33 | 77.71 | −2.62 | 100.0 → 92.6 |
+| sequence_3_18 | 57.76 | 63.76 | +6.00 | 41.7 → 45.8 |
+| sequence_4_10, sequence_4_11 | low light: the default chain | | 0 | |
+| sequence_5_11 | 68.38 | 73.81 | +5.43 | 71.4 → 92.9 |
+| sequence_5_12 | 6.53 | 5.70 | −0.83 | 0.0 → 0.0 |
+
+Mean change over the thirteen **+1.03**, 6 of the 11 it applies to gain. The largest gain is on R_12_10cp, where
+SLAM Dunk's baseline is 17 points ahead; this is the first change measured here that closes part of the
+baseline-pipeline gap. One run is not yet a decision (sequence_2_12 and the Moving recordings move by several
+points between runs): a repeat (run 45751972024) and 1,500 RootSIFT keypoints at ratio 0.78 (run 45751990291)
+follow.
+
+**Keyframes 1 s apart** (`--kf-step 20`, every second keyframe of the online windows; the paper spaces them
+max(0.6 s, T/1500); run 45714886254): R_11_5cp −11.46, R_12_10cp −5.55, R_13_15cp −1.32, sequence_1_19 −8.59,
+sequence_1_20 −13.31, sequence_2_11 −16.37, sequence_2_12 −10.40, sequence_3_17 −12.49, sequence_3_18 +2.92,
+sequence_5_11 −11.67, sequence_5_12 −0.10; mean over the thirteen −6.80. The 0.5 s keyframes stay.
