@@ -199,9 +199,12 @@ fn row_lanes(
         return Some((0, 16));
     };
     let disc = (c01 * dy) * (c01 * dy) - c00 * (c11 * dy * dy - s2);
-    let half = if disc > 0.0 { disc.sqrt() / c00 } else { 0.0 };
+    if disc <= 0.0 {
+        return None;
+    }
+    let half = disc.sqrt() / c00;
     let xc = mu_x - c01 * dy / c00 - x0 - 0.5;
-    let (lo, hi) = (xc - half - 1.0, xc + half + 1.0);
+    let (lo, hi) = (xc - half - SLACK, xc + half + SLACK);
     let a = lo <= 7.0 && hi >= 0.0;
     let b = lo <= 15.0 && hi >= 8.0;
     match (a, b) {
@@ -211,6 +214,13 @@ fn row_lanes(
         (false, false) => None,
     }
 }
+
+/// Pixels of slack on the ellipse bounds (rounding only: a pixel centre is
+/// tested against the exact ellipse).
+const SLACK: f32 = 1e-3;
+/// Slack on the level `2 ln(255 opacity)`: `exp(5e-4)` is ~5e-4 relative,
+/// far above `fast_exp`'s error.
+const LEVEL_SLACK: f32 = 1e-3;
 
 /// A conic and its `alpha = 1/255` level: `(c00, c01, c11, s2)`.
 type Level = (f32, f32, f32, f32);
@@ -226,10 +236,12 @@ fn splat_rows(p: &[f32], y0: u32, h: usize) -> Option<(usize, usize, Option<Leve
     let det = c00 * c11 - c01 * c01;
     let mut level = None;
     if c00 > 0.0 && c11 > 0.0 && det > 0.0 {
-        let s2 = 2.0 * (255.0 * opac).ln().max(0.0);
-        let hy = (s2 * c00 / det).sqrt() + 1.0;
-        ly0 = ly0.max((mu_y - hy - 0.5 - y0 as f32).floor() as i64);
-        ly1 = ly1.min((mu_y + hy - 0.5 - y0 as f32).ceil() as i64);
+        // The exact `alpha = 1/255` level, widened by `LEVEL_SLACK` so the
+        // polynomial `exp` can never put a hit outside it.
+        let s2 = 2.0 * (255.0 * opac).ln().max(0.0) + LEVEL_SLACK;
+        let hy = (s2 * c00 / det).sqrt() + SLACK;
+        ly0 = ly0.max((mu_y - hy - 0.5 - y0 as f32).ceil() as i64);
+        ly1 = ly1.min((mu_y + hy - 0.5 - y0 as f32).floor() as i64);
         level = Some((c00, c01, c11, s2));
     }
     (ly0 <= ly1).then_some((ly0 as usize, ly1 as usize, level))
