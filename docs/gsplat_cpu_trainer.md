@@ -19,8 +19,9 @@ cargo run --release -p visloc-gsplat-cpu --example gsplat_cpu_train -- \
     [--overlap 1] [--decay 0.9] [--neighbours 3] [--groups mean,shape,opacity,color]
 ```
 
-The population is fixed (the SfM points, no densification); this is a test
-bench for the optimizer, not yet a replacement for `gsplat_train`.
+With Adam its defaults are `gsplat_train`'s (L1 + 0.2 D-SSIM, Inria
+densification, SH degree up every 1000 steps); the Newton step runs on a
+fixed population (`--loss l2 --no-densify`).
 
 ## Correctness
 
@@ -47,6 +48,33 @@ L1 loss, no densification, 500 steps, against `gsplat_train --no-densify
 | 200 | 20.59 dB | 20.56 dB |
 | 300 | 21.60 dB | 21.62 dB |
 | 500 | 23.02 dB (97 s) | 23.02 dB (88 s, 176 ms/step) |
+
+## Adam, 7,000 steps with densification: 1.41x faster than `gsplat_train`
+
+Both with their defaults and `--max-gaussians 400000`, run one after the
+other on the idle machine:
+
+| Trainer | Eval PSNR at 1k / 2k / 4k / 5k / 7k | Gaussians | Training time |
+| --- | --- | ---: | ---: |
+| `gsplat_train` (lavapipe + host rasterizer) | 24.81 / 28.62 / 29.63 / 30.30 / **29.89** | 418,731 | 1,578 s |
+| `gsplat-cpu` | 24.96 / 28.68 / 29.51 / 30.06 / **29.87** | 416,642 | **1,119 s** |
+
+(Steps 3,000 and 6,000 end with an opacity reset, so their evals, ~10 dB in
+both, are left out.) A step at 400k gaussians, ms: Adam 43.6, backward
+51.0, forward 27.0, projection and binning 26.1, loss 5.2.
+
+What it took besides the host pipeline:
+
+- **The projection's reverse pass by hand** (`project::screen_vjp`, tested
+  against the dual Jacobian), fused with the Adam update per gaussian.
+- **10 floats per intersection** in the gradient-only backward walk (the
+  Gauss-Newton walk needs 32).
+- **No prune at the cap**, as `gsplat_train`'s classify pass: pruning past
+  the cap (large splats once `prune_large` is on) cost 3 dB by step 5,000.
+- **Subnormals flushed** in the Adam moments: gaussians culled after an
+  opacity reset get no gradient, their first moment decays by 0.9 a step
+  into subnormals within ~650 steps, and x86 computes those on a slow path
+  (the Adam stage went from 44 to 120 ms a step; lavapipe flushes them).
 
 ## The local Newton step
 

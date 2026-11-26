@@ -11,7 +11,7 @@
 //! defaults are `gsplat_train`'s: L1 + 0.2 D-SSIM, Inria densification
 //! (from step 500, every 100, opacity reset every 3000), SH degree up every
 //! 1000 steps. The Newton step (`--optimizer newton`, an experiment, see
-//! `docs/gsplat_cpu_newton.md`) needs `--loss l2 --no-densify`.
+//! `docs/gsplat_cpu_trainer.md`) needs `--loss l2 --no-densify`.
 
 use std::path::PathBuf;
 use std::time::Instant;
