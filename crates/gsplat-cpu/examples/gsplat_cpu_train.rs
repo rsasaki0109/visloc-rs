@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
             "--step" => newton.step = next()?.parse()?,
+            "--decay" => newton.decay = next()?.parse()?,
             "--groups" => {
                 let v = next()?;
                 newton.groups = ["mean", "shape", "opacity", "color"].map(|g| v.split(',').any(|x| x == g));

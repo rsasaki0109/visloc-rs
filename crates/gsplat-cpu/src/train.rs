@@ -135,11 +135,12 @@ impl Accum {
             gcol: vec![0.0; n * NCOL],
         }
     }
-    fn clear(&mut self) {
-        self.h.par_iter_mut().for_each(|x| *x = [0.0; NTRI]);
-        self.g.par_iter_mut().for_each(|x| *x = [0.0; NGEO]);
-        self.hcol.par_iter_mut().for_each(|x| *x = [0.0; NSH]);
-        self.gcol.par_iter_mut().for_each(|x| *x = 0.0);
+    /// Multiply every sum by `decay` (0 clears them).
+    fn decay(&mut self, decay: f32) {
+        self.h.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.g.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.hcol.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.gcol.par_iter_mut().for_each(|v| *v *= decay);
     }
 }
 
@@ -201,6 +202,10 @@ pub struct NewtonConfig {
     pub groups: [bool; 4],
     /// Step size (1 = the full Newton step).
     pub step: f32,
+    /// The sums of earlier iterations are kept, multiplied by this each
+    /// iteration, so a step solves the sum of the recent views' quadratic
+    /// models rather than the current view's alone (0: 3DGS²'s step).
+    pub decay: f32,
 }
 
 impl Default for NewtonConfig {
@@ -217,6 +222,7 @@ impl Default for NewtonConfig {
             max_dcol: 1.0,
             groups: [true; 4],
             step: 1.0,
+            decay: 0.0,
         }
     }
 }
@@ -479,7 +485,7 @@ impl Trainer {
         if acc.g.len() != n {
             acc = Accum::new(n);
         }
-        acc.clear();
+        acc.decay(cfg.decay);
         let mut primary_loss = 0.0;
         let nb: Vec<usize> = self.neighbours[vi].iter().take(cfg.neighbours).copied().collect();
         for (k, v) in std::iter::once(vi).chain(nb).enumerate() {
