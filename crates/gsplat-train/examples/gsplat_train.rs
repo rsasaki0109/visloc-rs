@@ -58,6 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--ssim-every" => cfg.ssim_every = next()?.parse()?,
             "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
+            // The view order, refine sampling and mean noise (default 42).
+            "--seed" => cfg.seed = next()?.parse()?,
             // brush 0.3's refine strategy, mean noise and learning rates.
             "--strategy" => match next()?.as_str() {
                 "brush" => brush_strategy = true,
