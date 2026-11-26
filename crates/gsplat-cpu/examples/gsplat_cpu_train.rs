@@ -60,6 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
+            "--step" => newton.step = next()?.parse()?,
+            "--groups" => {
+                let v = next()?;
+                newton.groups = ["mean", "shape", "opacity", "color"].map(|g| v.split(',').any(|x| x == g));
+            }
             o => return Err(format!("unknown argument {o}").into()),
         }
     }

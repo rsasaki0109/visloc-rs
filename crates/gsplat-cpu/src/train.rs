@@ -197,6 +197,10 @@ pub struct NewtonConfig {
     pub max_dlogit: f32,
     pub max_dquat: f32,
     pub max_dcol: f32,
+    /// Which parameters the step moves: mean, scale+rotation, opacity, colour.
+    pub groups: [bool; 4],
+    /// Step size (1 = the full Newton step).
+    pub step: f32,
 }
 
 impl Default for NewtonConfig {
@@ -211,6 +215,8 @@ impl Default for NewtonConfig {
             max_dlogit: 2.0,
             max_dquat: 0.5,
             max_dcol: 1.0,
+            groups: [true; 4],
+            step: 1.0,
         }
     }
 }
@@ -507,6 +513,9 @@ impl Trainer {
             .zip(acc.hcol.par_iter().zip(acc.gcol.par_chunks(NCOL)))
             .for_each(|(((p, col), (h, g)), (hc, gc))| {
                 solve_geometry(p, h, g, lambda, cfg);
+                if !cfg.groups[3] {
+                    return;
+                }
                 for ch in 0..3 {
                     for k in 0..NSH {
                         let hh = hc[k] as f64;
@@ -514,7 +523,7 @@ impl Trainer {
                             continue;
                         }
                         let step = -(gc[ch * NSH + k] as f64) / (hh * (1.0 + lambda) + 1e-12);
-                        col[ch * NSH + k] += (step as f32).clamp(-cfg.max_dcol, cfg.max_dcol);
+                        col[ch * NSH + k] += cfg.step * (step as f32).clamp(-cfg.max_dcol, cfg.max_dcol);
                     }
                 }
             });
@@ -541,8 +550,24 @@ fn solve_geometry(p: &mut [f32; NGEO], h: &[f32; NTRI], g: &[f32; NGEO], lambda:
         return;
     }
     let floor = 1e-6 * maxd;
+    let mut g = *g;
     for (i, row) in a.iter_mut().enumerate() {
         row[i] = row[i] * (1.0 + lambda) + floor;
+    }
+    let group = |i: usize| match i {
+        0..=2 => 0,
+        3..=9 => 1,
+        _ => 2,
+    };
+    for i in 0..NGEO {
+        if !cfg.groups[group(i)] {
+            for j in 0..NGEO {
+                a[i][j] = 0.0;
+                a[j][i] = 0.0;
+            }
+            a[i][i] = 1.0;
+            g[i] = 0.0;
+        }
     }
     // Cholesky in place (lower).
     for j in 0..NGEO {
@@ -597,6 +622,7 @@ fn solve_geometry(p: &mut [f32; NGEO], h: &[f32; NTRI], g: &[f32; NGEO], lambda:
     if !s.is_finite() {
         return;
     }
+    let s = s * cfg.step as f64;
     for i in 0..NGEO {
         p[i] += (s * x[i]) as f32;
     }
