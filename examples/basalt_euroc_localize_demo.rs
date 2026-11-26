@@ -97,6 +97,13 @@
 //! - `--vio-wheel-velocity` (with `--vio --odometry FILE --imu-from-body`):
 //!   the body velocity of `FILE` (a wheel odometry) goes into the VIO window
 //!   on every frame.
+//! - `--vio-nonholonomic SIGMA` (with `--vio --imu-from-body`, no odometry
+//!   needed): a ground robot's body moves along its own x axis only, so a
+//!   zero lateral and vertical body velocity (1-sigma SIGMA m/s) goes into
+//!   the VIO window on every frame; the forward speed stays free. For a
+//!   robot without wheel odometry (`--imu-from-body` then places the body
+//!   frame: x forward, z up, at the point that moves without slip, e.g.
+//!   the middle of a differential drive's axle).
 //! - `--fusion`: the map pose comes from `visloc_localization::MapFusion`, a
 //!   sliding-window pose graph over the odometries and the accepted fixes,
 //!   instead of the single rigid correction. With `--vio --odometry FILE`
@@ -242,6 +249,9 @@ struct Args {
     /// Feed `--odometry`'s body velocity into the VIO window on every frame
     /// (wheel-inertial odometry).
     vio_wheel_velocity: bool,
+    /// 1-sigma (m/s) of a zero lateral and vertical body velocity put into
+    /// the VIO window on every frame (non-holonomic ground robot).
+    vio_nonholonomic: Option<f64>,
     /// 1-sigma of `--vio-map-prior`: position (m), yaw and roll/pitch (deg;
     /// 0 leaves roll/pitch to the IMU). By default 0.03 m, 1 deg, 1 deg, and
     /// no roll/pitch for `--mono` without `--vio-wheel-velocity`: there a
@@ -325,7 +335,7 @@ impl Args {
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--fusion [--odometry-noise wheel|legged] \
          [--drop-vio-s START:END]] [--vio-map-prior [--map-prior-sigma M,YAW_DEG,TILT_DEG]] \
-         [--vio-wheel-velocity] [--mono] \
+         [--vio-wheel-velocity] [--vio-nonholonomic SIGMA] [--mono] \
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
@@ -381,6 +391,7 @@ impl Args {
             drop_vio_s: None,
             vio_map_prior: false,
             vio_wheel_velocity: false,
+            vio_nonholonomic: None,
             mono: false,
             map_prior_sigma: None,
             localize_every: 1,
@@ -483,6 +494,15 @@ impl Args {
                 "--fusion" => args.fusion = true,
                 "--vio-map-prior" => args.vio_map_prior = true,
                 "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
+                "--vio-nonholonomic" => {
+                    let sigma: f64 = value()?
+                        .parse()
+                        .map_err(|_| "--vio-nonholonomic takes a sigma in m/s")?;
+                    if sigma.is_nan() || sigma <= 0.0 {
+                        return Err("--vio-nonholonomic takes a positive sigma".into());
+                    }
+                    args.vio_nonholonomic = Some(sigma);
+                }
                 "--mono" => args.mono = true,
                 "--map-prior-sigma" => {
                     let text = value()?;
@@ -590,8 +610,14 @@ impl Args {
         {
             return Err("--vio needs --calibration and --config, which need --vio".into());
         }
-        if args.imu_from_body.is_some() && args.odometry.is_none() {
-            return Err("--imu-from-body needs --odometry".into());
+        if args.imu_from_body.is_some()
+            && args.odometry.is_none()
+            && args.vio_nonholonomic.is_none()
+        {
+            return Err("--imu-from-body needs --odometry or --vio-nonholonomic".into());
+        }
+        if args.vio_nonholonomic.is_some() && !(args.vio && args.imu_from_body.is_some()) {
+            return Err("--vio-nonholonomic needs --vio and --imu-from-body".into());
         }
         if args.object_boxes.is_some() && !args.vio {
             return Err("--object-boxes needs --vio".into());
@@ -1798,6 +1824,21 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
                     },
                 });
             }
+        }
+        if let (Some(sigma), Some(frame_id), false) =
+            (args.vio_nonholonomic, frame_id, args.vio_wheel_velocity)
+        {
+            // Zero lateral and vertical body velocity; the forward row is
+            // weighted 0, so the speed stays the VIO's own.
+            adapter.estimator.add_external_factor(ExternalFactor {
+                frame_id,
+                measurement: ExternalMeasurement::BodyVelocity {
+                    imu_from_body: body_from_imu.inverse(),
+                    imu_angular_velocity: frame_imu_gyro_mean - gyro_bias,
+                    body_velocity: Vector3::zeros(),
+                    sqrt_information: Vector3::new(0.0, 1.0 / sigma, 1.0 / sigma),
+                },
+            });
         }
     }
     if let Some(stats) = adapter.estimator.dynamic_object_stats() {
