@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut truncate: Option<usize> = None;
     let mut sparse_adam = true;
     let mut stride = 1usize;
+    let mut res_schedule: Vec<f64> = Vec::new();
     let mut adam = AdamConfig::default();
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
@@ -72,6 +73,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--no-densify" => densify_cfg = None,
             "--dense-adam" => sparse_adam = false,
             "--stride" => stride = next()?.parse()?,
+            // e.g. "0.2,0.5": a quarter of the resolution for the first 20%
+            // of the steps, half until 50%, then full (coarse to fine).
+            "--res-schedule" => {
+                res_schedule = next()?.split(',').map(|x| x.parse::<f64>()).collect::<Result<_, _>>()?;
+            }
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
             "--step" => newton.step = next()?.parse()?,
@@ -162,6 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let vi = order.pop().unwrap_or(0);
+        // Coarse to fine: factor 2^(levels left) until each boundary.
+        let frac = (step - 1) as f64 / steps as f64;
+        let left = res_schedule.iter().filter(|&&b| frac < b).count();
+        tr.res_factor = 1 << left;
         let ts = Instant::now();
         let l = match optimizer.as_str() {
             "adam" => tr.adam_step(vi, step - 1, steps, &adam),

@@ -39,6 +39,40 @@ pub struct TrainView {
 }
 
 impl TrainView {
+    /// The image box-averaged over `f x f` blocks, and the camera of that
+    /// resolution (its pixel `j` is the full image's pixels `f j .. f j + f`).
+    pub fn downsampled(&self, f: usize) -> (CameraView, Vec<f32>, Vec<u32>) {
+        let c = self.view.camera;
+        let (w, h) = (c.width as usize, c.height as usize);
+        let (w2, h2) = (w / f, h / f);
+        let mut gt = vec![0.0f32; w2 * h2 * 3];
+        let inv = 1.0 / (f * f) as f32;
+        gt.par_chunks_mut(w2 * 3).enumerate().for_each(|(j, row)| {
+            for i in 0..w2 {
+                for ch in 0..3 {
+                    let mut s = 0.0f32;
+                    for dy in 0..f {
+                        for dx in 0..f {
+                            s += self.gt[((f * j + dy) * w + f * i + dx) * 3 + ch];
+                        }
+                    }
+                    row[i * 3 + ch] = s * inv;
+                }
+            }
+        });
+        let rgb: Vec<[f32; 3]> = gt.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+        let cam = PinholeCamera {
+            width: w2 as u32,
+            height: h2 as u32,
+            fx: c.fx / f as f32,
+            fy: c.fy / f as f32,
+            cx: c.cx / f as f32,
+            cy: c.cy / f as f32,
+            ..c
+        };
+        (CameraView { camera: cam, ..self.view }, gt, pack_rgba8(&rgb, None))
+    }
+
     /// The pixels `(2 i + ox, 2 j + oy)` as an image of their own, and a
     /// camera whose pixel centres are those pixels' centres.
     pub fn strided(&self, ox: usize, oy: usize) -> (CameraView, Vec<f32>, Vec<u32>) {
@@ -327,6 +361,9 @@ pub struct Trainer {
     ssim_size: (usize, usize),
     /// 1: every pixel every step; 2: one pixel of every 2x2 block a step.
     pub stride: usize,
+    /// Train on the images box-averaged by this factor (a resolution
+    /// schedule sets it per step; 1 = full resolution).
+    pub res_factor: usize,
     /// Inria's densification statistic: per gaussian, the summed NDC norm
     /// of its screen-mean gradient, and the views it was projected in.
     grad_accum: Vec<f32>,
@@ -373,6 +410,7 @@ impl Trainer {
             ssim: None,
             ssim_size: (0, 0),
             stride: 1,
+            res_factor: 1,
             grad_accum: Vec::new(),
             grad_count: Vec::new(),
             timing: [0.0; 6],
@@ -429,7 +467,11 @@ impl Trainer {
     pub fn adam_step(&mut self, vi: usize, step: usize, total: usize, cfg: &AdamConfig) -> f64 {
         let n = self.model.len();
         self.model.active_degree = ((step / cfg.sh_interval) as u32).min(3);
-        let (loss, r, out, view) = if self.stride == 2 {
+        let (loss, r, out, view) = if self.res_factor > 1 {
+            let (view, gt, packed) = self.views[vi].downsampled(self.res_factor);
+            let (loss, r, out) = self.view_grads(&view, &gt, Some(&packed), 1.0, false);
+            (loss, r, out, view)
+        } else if self.stride == 2 {
             // One pixel of every 2x2 block, the offset cycling through the
             // four (Turbo-GS / PennyGS), with Turbo-GS's wider low-pass:
             // 0.3 + 0.5 (p - 1) = 0.8 px² of the full image, 0.2 of this one.
