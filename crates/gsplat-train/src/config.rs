@@ -43,6 +43,14 @@ pub struct TrainConfig {
     /// `normal_start` on.
     pub normal_weight: f32,
     pub normal_start: usize,
+    /// Weight of the depth-prior loss `mean |D - P| / P` (relative L1 of the
+    /// rendered depth channel against a per-view prior depth, e.g. LiDAR; see
+    /// `shaders/depth_prior.wgsl` and [`crate::Trainer::load_depth_priors`]);
+    /// 0 = off. Applied on every `depth_every`-th step: the geometry
+    /// channels take the device rasterizer, slower than the host one on a
+    /// CPU adapter.
+    pub depth_weight: f32,
+    pub depth_every: usize,
     /// brush's auxiliary losses (see `shaders/aux_loss.wgsl`): opacity-logit
     /// and scale weights, applied with weight `aux_loss_time - t` (t = step /
     /// steps, clamped to [0, 1]). 0 = off.
@@ -83,6 +91,8 @@ impl Default for TrainConfig {
             lr_scale_final: None,
             normal_weight: 0.0,
             normal_start: 7000,
+            depth_weight: 0.0,
+            depth_every: 1,
             opac_loss_weight: 0.0,
             scale_loss_weight: 0.0,
             aux_loss_time: 0.9,

@@ -97,6 +97,15 @@ struct Appearance {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PriorUniforms {
+    npix: u32,
+    coef: f32,
+    accumulate: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct NormalUniforms {
     w: u32,
     h: u32,
@@ -141,6 +150,15 @@ struct NormalLoss {
     rays: Vec<(PinholeCamera, wgpu::Buffer)>,
 }
 
+/// Depth-prior loss: depth_prior.wgsl, its uniforms and the current view's
+/// prior (the host keeps one per training view and uploads it per step, as
+/// the ground truth).
+struct DepthPrior {
+    pipeline: wgpu::ComputePipeline,
+    uniforms: wgpu::Buffer,
+    prior: wgpu::Buffer,
+}
+
 /// The pixel rays of a lens camera as normal_loss.wgsl reads them, one
 /// vec4 per pixel ([`visloc_gsplat_core::lens::unproject`] at the pixel
 /// centre; 0 where it fails).
@@ -176,6 +194,10 @@ pub struct Trainer {
     /// Depth-normal loss: the two passes of normal_loss.wgsl, their
     /// uniforms and per-pixel scratch (built on first use).
     normal: Option<NormalLoss>,
+    /// Per training view, its prior depth (camera z per pixel, 0 = none);
+    /// empty until [`Trainer::load_depth_priors`].
+    depth_host: Vec<Option<Vec<f32>>>,
+    depth_prior: Option<DepthPrior>,
     appearance: Option<Appearance>,
     sh_degree: u32,
     /// Ground truth of the current view (the host keeps every view packed
@@ -313,6 +335,35 @@ fn bind(
         layout: &pipeline.get_bind_group_layout(0),
         entries: &entries,
     })
+}
+
+/// A depth map file (see [`Trainer::load_depth_priors`]) resampled to
+/// `w` x `h` by nearest neighbour; `None` if missing or malformed.
+fn read_depth_map(path: &std::path::Path, w: u32, h: u32) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(path).ok()?;
+    let word = |i: usize| -> Option<[u8; 4]> { bytes.get(i * 4..i * 4 + 4)?.try_into().ok() };
+    let (mw, mh) = (
+        u32::from_le_bytes(word(0)?) as usize,
+        u32::from_le_bytes(word(1)?) as usize,
+    );
+    if mw == 0 || mh == 0 || bytes.len() != 8 + mw * mh * 4 {
+        return None;
+    }
+    let depth = |x: usize, y: usize| f32::from_le_bytes(word(2 + y * mw + x).expect("sized"));
+    let (w, h) = (w as usize, h as usize);
+    Some(
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) * mw / w, (i / w) * mh / h);
+                let d = depth(x, y);
+                if d.is_finite() && d > 0.0 {
+                    d
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+    )
 }
 
 /// 2D workgroup count for `threads` 256-wide invocations (see the kernels).
@@ -592,6 +643,8 @@ impl Trainer {
             noise_pipeline,
             noise_uniforms,
             normal: None,
+            depth_host: Vec::new(),
+            depth_prior: None,
             appearance,
             sh_degree: init.sh_degree,
             gt,
@@ -759,6 +812,23 @@ impl Trainer {
         self.step
     }
 
+    /// Load a prior depth per training view from `dir/<image name>.bin`
+    /// (width and height `u32`, then camera-z `f32` depths row by row, 0
+    /// where there is none; `visloc-mvs --save-fused-depth`'s layout, which
+    /// gsplat-cuda's trainer reads too). A map of another size is resampled
+    /// to the view's by nearest neighbour; a view without a readable file
+    /// gets no prior. Train them with [`TrainConfig::depth_weight`]. Returns
+    /// the number of views with one.
+    pub fn load_depth_priors(&mut self, dir: &std::path::Path) -> usize {
+        let (w, h) = (self.width, self.height);
+        self.depth_host = self
+            .views
+            .iter()
+            .map(|v| read_depth_map(&dir.join(format!("{}.bin", v.name)), w, h))
+            .collect();
+        self.depth_host.iter().filter(|d| d.is_some()).count()
+    }
+
     /// Current number of gaussians.
     pub fn num_gaussians(&self) -> usize {
         self.st().renderer.num_gaussians()
@@ -816,7 +886,10 @@ impl Trainer {
             .then(|| (self.step / self.cfg.sh_degree_interval) as u32);
         st.renderer.set_active_sh_degree(active_sh);
         let normal_on = self.cfg.normal_weight > 0.0 && self.step >= self.cfg.normal_start;
-        st.renderer.set_geometry(normal_on);
+        let depth_on = self.cfg.depth_weight > 0.0
+            && self.step.is_multiple_of(self.cfg.depth_every.max(1))
+            && self.depth_host.get(vi).is_some_and(Option::is_some);
+        st.renderer.set_geometry(normal_on || depth_on);
         let _ = st.renderer.render(&view, bg);
         if let Some(p) = self.profile.as_mut() {
             p.mark(&dev, "forward");
@@ -935,6 +1008,39 @@ impl Trainer {
                         final_t,
                         d_geo,
                     );
+                }
+                if depth_on {
+                    let dp = self.depth_prior.get_or_insert_with(|| DepthPrior {
+                        pipeline: pipeline(
+                            &dev,
+                            "depth_prior",
+                            include_str!("shaders/depth_prior.wgsl"),
+                            "depth_prior",
+                        ),
+                        uniforms: uniform(&dev, "depth_prior_uniforms", 16),
+                        prior: storage(&dev, "depth_prior", npix as u64 * 4),
+                    });
+                    let prior = self.depth_host[vi].as_ref().expect("checked above");
+                    queue.write_buffer(&dp.prior, 0, bytemuck::cast_slice(prior));
+                    let pu = PriorUniforms {
+                        npix,
+                        coef: self.cfg.depth_weight / npix as f32,
+                        accumulate: normal_on as u32,
+                        _pad: 0,
+                    };
+                    queue.write_buffer(&dp.uniforms, 0, bytemuck::bytes_of(&pu));
+                    let (out_geo, d_geo, _) =
+                        st.renderer.geo_buffers().expect("geometry enabled above");
+                    let bg = bind(
+                        &dev,
+                        &dp.pipeline,
+                        "depth_prior",
+                        &[&dp.uniforms, out_geo, &dp.prior, d_geo],
+                    );
+                    let (x, y) = groups_2d(npix);
+                    pass.set_pipeline(&dp.pipeline);
+                    pass.set_bind_group(0, &bg, &[]);
+                    pass.dispatch_workgroups(x, y, 1);
                 }
             }
             queue.submit(Some(enc.finish()));
@@ -1672,5 +1778,123 @@ mod tests {
         }
         // One ray buffer per lens camera.
         assert_eq!(nl.rays.len(), 2);
+    }
+
+    /// depth_prior.wgsl's gradient against `coef sign(D - P) / P`: zero
+    /// where there is no prior, set or added to what d_geo holds.
+    #[test]
+    fn gpu_depth_prior_gradient() {
+        let Some(ctx) = visloc_gsplat_render::try_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let (dev, queue) = (&ctx.device, &ctx.queue);
+        let npix = 700u32; // more than one workgroup, not a multiple of 256
+        let n = npix as usize;
+        let geo: Vec<[f32; 4]> = (0..n)
+            .map(|i| [0.1, 0.2, 0.3, 2.0 + (i % 7) as f32 * 0.5])
+            .collect();
+        let prior: Vec<f32> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    0.0
+                } else {
+                    1.0 + (i % 5) as f32
+                }
+            })
+            .collect();
+        let before: Vec<[f32; 4]> = (0..n).map(|i| [1.0, 2.0, 3.0, i as f32]).collect();
+        let pipe = pipeline(
+            dev,
+            "depth_prior",
+            include_str!("shaders/depth_prior.wgsl"),
+            "depth_prior",
+        );
+        let uniforms = uniform(dev, "u", 16);
+        let out_geo = storage(dev, "out_geo", n as u64 * 16);
+        let prior_buf = storage(dev, "prior", n as u64 * 4);
+        let d_geo = storage(dev, "d_geo", n as u64 * 16);
+        queue.write_buffer(&out_geo, 0, bytemuck::cast_slice(&geo));
+        queue.write_buffer(&prior_buf, 0, bytemuck::cast_slice(&prior));
+        let coef = 0.25f32;
+        for accumulate in [0u32, 1] {
+            queue.write_buffer(&d_geo, 0, bytemuck::cast_slice(&before));
+            let pu = PriorUniforms {
+                npix,
+                coef,
+                accumulate,
+                _pad: 0,
+            };
+            queue.write_buffer(&uniforms, 0, bytemuck::bytes_of(&pu));
+            let bg = bind(
+                dev,
+                &pipe,
+                "depth_prior",
+                &[&uniforms, &out_geo, &prior_buf, &d_geo],
+            );
+            let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                let (x, y) = groups_2d(npix);
+                pass.set_pipeline(&pipe);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            }
+            queue.submit(Some(enc.finish()));
+            let got = read_f32(dev, queue, &d_geo, n * 4);
+            for i in 0..n {
+                let p = prior[i];
+                let diff = geo[i][3] - p;
+                // WGSL's sign(0) is 0 (Rust's signum(0.0) is 1).
+                let g = if p > 0.0 && diff != 0.0 {
+                    coef * diff.signum() / p
+                } else {
+                    0.0
+                };
+                let want = if accumulate == 1 {
+                    [before[i][0], before[i][1], before[i][2], before[i][3] + g]
+                } else {
+                    [0.0, 0.0, 0.0, g]
+                };
+                for k in 0..4 {
+                    assert!(
+                        (got[i * 4 + k] - want[k]).abs() < 1e-6,
+                        "accumulate {accumulate}, pixel {i}, channel {k}: {} vs {}",
+                        got[i * 4 + k],
+                        want[k]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A prior map of another size is resampled by nearest neighbour; bad
+    /// depths read as 0 and malformed files as none.
+    #[test]
+    fn depth_map_files() {
+        let dir = std::env::temp_dir().join(format!("depth_map_files_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, w: u32, h: u32, values: &[f32]| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&w.to_le_bytes());
+            bytes.extend_from_slice(&h.to_le_bytes());
+            for v in values {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let half = write("half.bin", 2, 1, &[3.0, f32::NAN]);
+        assert_eq!(
+            read_depth_map(&half, 4, 2),
+            Some(vec![3.0, 3.0, 0.0, 0.0, 3.0, 3.0, 0.0, 0.0])
+        );
+        let same = write("same.bin", 2, 2, &[1.0, -1.0, 2.0, 4.0]);
+        assert_eq!(read_depth_map(&same, 2, 2), Some(vec![1.0, 0.0, 2.0, 4.0]));
+        let short = write("short.bin", 2, 2, &[1.0]);
+        assert_eq!(read_depth_map(&short, 2, 2), None);
+        assert_eq!(read_depth_map(&dir.join("missing.bin"), 2, 2), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
