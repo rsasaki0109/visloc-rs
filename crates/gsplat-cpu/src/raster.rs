@@ -23,7 +23,8 @@ use crate::project::Proj;
 pub const TILE: u32 = 16;
 /// Floats per splat the backward pass returns: screen gradient (6), colour
 /// gradient (3), upper triangle of the screen Gauss-Newton matrix (21),
-/// colour Gauss-Newton weight (1), densification statistic (1).
+/// colour Gauss-Newton weight (1), and one unused (Inria's densification
+/// statistic is the norm of the screen-mean gradient itself).
 pub const NB: usize = 32;
 pub const B_GRAD: usize = 0;
 pub const B_COL: usize = 6;
@@ -69,20 +70,38 @@ impl Frame {
             .par_iter()
             .map(|p| rect(p).map_or(0, |(x0, x1, y0, y1)| ((x1 - x0 + 1) * (y1 - y0 + 1)) as usize))
             .collect();
-        let mut tile_count = vec![0usize; nt];
-        let mut pairs_tile = Vec::with_capacity(counts.iter().sum());
-        let mut pairs_id = Vec::with_capacity(pairs_tile.capacity());
-        for (c, p) in proj.iter().enumerate() {
-            if let Some((x0, x1, y0, y1)) = rect(p) {
-                for ty in y0..=y1 {
-                    for tx in x0..=x1 {
-                        let t = (ty * tbw + tx) as usize;
-                        tile_count[t] += 1;
-                        pairs_tile.push(t as u32);
-                        pairs_id.push(c as u32);
+        // Each splat's (tile) entries at its own offset, in parallel, then a
+        // stable counting sort by tile (lists stay front to back).
+        let mut starts = Vec::with_capacity(proj.len() + 1);
+        let mut total = 0usize;
+        for &c in &counts {
+            starts.push(total);
+            total += c;
+        }
+        let mut pairs_tile = vec![0u32; total];
+        {
+            let mut rest: &mut [u32] = &mut pairs_tile;
+            let mut chunks: Vec<&mut [u32]> = Vec::with_capacity(proj.len());
+            for &c in &counts {
+                let (a, b) = std::mem::take(&mut rest).split_at_mut(c);
+                chunks.push(a);
+                rest = b;
+            }
+            chunks.into_par_iter().zip(proj.par_iter()).for_each(|(dst, p)| {
+                if let Some((x0, x1, y0, y1)) = rect(p) {
+                    let mut k = 0;
+                    for ty in y0..=y1 {
+                        for tx in x0..=x1 {
+                            dst[k] = (ty * tbw + tx) as u32;
+                            k += 1;
+                        }
                     }
                 }
-            }
+            });
+        }
+        let mut tile_count = vec![0usize; nt];
+        for &t in &pairs_tile {
+            tile_count[t as usize] += 1;
         }
         let mut offsets = vec![0u32; 2 * nt];
         let mut next = vec![0usize; nt];
@@ -100,10 +119,20 @@ impl Frame {
             at += n;
         }
         let mut sorted = vec![0u32; at];
-        for (&t, &c) in pairs_tile.iter().zip(&pairs_id) {
-            let b = &mut next[t as usize];
-            sorted[*b] = c;
-            *b += 1;
+        for (c, w) in starts.windows(2).enumerate() {
+            for &t in &pairs_tile[w[0]..w[1]] {
+                let b = &mut next[t as usize];
+                sorted[*b] = c as u32;
+                *b += 1;
+            }
+        }
+        if let Some(&last) = starts.last() {
+            let c = starts.len() - 1;
+            for &t in &pairs_tile[last..] {
+                let b = &mut next[t as usize];
+                sorted[*b] = c as u32;
+                *b += 1;
+            }
         }
         let mut projected = vec![0.0f32; proj.len() * 9];
         projected
@@ -315,7 +344,7 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
     if gauss_newton {
         backward_impl::<true, NB>(f, r, d_image, h_px, overlap)
     } else {
-        backward_impl::<false, 10>(f, r, d_image, h_px, overlap)
+        backward_impl::<false, 9>(f, r, d_image, h_px, overlap)
     }
 }
 
@@ -375,10 +404,9 @@ fn backward_impl<const GN: bool, const NA: usize>(
                     *d += v;
                 }
             } else {
-                for (d, v) in dst.iter_mut().zip(&g[..9]) {
+                for (d, v) in dst.iter_mut().zip(g) {
                     *d += v;
                 }
-                dst[B_STAT] += g[9];
             }
         }
         row = row_end;
@@ -388,7 +416,7 @@ fn backward_impl<const GN: bool, const NA: usize>(
 
 #[allow(clippy::too_many_arguments)]
 /// `NA` accumulators per splat and slot: all [`NB`] with `GN`, else the
-/// gradient, colour gradient and statistic (10), the statistic at index 9.
+/// gradient and colour gradient (9).
 fn tile_backward<const GN: bool, const NA: usize>(
     f: &Frame,
     r: &Raster,
@@ -432,7 +460,6 @@ fn tile_backward<const GN: bool, const NA: usize>(
         *x = (x0 as usize + lx) as f32 + 0.5;
     }
     let stop = (tile_last as usize).min(end);
-    let (img_w, img_h) = (f.img_w as f32, f.img_h as f32);
     let mut j = stop;
     while j > start {
         j -= 1;
@@ -445,7 +472,6 @@ fn tile_backward<const GN: bool, const NA: usize>(
         let col = [p[6], p[7], p[8]];
         let ju = j as u32;
         let mut acc = [[0.0f32; W]; NA];
-        let stat = if GN { B_STAT } else { 9 };
         let mut any = false;
         for ly in ly0..=ly1 {
             let dy = (y0 as usize + ly) as f32 + 0.5 - mu_y;
@@ -496,7 +522,6 @@ fn tile_backward<const GN: bool, const NA: usize>(
                         for q in 0..6 {
                             acc[B_GRAD + q][k] += d_alpha * ds[q];
                         }
-                        acc[stat][k] += (d_alpha * ds[0]).abs() * img_w + (d_alpha * ds[1]).abs() * img_h;
                         if GN {
                             let ratio = w_tot[ly][k] / at.max(1e-12);
                             let fo = if overlap == 1.0 {
