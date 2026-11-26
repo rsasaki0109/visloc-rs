@@ -4,9 +4,12 @@ The LaMAria leaderboard lists each method's sensors: mono, bino, imu. The
 visloc-rs entry so far is bino + IMU (both SLAM cameras). This page runs the
 same pipeline on the left SLAM camera (cam0) and the IMU alone, for a
 mono + IMU entry, listed as "visloc-rs (mono)" (submission 77, uploaded
-2026-11-25). On the test set it scores **52.9** on average over the five
+2026-11-25). On the test set it scored **52.9** on average over the five
 challenges, against 57.8 for the bino entry
-([Test set](#test-set)).
+([Test set](#test-set)). Its update of 2026-11-26 adds the recording's own
+GPS in post-processing and the low-light jump gate, and scores **57.7**
+([Slow drift](#slow-drift-bending-toward-the-recordings-gps)); the
+leaderboard still labels it mono + imu, and its description states the GPS.
 
 ## What changed
 
@@ -26,8 +29,8 @@ challenges, against 57.8 for the bino entry
 
 The GitHub Actions workflow takes it through its `driver_args` input
 (`--mono`). GPS bridging ([lamaria_gps.md](lamaria_gps.md)) is a separate
-step and was not used here: a mono + IMU entry keeps to the camera and the
-IMU.
+step and was not used for run 35; the 2026-11-26 update uses it, and the
+GPS bend below.
 
 Running cam0 alone found one bug, which also affects the two-camera runs:
 on sequence_5_11 a degenerate image pair made OpenCV's essential-matrix
@@ -280,10 +283,51 @@ was fetched, and the Moving platform track was first bridged at its rides
 76.6 m to 3.2 m. The bend then ran on all 63 sequences. 15 of them reach the
 gate: 1_2 (11.4 m), 1_12 (6.6), 3_3 (6.3), 2_2 (5.5), 4_2 (5.0),
 3_16 (4.9), 4_8, 5_4 (4.8), 5_3, 5_5 (4.7), 5_1, 5_6 (4.6), 2_5 (4.5),
-2_1 (4.2) and 2_3 (4.1). The other 48 stay as they are. The test residuals
-run higher than the training ones (median 3.3 m against 2.5 m), so some of
-the sequences just above the gate may only have poorer fixes; the
-leaderboard will tell.
+2_1 (4.2) and 2_3 (4.1). The other 48 stay as they are.
+
+The leaderboard's scores (uploaded 2026-11-26, with sequence_4_3 from run 36),
+mean per challenge:
+
+| | Short | Medium | Long | Low light | Moving platform | Mean |
+|---|---:|---:|---:|---:|---:|---:|
+| Run 35 (submission 77) | 65.3 | 56.2 | 55.2 | 61.6 | 25.9 | 52.9 |
+| **+ jump gate (4_3), GPS bridge and bend** | **64.6** | **59.0** | **58.0** | **58.5** | **48.5** | **57.7** |
+| Bino + IMU, submission 10 (the bino entry) | 69.7 | 56.8 | 54.1 | 61.1 | 47.3 | 57.8 |
+
+The sequences that changed (score):
+
+| Sequence | Changed by | Median residual | Before | After |
+|---|---|---:|---:|---:|
+| sequence_4_3 | jump gate | (3.1 m) | 4.7 | 40.7 |
+| sequence_5_5 | bridge, bend | 5.4 → 4.7 m | 1.4 | 42.1 |
+| sequence_5_6 | bridge, bend | 47.6 → 4.6 m | 1.4 | 42.6 |
+| sequence_5_7 | bridge | 3.4 → 3.1 m | 26.2 | 67.8 |
+| sequence_5_9 | bridge | 76.6 → 3.2 m | 2.0 | 39.9 |
+| sequence_5_3 | bridge, bend | 5.6 → 4.7 m | 24.8 | 45.6 |
+| sequence_5_4 | bend | 4.8 m | 31.4 | 47.6 |
+| sequence_5_1 | bend | 4.6 m | 40.8 | 54.5 |
+| sequence_5_8 | bridge | 2.8 → 2.4 m | 60.0 | 68.8 |
+| sequence_5_2 | bridge | 3.5 → 3.4 m | 55.3 | 60.3 |
+| sequence_3_3 | bend | 6.3 m | 19.2 | 49.5 |
+| sequence_1_2 | bend | 11.4 m | 7.5 | 31.3 |
+| sequence_3_16 | bend | 4.9 m | 28.9 | 43.7 |
+| sequence_2_3 | bend | 4.1 m | 45.2 | 59.4 |
+| sequence_2_2 | bend | 5.5 m | 35.7 | 45.8 |
+| sequence_2_5 | bend | 4.5 m | 40.7 | 43.6 |
+| sequence_2_1 | bend | 4.2 m | 45.3 | 45.8 |
+| **sequence_4_2** | bend | 5.0 m | **56.8** | **34.2** |
+| **sequence_1_12** | bend | 6.6 m | **69.1** | **32.1** |
+| **sequence_4_8** | bend | 4.8 m | **78.0** | **36.7** |
+
+The bridge helps all seven sequences it touched, and the bend helps ten of the
+13 it touched on its own, sequence_1_2 by 24 points. Three good trajectories
+lost 23 to 41 points: there the residual came from the fixes, not from drift.
+Their fixes are the poorest of those bent: a median reported accuracy of 8.6 to
+13.9 m (1_2 and 3_3: 5.4 and 4.3 m), and a third to four fifths of them over
+10 m (sequence_4_8 keeps 260 of 1284). sequence_2_3 has fixes as poor
+(9.7 m) and gained, so this does not separate them cleanly, and any rule
+picked now would be picked on the test scores. The training sequences have no
+case of either kind to set one on.
 
 ## Reproduce
 
