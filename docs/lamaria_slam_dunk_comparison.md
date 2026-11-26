@@ -410,3 +410,6 @@ against +2.0) and R_11_5cp. Both counts lose on track 2 (sequence_2_11, 2_12). T
 pass on 1,500 RootSIFT keypoints of its own matched at ratio 0.78 (`--ba-pass-keypoints rootsift`; `sift` restores
 the pass on the online windows' SIFT). Against SLAM Dunk's baseline: R_12_10cp 75.81 against 81.09 (the gap from
 17 to 5 points), sequence_1_20 87.27 against 95.12 (still 8).
+
+The new default chain on its own (run 45785508883, commit 9af669f): mean of the thirteen **70.18** (the default
+before it: 68.86–69.03), within 0.6 of the paired run on every recording (R_12_10cp 76.28, sequence_3_17 82.35).
