@@ -72,6 +72,31 @@ All notable changes to `visloc-rs` will be documented here.
   testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
   and recorder for running the ROS 2 nodes on recorded data without ROS 2.
 - `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+- **View diagnostics for map localization** (measurement only, for the
+  dynamic-obstacle work in `docs/dynamic_obstacle_localization_plan.md`).
+  `visloc_localization::{ExpectedVisibility, ImageGrid, view_diagnostics}`
+  count the image cells holding inliers and the landmarks the map's nearest
+  keyframes saw from the camera's pose that went unmatched.
+  `basalt_euroc_localize_demo --diagnostics FILE [--diag-grid N]
+  [--eval-mask-dir DIR]` writes them per attempt; every other output is
+  unchanged (checked byte for byte with and without). Scripts:
+  `tum_rgbd_to_euroc.py` (TUM RGB-D queries in the EuRoC layout),
+  `synth_drift_odometry.py` (a drifting odometry from a ground truth) and
+  `eval_dynamic_localization.py` (scores the runs). Results in
+  `docs/dynamic_obstacle_localization.md`.
+- `basalt_euroc_localize_demo`: opt-in fix-quality and correction-start
+  switches, all off by default: `--min-inlier-cells K`
+  (`visloc_localization::apply_inlier_spread_gate`), `--min-inlier-ratio R`,
+  `--init-fixes N`, `--reset-after N` and `--init-min-inliers N`. On TUM
+  walking_rpy, starting the correction only from fixes with 35 inliers or
+  more takes the map pose from 10.0 to 3.2 cm RMSE
+  (`docs/dynamic_obstacle_localization.md`).
+- `OdomCorrectionConfig::init_warmup_s` (`--init-warmup-s`): start the
+  correction from the strongest agreeing fixes after a warm-up, instead of
+  the first two that agree (TUM walking_rpy 10.0 → 2.9 cm, no threshold to
+  tune; not better on Bonn), and `init_min_travel_m` / `init_min_turn_deg`
+  (recorded as not recommended). `visloc_map_localize_node` takes
+  `min_inlier_cells` and `init_warmup_s`; all off by default.
 - `lamaria_batch_ba.py online --jump-gate`: a window whose initial cost per
   observation jumps past this many times the window before's drops
   observations over 3 px from its first iteration. The BA chain passes

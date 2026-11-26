@@ -16,6 +16,7 @@ mod fusion;
 mod keyframe_retrieval;
 mod map_merge;
 mod odom_correction;
+mod view_diagnostics;
 mod wheel_calibration;
 mod wheel_gyro;
 
@@ -46,6 +47,10 @@ pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
+pub use view_diagnostics::{
+    apply_inlier_spread_gate, view_diagnostics, ExpectedVisibility, ImageGrid, ViewDiagnostics,
+    VisibilityGates, MAX_GRID as VIEW_GRID_MAX,
+};
 pub use wheel_calibration::{
     CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
 };

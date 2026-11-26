@@ -64,6 +64,12 @@ PARAMETERS (--name value  or  -p name:=value):
   weak_gate_m            once the odometry has a map pose, a weak localization (also by
                          projection) this close (m) to the corrected odometry is used
                          too; for robots whose images rarely reach min_inliers     [0: off]
+  min_inlier_cells       turn down a localization whose inliers occupy fewer cells of a
+                         4x4 image grid (bunched on one patch, e.g. the rest of the view
+                         hidden by people); 6 was measured on TUM walking          [0: off]
+  init_warmup_s          before the first map pose, wait this long, then start from the
+                         strongest fixes (most inliers) that agree, not the first two
+                         that agree; 3 was measured on TUM walking                 [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -162,6 +168,15 @@ fn run() -> Result<(), String> {
         args.parsed_or("weak_gate_m", options.correction.weak_gate_m)?;
     if !(options.correction.weak_gate_m >= 0.0 && options.correction.weak_gate_m.is_finite()) {
         return Err("weak_gate_m must be a non-negative number".into());
+    }
+    options.min_inlier_cells = args.parsed_or("min_inlier_cells", options.min_inlier_cells)?;
+    if options.min_inlier_cells > 16 {
+        return Err("min_inlier_cells must be between 0 and 16".into());
+    }
+    options.correction.init_warmup_s =
+        args.parsed_or("init_warmup_s", options.correction.init_warmup_s)?;
+    if !(options.correction.init_warmup_s >= 0.0 && options.correction.init_warmup_s.is_finite()) {
+        return Err("init_warmup_s must be a non-negative number".into());
     }
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
     let ratio = args.parsed_or("ratio", options.ratio.unwrap_or(0.0))?;
@@ -447,10 +462,12 @@ fn run() -> Result<(), String> {
                     map_fix_msg(stamp.to_nanos(), map_from_body, &map_frame, &options),
                     "map_fix",
                 );
-                let events = core.add_fix(stamp.to_nanos(), map_from_body.clone());
+                let events =
+                    core.add_scored_fix(stamp.to_nanos(), map_from_body.clone(), fix.inliers);
                 log_events(&events);
             } else if let Some(map_from_body) = &fix.weak_map_from_body {
-                let events = core.add_weak_fix(stamp.to_nanos(), map_from_body.clone());
+                let events =
+                    core.add_scored_weak_fix(stamp.to_nanos(), map_from_body.clone(), fix.inliers);
                 log_events(&events);
             }
             (core.latest_map_pose(), core.pending_fixes())

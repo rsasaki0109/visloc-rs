@@ -40,8 +40,9 @@ use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureRea
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
-    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, LocalizationConfig,
-    LocalizationPipeline, OdomCorrection, OdomCorrectionConfig, PackedDescriptors,
+    apply_inlier_spread_gate, AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates,
+    FixOutcome, ImageGrid, LocalizationConfig, LocalizationPipeline, OdomCorrection,
+    OdomCorrectionConfig, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -118,6 +119,12 @@ pub struct MapLocalizeOptions {
     /// from the main descriptor); 0, the default, matches the main one
     /// only.
     pub extra_descriptors: usize,
+    /// A localization whose inliers occupy fewer than this many cells of a
+    /// 4 x 4 image grid is turned down as if it had too few inliers (it can
+    /// still be weak): inliers bunched on one patch, the rest of the view
+    /// hidden by people, give poorly conditioned poses
+    /// (`docs/dynamic_obstacle_localization.md`). 0, the default: off.
+    pub min_inlier_cells: u32,
     pub correction: OdomCorrectionConfig,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
@@ -152,6 +159,7 @@ impl Default for MapLocalizeOptions {
             no_global_with_prior: false,
             duplicate_radius_m: None,
             extra_descriptors: 0,
+            min_inlier_cells: 0,
             correction: OdomCorrectionConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
@@ -378,6 +386,9 @@ pub struct MapLocalizer {
     match_threads: usize,
     prior_radius_m: Option<f64>,
     no_global_with_prior: bool,
+    /// `MapLocalizeOptions::min_inlier_cells` and its grid.
+    min_inlier_cells: u32,
+    grid: ImageGrid,
     pipeline: Pipeline,
 }
 
@@ -428,6 +439,8 @@ impl MapLocalizer {
                 .with_duplicate_radius(options.duplicate_radius_m.unwrap_or(0.0)),
             max_points: options.max_points.unwrap_or(map.max_points),
             map,
+            min_inlier_cells: options.min_inlier_cells,
+            grid: ImageGrid::new(&camera, 4),
             camera,
             camera_from_imu,
             gates: BinaryMatchGates {
@@ -641,9 +654,17 @@ impl MapLocalizer {
         features: &ImageFeatures,
         camera_from_body: &SE3,
     ) -> Fix {
-        let result = self
+        let mut result = self
             .pipeline
             .localize_correspondences(&self.camera, correspondences);
+        if self.min_inlier_cells > 0 {
+            apply_inlier_spread_gate(
+                &mut result,
+                &self.grid,
+                &features.keypoints,
+                self.min_inlier_cells,
+            );
+        }
         let map_from_body = (result.success)
             .then_some(result.pose.as_ref())
             .flatten()
@@ -798,7 +819,8 @@ pub struct OdomCorrector {
     correction: OdomCorrection,
     odom: OdomBuffer,
     /// Fixes waiting for their odometry: stamp, map pose, weak.
-    pending: VecDeque<(i64, SE3, bool)>,
+    /// Stamp, map pose, weak, and strength (inliers) of each queued fix.
+    pending: VecDeque<(i64, SE3, bool, f64)>,
     max_gap_ns: i64,
     latest_odom: Option<(i64, SE3)>,
     latest_fix_ns: Option<i64>,
@@ -878,18 +900,46 @@ impl OdomCorrector {
     /// Queues an accepted localization and applies every queued fix whose
     /// odometry is known.
     pub fn add_fix(&mut self, stamp_ns: i64, map_from_body: SE3) -> Vec<FixEvent> {
-        self.queue_fix(stamp_ns, map_from_body, false)
+        self.queue_fix(stamp_ns, map_from_body, false, 0.0)
+    }
+
+    /// [`Self::add_fix`] with the localization's inlier count, which the
+    /// correction's warm-up (`init_warmup_s`) ranks the first fixes by.
+    pub fn add_scored_fix(
+        &mut self,
+        stamp_ns: i64,
+        map_from_body: SE3,
+        inliers: usize,
+    ) -> Vec<FixEvent> {
+        self.queue_fix(stamp_ns, map_from_body, false, inliers as f64)
+    }
+
+    /// [`Self::add_weak_fix`] with the localization's inlier count.
+    pub fn add_scored_weak_fix(
+        &mut self,
+        stamp_ns: i64,
+        map_from_body: SE3,
+        inliers: usize,
+    ) -> Vec<FixEvent> {
+        self.queue_fix(stamp_ns, map_from_body, true, inliers as f64)
     }
 
     /// Queues a weak localization (`OdomCorrection::add_weak_fix`) like
     /// [`Self::add_fix`].
     pub fn add_weak_fix(&mut self, stamp_ns: i64, map_from_body: SE3) -> Vec<FixEvent> {
-        self.queue_fix(stamp_ns, map_from_body, true)
+        self.queue_fix(stamp_ns, map_from_body, true, 0.0)
     }
 
-    fn queue_fix(&mut self, stamp_ns: i64, map_from_body: SE3, weak: bool) -> Vec<FixEvent> {
+    fn queue_fix(
+        &mut self,
+        stamp_ns: i64,
+        map_from_body: SE3,
+        weak: bool,
+        score: f64,
+    ) -> Vec<FixEvent> {
         self.latest_fix_ns = Some(self.latest_fix_ns.map_or(stamp_ns, |t| t.max(stamp_ns)));
-        self.pending.push_back((stamp_ns, map_from_body, weak));
+        self.pending
+            .push_back((stamp_ns, map_from_body, weak, score));
         self.flush()
     }
 
@@ -987,7 +1037,7 @@ impl OdomCorrector {
 
     fn flush(&mut self) -> Vec<FixEvent> {
         let mut events = Vec::new();
-        while let Some((stamp_ns, _, _)) = self.pending.front() {
+        while let Some((stamp_ns, _, _, _)) = self.pending.front() {
             let stamp_ns = *stamp_ns;
             match self.odom.lookup(stamp_ns, self.max_gap_ns) {
                 OdomLookup::NotYet => break,
@@ -996,13 +1046,22 @@ impl OdomCorrector {
                     events.push(FixEvent::Dropped { stamp_ns });
                 }
                 OdomLookup::Pose(odom_from_body) => {
-                    let (_, map_from_body, weak) = self.pending.pop_front().expect("front exists");
+                    let (_, map_from_body, weak, score) =
+                        self.pending.pop_front().expect("front exists");
                     let outcome = if weak {
-                        self.correction
-                            .add_weak_fix(stamp_ns, &map_from_body, &odom_from_body)
+                        self.correction.add_scored_weak_fix(
+                            stamp_ns,
+                            &map_from_body,
+                            &odom_from_body,
+                            score,
+                        )
                     } else {
-                        self.correction
-                            .add_fix(stamp_ns, &map_from_body, &odom_from_body)
+                        self.correction.add_scored_fix(
+                            stamp_ns,
+                            &map_from_body,
+                            &odom_from_body,
+                            score,
+                        )
                     };
                     if matches!(
                         outcome,
@@ -1283,6 +1342,35 @@ mod tests {
             assert!(odom_from_body.rotation.angle_to(&expected.rotation) < 1e-9);
         }
         assert!(core.take_odom_fixes().is_empty());
+    }
+
+    #[test]
+    fn a_warm_up_starts_from_the_fixes_with_most_inliers() {
+        // Every third fix exact with 50 inliers, the others 20 cm off with
+        // 25: a still body, fixes every 100 ms.
+        let run = |warmup_s: f64| {
+            let mut options = MapLocalizeOptions::default();
+            options.correction.init_warmup_s = warmup_s;
+            let mut core = OdomCorrector::new(&options);
+            let still = pose(0.5, 0.2);
+            for i in 0..20_i64 {
+                core.add_odom(i * 100 * MS, still.clone());
+                let mut map_from_body = offset().compose(&still);
+                let inliers = if i % 3 == 0 {
+                    50
+                } else {
+                    map_from_body.translation.x += 0.2;
+                    25
+                };
+                core.add_scored_fix(i * 100 * MS, map_from_body, inliers);
+            }
+            let map_pose = core.latest_map_pose().expect("set");
+            (map_pose.map_from_body.translation - offset().compose(&still).translation).norm()
+        };
+        // Default: the first two agreeing (biased) fixes set it.
+        assert!((run(0.0) - 0.2).abs() < 1e-6);
+        // A 1 s warm-up starts from the strong, exact ones.
+        assert!(run(1.0) < 1e-9);
     }
 
     #[test]
