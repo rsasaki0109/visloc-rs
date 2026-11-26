@@ -17,7 +17,8 @@ use rayon::prelude::*;
 use visloc_gsplat_core::ply::save_ply;
 use visloc_gsplat_cpu::model::Model;
 use visloc_gsplat_cpu::train::{render, AdamConfig, Loss, NewtonConfig, TrainView, Trainer};
-use visloc_gsplat_train::dataset::{load_colmap_dataset, load_view_rgb};
+use visloc_gsplat_train::dataset::{find_model_dir, load_colmap_dataset, load_view_rgb};
+use visloc_gsplat_train::init::{read_points3d, seed_scene};
 use visloc_gsplat_train::metrics::psnr;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,7 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = data.ok_or("--data is required")?;
     let t_setup = Instant::now();
     let ds = load_colmap_dataset(&data, Some(8))?;
-    let mut scene = ds.init.clone();
+    // As gsplat_train: SfM points, isotropic at the mean distance to 3 neighbours.
+    let mut scene = seed_scene(&read_points3d(find_model_dir(&data)?)?, 3);
     if let Some(m) = max_gaussians {
         scene.gaussians.truncate(m);
     }
