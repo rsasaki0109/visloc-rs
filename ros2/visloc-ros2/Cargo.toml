@@ -35,6 +35,10 @@ path = "src/bin/visloc_localize_node.rs"
 name = "visloc_nav_sim_node"
 path = "src/bin/visloc_nav_sim_node.rs"
 
+[[bin]]
+name = "visloc_map_localize_server"
+path = "src/bin/visloc_map_localize_server.rs"
+
 [dependencies]
 # Graceful shutdown (final mapper optimization) on SIGINT/SIGTERM; the
 # handler is installed only with `mapper:=true`.
