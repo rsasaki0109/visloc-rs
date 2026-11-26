@@ -2,13 +2,16 @@
 //!
 //! ```text
 //! cargo run --release -p visloc-gsplat-cpu --example gsplat_cpu_train -- \
-//!     --data <colmap root> --optimizer adam|newton --steps 7000 \
-//!     [--eval-every 1000] [--loss l2|l1] [--neighbours 3] [--lambda 0.1] \
-//!     [--sh-interval N] [--max-gaussians N] [--out scene.ply]
+//!     --data <colmap root> [--optimizer adam|newton] [--steps 7000] \
+//!     [--eval-every 1000] [--loss l1|l2] [--ssim-weight 0.2] [--no-densify] \
+//!     [--max-gaussians N] [--sh-interval N] [--out scene.ply]
 //! ```
 //!
 //! Every 8th view (by name) is held out; eval PSNR is over those. The
-//! population is fixed (the SfM points, no densification).
+//! defaults are `gsplat_train`'s: L1 + 0.2 D-SSIM, Inria densification
+//! (from step 500, every 100, opacity reset every 3000), SH degree up every
+//! 1000 steps. The Newton step (`--optimizer newton`, an experiment, see
+//! `docs/gsplat_cpu_newton.md`) needs `--loss l2 --no-densify`.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -28,7 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut optimizer = "adam".to_string();
     let mut steps = 7000usize;
     let mut eval_every = 1000usize;
-    let mut loss = Loss::L2;
+    let mut loss = Loss::L1;
+    let mut ssim_weight = 0.2f32;
+    let mut densify_cfg = Some(visloc_gsplat_train::densify::DensifyConfig::default());
+    let mut truncate: Option<usize> = None;
     let mut adam = AdamConfig::default();
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
@@ -59,6 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-dcol" => newton.max_dcol = next()?.parse()?,
             "--sh-interval" => sh_interval = Some(next()?.parse()?),
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
+            "--truncate" => truncate = Some(next()?.parse()?),
+            "--ssim-weight" => ssim_weight = next()?.parse()?,
+            "--no-densify" => densify_cfg = None,
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
             "--step" => newton.step = next()?.parse()?,
@@ -79,8 +88,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ds = load_colmap_dataset(&data, Some(8))?;
     // As gsplat_train: SfM points, isotropic at the mean distance to 3 neighbours.
     let mut scene = seed_scene(&read_points3d(find_model_dir(&data)?)?, 3);
-    if let Some(m) = max_gaussians {
+    if let Some(m) = truncate {
         scene.gaussians.truncate(m);
+    }
+    if let (Some(d), Some(m)) = (densify_cfg.as_mut(), max_gaussians) {
+        d.max_gaussians = m;
     }
     let model = Model::from_scene(&scene);
     let views: Vec<TrainView> = ds
@@ -97,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tr = Trainer::new(model, views, bg);
     tr.loss = loss;
     tr.overlap = overlap;
+    tr.ssim_weight = if loss == Loss::L1 { ssim_weight } else { 0.0 };
     if optimizer == "newton" && loss != Loss::L2 {
         return Err("the Newton step needs --loss l2".into());
     }
@@ -149,14 +162,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "newton" => tr.newton_step(vi, step - 1, &newton),
             o => return Err(format!("unknown optimizer {o}").into()),
         };
+        // Densify after the step, as gsplat_train does (not on the last).
+        if let Some(d) = densify_cfg.as_ref() {
+            let at_densify = step >= d.start && step <= d.stop && step % d.interval == 0;
+            let at_reset = step < d.stop && step % d.opacity_reset_interval == 0;
+            if step != steps && (at_densify || at_reset) {
+                if let Some(rep) = tr.densify(d, at_densify, at_reset, step, seed ^ (step as u64).wrapping_mul(0x9E37_79B9)) {
+                    if step % 500 == 0 {
+                        println!(
+                            "  densify @{step}: {} -> {} (+{} clone, +{} split, -{} prune)",
+                            rep.before, rep.after, rep.cloned, rep.split, rep.pruned
+                        );
+                    }
+                }
+            }
+        }
         train_s += ts.elapsed().as_secs_f64();
         loss_sum += l;
         loss_n += 1;
         if step % eval_every == 0 || step == steps {
             let p = eval_psnr(&tr);
             println!(
-                "step {step:6}  train loss {:.5}  eval psnr {p:.3}  ({train_s:.1}s train, {:.1} ms/step)",
+                "step {step:6}  train loss {:.5}  eval psnr {p:.3}  gaussians {}  ({train_s:.1}s train, {:.1} ms/step)",
                 loss_sum / loss_n as f64,
+                tr.model.len(),
                 1e3 * train_s / step as f64
             );
             loss_sum = 0.0;

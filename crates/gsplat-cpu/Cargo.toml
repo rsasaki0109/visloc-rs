@@ -14,7 +14,7 @@ publish = false
 nalgebra = { workspace = true }
 rayon = { workspace = true }
 visloc-gsplat-core = { path = "../gsplat-core", version = "0.5.0" }
-visloc-gsplat-train = { path = "../gsplat-train", version = "0.5.0" }
+visloc-gsplat-train = { path = "../gsplat-train", version = "0.5.0", features = ["host-loss"] }
 
 [[example]]
 name = "gsplat_cpu_train"

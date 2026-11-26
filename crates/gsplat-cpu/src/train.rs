@@ -12,6 +12,9 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
+use visloc_gsplat_train::config::pack_rgba8;
+use visloc_gsplat_train::densify::{self, DensifyConfig, DensifyReport, Group, Population};
+use visloc_gsplat_train::loss::SsimHost;
 
 use crate::model::{Model, NCOL, NGEO, NSH};
 use crate::project::{jacobian, project_all, screen_vjp, Proj};
@@ -29,6 +32,8 @@ fn tri11(i: usize, j: usize) -> usize {
 pub struct TrainView {
     pub view: CameraView,
     pub gt: Vec<f32>,
+    /// `gt` as RGBA8 (for the SSIM term).
+    pub gt_packed: Vec<u32>,
     pub half_view: CameraView,
     pub half_gt: Vec<f32>,
 }
@@ -61,6 +66,7 @@ impl TrainView {
         Self {
             view,
             gt,
+            gt_packed: pack_rgba8(rgb, None),
             half_view: CameraView { camera: half_cam, ..view },
             half_gt,
         }
@@ -238,6 +244,14 @@ pub struct Trainer {
     pub loss: Loss,
     /// See [`backward`]'s `overlap`.
     pub overlap: f32,
+    /// D-SSIM weight with the L1 loss (Inria: 0.2); the L1 term gets
+    /// `1 - ssim_weight`.
+    pub ssim_weight: f32,
+    ssim: Option<SsimHost>,
+    /// Inria's densification statistic: per gaussian, the summed NDC norm
+    /// of its screen-mean gradient, and the views it was projected in.
+    grad_accum: Vec<f32>,
+    grad_count: Vec<f32>,
     /// Seconds spent per stage: project+bin, forward, loss, backward, lift, update.
     pub timing: [f64; 6],
 }
@@ -272,12 +286,23 @@ impl Trainer {
             acc: None,
             loss: Loss::L2,
             overlap: 1.0,
+            ssim_weight: 0.0,
+            ssim: None,
+            grad_accum: Vec::new(),
+            grad_count: Vec::new(),
             timing: [0.0; 6],
         }
     }
 
     /// Render, take the loss and run the backward pass of one view.
-    fn view_grads(&mut self, view: &CameraView, gt: &[f32], weight: f32, gauss_newton: bool) -> (f64, Rendered, Vec<[f32; NB]>) {
+    fn view_grads(
+        &mut self,
+        view: &CameraView,
+        gt: &[f32],
+        gt_packed: Option<&[u32]>,
+        weight: f32,
+        gauss_newton: bool,
+    ) -> (f64, Rendered, Vec<[f32; NB]>) {
         let t0 = Instant::now();
         let proj = project_all(&self.model, view);
         let frame = Frame::new(&proj, view.camera.width, view.camera.height, self.bg);
@@ -285,6 +310,13 @@ impl Trainer {
         let raster = forward(&frame);
         let t2 = Instant::now();
         let (loss, mut d) = image_loss(&raster.image, gt, self.loss);
+        if let (Some(packed), true) = (gt_packed, self.ssim_weight > 0.0 && self.loss == Loss::L1) {
+            let lam = self.ssim_weight;
+            d.par_iter_mut().for_each(|x| *x *= 1.0 - lam);
+            let (w, h) = (view.camera.width as usize, view.camera.height as usize);
+            let ssim = self.ssim.get_or_insert_with(|| SsimHost::new(w, h));
+            ssim.add_grad(&raster.image, packed, lam, &mut d);
+        }
         if weight != 1.0 {
             d.par_iter_mut().for_each(|x| *x *= weight);
         }
@@ -304,12 +336,23 @@ impl Trainer {
     pub fn adam_step(&mut self, vi: usize, step: usize, total: usize, cfg: &AdamConfig) -> f64 {
         let n = self.model.len();
         self.model.active_degree = ((step / cfg.sh_interval) as u32).min(3);
-        let (view, gt) = {
-            let v = &self.views[vi];
-            (v.view, std::mem::take(&mut self.views[vi].gt))
-        };
-        let (loss, r, out) = self.view_grads(&view, &gt, 1.0, false);
+        let view = self.views[vi].view;
+        let gt = std::mem::take(&mut self.views[vi].gt);
+        let packed = std::mem::take(&mut self.views[vi].gt_packed);
+        let (loss, r, out) = self.view_grads(&view, &gt, Some(&packed), 1.0, false);
         self.views[vi].gt = gt;
+        self.views[vi].gt_packed = packed;
+        // Densification statistics (every projected splat counts a view).
+        if self.grad_accum.len() != n {
+            self.grad_accum = vec![0.0; n];
+            self.grad_count = vec![0.0; n];
+        }
+        let (hw, hh) = (0.5 * view.camera.width as f32, 0.5 * view.camera.height as f32);
+        for (p, o) in r.proj.iter().zip(&out) {
+            let (du, dv) = (o[B_GRAD] * hw, o[B_GRAD + 1] * hh);
+            self.grad_accum[p.id as usize] += (du * du + dv * dv).sqrt();
+            self.grad_count[p.id as usize] += 1.0;
+        }
         let t0 = Instant::now();
         // Per-gaussian gradients.
         let mut g_geo = vec![[0.0f32; NGEO]; n];
@@ -395,6 +438,73 @@ impl Trainer {
         self.timing[4] += (t1 - t0).as_secs_f64();
         self.timing[5] += (t2 - t1).as_secs_f64();
         loss
+    }
+
+    /// Inria's adaptive density control (`visloc_gsplat_train::densify`, the
+    /// same rule `gsplat_train` runs): clone / split / prune with `grow`,
+    /// and cap every opacity at 0.01 with `reset`. Adam moments are kept for
+    /// kept gaussians and zeroed for new ones; the statistics restart.
+    pub fn densify(&mut self, cfg: &DensifyConfig, grow: bool, reset: bool, step: usize, seed: u64) -> Option<DensifyReport> {
+        let n = self.model.len();
+        let st = self.adam.take();
+        let zero_geo = vec![[0.0f32; NGEO]; n];
+        let zero_col = vec![0.0f32; n * NCOL];
+        let (m_geo, v_geo, m_col, v_col) = match &st {
+            Some(a) => (&a.m_geo, &a.v_geo, &a.m_col, &a.v_col),
+            None => (&zero_geo, &zero_geo, &zero_col, &zero_col),
+        };
+        // Population transforms: mean | quaternion | log-scale.
+        let tr = |g: &[[f32; NGEO]]| -> Vec<f32> {
+            g.iter()
+                .flat_map(|x| [x[0], x[1], x[2], x[6], x[7], x[8], x[9], x[3], x[4], x[5]])
+                .collect()
+        };
+        let op = |g: &[[f32; NGEO]]| -> Vec<f32> { g.iter().map(|x| x[10]).collect() };
+        let mut pop = Population {
+            transforms: Group { stride: 10, values: tr(&self.model.geo), m1: tr(m_geo), m2: tr(v_geo) },
+            opacity: Group { stride: 1, values: op(&self.model.geo), m1: op(m_geo), m2: op(v_geo) },
+            sh: Group { stride: NCOL, values: self.model.col.clone(), m1: m_col.clone(), m2: v_col.clone() },
+        };
+        let mut report = None;
+        if grow {
+            if self.grad_accum.len() != n {
+                self.grad_accum = vec![0.0; n];
+                self.grad_count = vec![0.0; n];
+            }
+            let prune_large = step > cfg.opacity_reset_interval;
+            let grow = grow && n < cfg.max_gaussians;
+            let c = DensifyConfig { max_gaussians: if grow { cfg.max_gaussians } else { 0 }, ..cfg.clone() };
+            let (p, rep) = densify::densify(&pop, &self.grad_accum, &self.grad_count, self.extent, &c, prune_large, seed);
+            pop = p;
+            report = Some(rep);
+        }
+        if reset {
+            densify::reset_opacity(&mut pop, 0.01);
+        }
+        let n2 = pop.len();
+        let back = |t: &[f32], o: &[f32]| -> Vec<[f32; NGEO]> {
+            (0..n2)
+                .map(|i| {
+                    let r = &t[i * 10..i * 10 + 10];
+                    [r[0], r[1], r[2], r[7], r[8], r[9], r[3], r[4], r[5], r[6], o[i]]
+                })
+                .collect()
+        };
+        self.model.geo = back(&pop.transforms.values, &pop.opacity.values);
+        self.model.col = pop.sh.values;
+        if let Some(mut a) = st {
+            a.m_geo = back(&pop.transforms.m1, &pop.opacity.m1);
+            a.v_geo = back(&pop.transforms.m2, &pop.opacity.m2);
+            a.m_col = pop.sh.m1;
+            a.v_col = pop.sh.m2;
+            self.adam = Some(a);
+        }
+        if grow {
+            self.grad_accum = vec![0.0; n2];
+            self.grad_count = vec![0.0; n2];
+        }
+        self.acc = None;
+        report
     }
 
     /// Add one view's gradients and Gauss-Newton matrices into `acc`.
@@ -494,7 +604,7 @@ impl Trainer {
                     cfg.neighbour_weight,
                 )
             };
-            let (loss, r, out) = self.view_grads(&view, &gt, w, true);
+            let (loss, r, out) = self.view_grads(&view, &gt, None, w, true);
             if k == 0 {
                 primary_loss = loss;
                 self.views[v].gt = gt;

@@ -20,6 +20,9 @@ default = []
 # GPU rendering / training (wgpu). Same toolchain boundary as
 # `visloc-gsplat-render/gpu`: needs Rust >= 1.85, so it is opt-in.
 gpu = ["mesh", "visloc-gsplat-render/gpu", "dep:rayon", "dep:wgpu", "dep:bytemuck", "dep:visloc-sift-gpu", "visloc-sift-gpu?/gpu", "dep:visloc-ba-gpu", "visloc-ba-gpu?/gpu"]
+# The host L1 / SSIM losses (`loss::SsimHost`, `loss::l1_grad_host`) without
+# wgpu, for the CPU trainer (`visloc-gsplat-cpu`).
+host-loss = ["dep:rayon"]
 # TSDF mesh extraction from rendered depth (`mesh::fuse_views`), without a
 # renderer of its own (the wgpu one is `gpu`).
 mesh = ["visloc-gsplat-core/mesh", "dep:rayon"]
