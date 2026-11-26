@@ -423,6 +423,25 @@ of calibration error.
   (Bonn), none of the start rules measured here is reliably better than
   the default.
 
+## On ROS 2
+
+`visloc_map_localize_node` takes the two measured switches as parameters,
+both off by default (behaviour unchanged):
+
+- `min_inlier_cells` (e.g. 6): turn down a localization whose inliers
+  occupy fewer cells of a 4 × 4 image grid.
+- `init_warmup_s` (e.g. 3): before the first map pose, wait that long and
+  start from the strongest fixes (most inliers) that agree. The node passes
+  each fix's inlier count to `OdomCorrector::add_scored_fix`.
+
+```bash
+visloc_map_localize_node --map runs/map -p min_inlier_cells:=6 -p init_warmup_s:=3
+```
+
+They were measured offline on TUM and Bonn only (above): use them where
+the map covers the robot's surroundings, and check them on the robot before
+relying on them.
+
 ## Not yet measured
 
 - **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.

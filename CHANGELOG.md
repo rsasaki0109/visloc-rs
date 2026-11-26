@@ -42,6 +42,12 @@ All notable changes to `visloc-rs` will be documented here.
   walking_rpy, starting the correction only from fixes with 35 inliers or
   more takes the map pose from 10.0 to 3.2 cm RMSE
   (`docs/dynamic_obstacle_localization.md`).
+- `OdomCorrectionConfig::init_warmup_s` (`--init-warmup-s`): start the
+  correction from the strongest agreeing fixes after a warm-up, instead of
+  the first two that agree (TUM walking_rpy 10.0 → 2.9 cm, no threshold to
+  tune; not better on Bonn), and `init_min_travel_m` / `init_min_turn_deg`
+  (recorded as not recommended). `visloc_map_localize_node` takes
+  `min_inlier_cells` and `init_warmup_s`; all off by default.
 
 ## 0.5.0 - 2026-11-24
 
