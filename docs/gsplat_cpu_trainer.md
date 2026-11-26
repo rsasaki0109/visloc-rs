@@ -114,6 +114,26 @@ Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):
 - **Strided pixels still lose at equal time**: 26.69 dB at 509 s, where the
   full-pixel run had 28.10 dB at 458 s (step 2,000).
 
+### Coarse to fine (`--res-schedule`)
+
+DashGaussian's idea with fixed boundaries: the images box-averaged 4x for
+the first part of the run, 2x for the next, then full. Same protocol (780x520,
+3,000 steps):
+
+| Schedule | Eval PSNR at 1k / 2k / 3k | Training time |
+| --- | --- | ---: |
+| full resolution throughout | 24.47 / 28.10 / **28.93** | 706 s |
+| `--res-schedule 0.1,0.3` | 24.63 / 28.07 / **28.94** | 618 s (-12%) |
+| `--res-schedule 0.2,0.5` | 23.78 / 28.01 / **28.92** | **597 s (-15%)** |
+| `--res-schedule 0.3,0.7` | 23.52 / 25.36 / 28.78 | 536 s (-24%) |
+
+- **0.2,0.5 keeps the PSNR for 15% less time**: 1.63x faster than
+  `gsplat_train` (972 s, 28.86 dB) at this resolution. It stays opt-in: at
+  390x260 a 4x reduction leaves 97x65 images, and it has not been measured
+  there or on other scenes.
+- **0.3,0.7 is 0.15 dB lower**: full resolution for the last 30% of the
+  run is too little.
+
 ## The local Newton step
 
 Each iteration renders the primary view at full resolution and its 3
