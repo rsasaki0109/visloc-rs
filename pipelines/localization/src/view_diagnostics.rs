@@ -23,7 +23,9 @@ use std::collections::HashMap;
 
 use nalgebra::{Point2, Point3, Vector3};
 use visloc_core::geometry::Pose;
-use visloc_core::types::{Camera, LandmarkId, VisualMap};
+use visloc_core::types::{
+    Camera, LandmarkId, LocalizationFailureReason, LocalizationResult, VisualMap,
+};
 
 /// Which map keyframes count as seeing what the camera should see.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -269,6 +271,35 @@ pub fn view_diagnostics(
     }
 }
 
+/// The inlier-spread quality gate (lever D1 of
+/// `docs/dynamic_obstacle_localization_plan.md`): an accepted result whose
+/// inliers occupy fewer than `min_cells` cells of `grid` is turned down as
+/// [`LocalizationFailureReason::QualityGateFailed`], its pose kept, as a
+/// result with too few inliers is. Inliers bunched on one patch (the rest of
+/// the view hidden by people, or unmapped) give a poorly conditioned pose.
+/// Returns the result's inlier cell count. `min_cells` 0 leaves the result
+/// untouched.
+pub fn apply_inlier_spread_gate(
+    result: &mut LocalizationResult,
+    grid: &ImageGrid,
+    keypoints: &[Point2<f64>],
+    min_cells: u32,
+) -> u32 {
+    let cells = grid
+        .occupied(
+            result
+                .inlier_query_indices
+                .iter()
+                .filter_map(|&index| keypoints.get(index)),
+        )
+        .count_ones();
+    if min_cells > 0 && result.success && cells < min_cells {
+        result.success = false;
+        result.failure_reason = Some(LocalizationFailureReason::QualityGateFailed);
+    }
+    cells
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +389,60 @@ mod tests {
         assert!(visibility
             .expected(&camera(), &far, VisibilityGates::default())
             .is_empty());
+    }
+
+    #[test]
+    fn the_spread_gate_turns_down_bunched_inliers_only() {
+        let grid = ImageGrid::new(&camera(), 4);
+        let keypoints = vec![
+            Point2::new(10.0, 10.0),
+            Point2::new(20.0, 20.0),
+            Point2::new(200.0, 10.0),
+            Point2::new(600.0, 400.0),
+        ];
+        let result = |inliers: Vec<usize>| LocalizationResult {
+            success: true,
+            pose: Some(Pose::identity()),
+            failure_reason: None,
+            candidate_landmark_count: 0,
+            match_count: 0,
+            correspondence_count: 0,
+            inlier_count: inliers.len(),
+            outlier_count: 0,
+            inlier_ratio: 1.0,
+            reprojection_error: None,
+            median_reprojection_error: None,
+            max_reprojection_error: None,
+            inlier_reprojection_errors: Vec::new(),
+            inliers: Vec::new(),
+            inlier_landmark_ids: inliers.iter().map(|&i| i as u64).collect(),
+            inlier_query_indices: inliers,
+            inlier_confidences: Vec::new(),
+            estimator_diagnostics: None,
+            pose_failure_diagnostics: None,
+        };
+        // Two inliers in one cell: turned down at 2 cells, the pose kept.
+        let mut bunched = result(vec![0, 1]);
+        assert_eq!(
+            apply_inlier_spread_gate(&mut bunched, &grid, &keypoints, 2),
+            1
+        );
+        assert!(!bunched.success && bunched.pose.is_some());
+        assert_eq!(
+            bunched.failure_reason,
+            Some(LocalizationFailureReason::QualityGateFailed)
+        );
+        // Three cells: kept.
+        let mut spread = result(vec![0, 2, 3]);
+        assert_eq!(
+            apply_inlier_spread_gate(&mut spread, &grid, &keypoints, 2),
+            3
+        );
+        assert!(spread.success && spread.failure_reason.is_none());
+        // Off (0): untouched.
+        let mut off = result(vec![0, 1]);
+        apply_inlier_spread_gate(&mut off, &grid, &keypoints, 0);
+        assert_eq!(off, result(vec![0, 1]));
     }
 
     #[test]

@@ -104,6 +104,12 @@
 //!   second one's drift model), so the other carries the pose where one
 //!   fails; `--drop-vio-s START:END` drops the VIO for a stretch to test it.
 //!
+//! With `--min-inlier-cells K`, a localization whose inliers occupy fewer
+//! than K cells of the `--diag-grid` (4) x 4 image grid is turned down as if
+//! it had too few inliers: with `--vio` / `--odometry` it can still be a
+//! weak fix. Inliers bunched on one patch (the rest of the view hidden by
+//! people) give poorly conditioned poses (docs/dynamic_obstacle_localization.md).
+//!
 //! Outputs, under `--out-dir`:
 //!
 //! - `localization.tum`: IMU poses of the localized images in the map's world
@@ -157,9 +163,10 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates, ExpectedVisibility, FixOutcome,
-    ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
-    OdometryNoise, ViewDiagnostics, VisibilityGates, VIEW_GRID_MAX,
+    apply_inlier_spread_gate, view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates,
+    ExpectedVisibility, FixOutcome, ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig,
+    OdomCorrection, OdomCorrectionConfig, OdometryNoise, ViewDiagnostics, VisibilityGates,
+    VIEW_GRID_MAX,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -276,6 +283,9 @@ struct Args {
     /// Per-frame binary masks of moving things (`<timestamp_ns>.png`,
     /// non-zero = mover), to count the inliers on them. Evaluation only.
     eval_mask_dir: Option<PathBuf>,
+    /// Turn down a localization whose inliers sit in fewer than this many
+    /// cells of the `--diag-grid` grid to a weak one (0: off).
+    min_inlier_cells: u32,
 }
 
 impl Args {
@@ -296,7 +306,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--diag-grid N] [--eval-mask-dir DIR]]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K]"
             .into()
     }
 
@@ -361,6 +371,7 @@ impl Args {
             diagnostics: None,
             diag_grid: 4,
             eval_mask_dir: None,
+            min_inlier_cells: 0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -493,6 +504,7 @@ impl Args {
                 "--diagnostics" => args.diagnostics = Some(PathBuf::from(value()?)),
                 "--diag-grid" => args.diag_grid = number(&option, value()?)?,
                 "--eval-mask-dir" => args.eval_mask_dir = Some(PathBuf::from(value()?)),
+                "--min-inlier-cells" => args.min_inlier_cells = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -739,6 +751,9 @@ struct Localizer {
     weak_projected: bool,
     previous: Option<Pose>,
     diagnostics: Option<DiagnosticsContext>,
+    /// `--min-inlier-cells` (0: off) on the `--diag-grid` grid.
+    min_inlier_cells: u32,
+    spread_grid: ImageGrid,
 }
 
 impl Localizer {
@@ -797,6 +812,7 @@ impl Localizer {
             grid: ImageGrid::new(&camera, args.diag_grid),
             with_keypoints: args.eval_mask_dir.is_some(),
         });
+        let camera_for_grid = camera.clone();
         Ok(Self {
             max_points: args.max_points.unwrap_or(map.max_points),
             map,
@@ -822,7 +838,27 @@ impl Localizer {
             retrieval,
             previous: None,
             diagnostics,
+            min_inlier_cells: args.min_inlier_cells,
+            spread_grid: ImageGrid::new(&camera_for_grid, args.diag_grid),
         })
+    }
+
+    /// `--min-inlier-cells`: an accepted result with its inliers in fewer
+    /// grid cells is turned down to a weak one (its pose kept).
+    fn spread_gate(
+        &self,
+        mut result: LocalizationResult,
+        keypoints: &[Point2<f64>],
+    ) -> LocalizationResult {
+        if self.min_inlier_cells > 0 {
+            apply_inlier_spread_gate(
+                &mut result,
+                &self.spread_grid,
+                keypoints,
+                self.min_inlier_cells,
+            );
+        }
+        result
     }
 
     /// Localizes one image. `predicted`, the map-frame IMU pose the corrected
@@ -838,25 +874,25 @@ impl Localizer {
         let started = Instant::now();
         let query = query_image(image, &self.camera, self.max_points, &self.map.frontend)?;
         let packed = self.index.pack_query(&query.descriptors);
-        let projected_raw =
-            predicted
-                .zip(self.projection_radius_px)
-                .map(|(map_from_imu, radius)| {
-                    let prior = Pose {
-                        world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
-                    };
-                    self.pipeline.localize_correspondences(
+        let projected_raw = predicted
+            .zip(self.projection_radius_px)
+            .map(|(map_from_imu, radius)| {
+                let prior = Pose {
+                    world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
+                };
+                self.pipeline.localize_correspondences(
+                    &self.camera,
+                    self.index.match_projected(
                         &self.camera,
-                        self.index.match_projected(
-                            &self.camera,
-                            &prior,
-                            &query.keypoints,
-                            &packed,
-                            radius,
-                            self.gates,
-                        ),
-                    )
-                });
+                        &prior,
+                        &query.keypoints,
+                        &packed,
+                        radius,
+                        self.gates,
+                    ),
+                )
+            })
+            .map(|result| self.spread_gate(result, &query.keypoints));
         let projected = projected_raw.clone().filter(|result| {
             accepted(result) && stale_min_inliers.is_none_or(|needed| result.inlier_count >= needed)
         });
@@ -889,6 +925,7 @@ impl Localizer {
                             )
                     }
                 })
+                .map(|result| self.spread_gate(result, &query.keypoints))
         });
         let used_prior = prior_result.as_ref().is_some_and(accepted);
         let mut matching = if !used_prior {
@@ -922,6 +959,7 @@ impl Localizer {
                             ),
                         )
                     })
+                    .map(|result| self.spread_gate(result, &query.keypoints))
                     .filter(accepted);
                 match retrieved {
                     Some(result) => {
@@ -933,10 +971,17 @@ impl Localizer {
                         matching = "radius";
                         prior_result.clone().expect("checked")
                     }
-                    None => self.pipeline.localize_correspondences(
-                        &self.camera,
-                        self.index
-                            .match_all(&query.keypoints, &packed, self.gates, self.threads),
+                    None => self.spread_gate(
+                        self.pipeline.localize_correspondences(
+                            &self.camera,
+                            self.index.match_all(
+                                &query.keypoints,
+                                &packed,
+                                self.gates,
+                                self.threads,
+                            ),
+                        ),
+                        &query.keypoints,
                     ),
                 }
             }

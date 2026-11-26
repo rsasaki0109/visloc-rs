@@ -48,8 +48,8 @@ pub use map_merge::{
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
 pub use view_diagnostics::{
-    view_diagnostics, ExpectedVisibility, ImageGrid, ViewDiagnostics, VisibilityGates,
-    MAX_GRID as VIEW_GRID_MAX,
+    apply_inlier_spread_gate, view_diagnostics, ExpectedVisibility, ImageGrid, ViewDiagnostics,
+    VisibilityGates, MAX_GRID as VIEW_GRID_MAX,
 };
 pub use wheel_calibration::{
     CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
