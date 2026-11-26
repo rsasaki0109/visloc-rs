@@ -157,6 +157,51 @@ struct AdamState {
     m_col: Vec<f32>,
     v_col: Vec<f32>,
     t: i32,
+    /// With deferred updates: the step each gaussian was last brought up to.
+    last: Vec<i32>,
+    /// The latest step's learning rates (for catching up).
+    lr_geo: [f32; NGEO],
+    lr_dc: f32,
+    lr_rest: f32,
+}
+
+const B1: f32 = 0.9;
+const B2: f32 = 0.999;
+
+/// Moments below 1e-30 are flushed to zero: a gaussian that gets no
+/// gradient for a few hundred steps (e.g. culled after an opacity reset)
+/// would otherwise decay into subnormals, which x86 computes on a slow path
+/// (the GPU flushes them).
+#[inline(always)]
+fn ftz(x: f32) -> f32 {
+    if x.abs() < 1e-30 {
+        0.0
+    } else {
+        x
+    }
+}
+
+/// `d` Adam steps with a zero gradient, in closed form (GS-Scale's deferred
+/// update, Lee et al. 2025): the moments decay by `B1^d` and `B2^d`, and the
+/// parameter moves by `lr m / sqrt(v) * sum_k (B1 / sqrt(B2))^k` with the
+/// bias corrections and learning rates of the current step and `eps`
+/// dropped (they change little over the skipped steps).
+#[inline(always)]
+fn catch_up(p: &mut [f32], m: &mut [f32], v: &mut [f32], lr: impl Fn(usize) -> f32, d: i32, bc1: f32, bc2: f32) {
+    if d <= 0 {
+        return;
+    }
+    let r = B1 / B2.sqrt();
+    let sum = r * (1.0 - r.powi(d)) / (1.0 - r);
+    let k = bc2.sqrt() / bc1 * sum;
+    let (f1, f2) = (B1.powi(d), B2.powi(d));
+    for i in 0..p.len() {
+        if v[i] > 0.0 {
+            p[i] -= lr(i) * k * m[i] / v[i].sqrt();
+        }
+        m[i] = ftz(m[i] * f1);
+        v[i] = ftz(v[i] * f2);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -244,6 +289,9 @@ pub struct Trainer {
     pub loss: Loss,
     /// See [`backward`]'s `overlap`.
     pub overlap: f32,
+    /// Update only the gaussians projected this step, catching the others up
+    /// in closed form when they next are (see [`Trainer::sync`]).
+    pub sparse_adam: bool,
     /// D-SSIM weight with the L1 loss (Inria: 0.2); the L1 term gets
     /// `1 - ssim_weight`.
     pub ssim_weight: f32,
@@ -287,6 +335,7 @@ impl Trainer {
             loss: Loss::L2,
             overlap: 1.0,
             ssim_weight: 0.0,
+            sparse_adam: false,
             ssim: None,
             grad_accum: Vec::new(),
             grad_count: Vec::new(),
@@ -365,9 +414,13 @@ impl Trainer {
             m_col: vec![0.0; n * NCOL],
             v_col: vec![0.0; n * NCOL],
             t: 0,
+            last: vec![0; n],
+            lr_geo: [0.0; NGEO],
+            lr_dc: 0.0,
+            lr_rest: 0.0,
         });
         st.t += 1;
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-15f32);
+        let (b1, b2, eps) = (B1, B2, 1e-15f32);
         let bc1 = 1.0 - b1.powi(st.t);
         let bc2 = 1.0 - b2.powi(st.t);
         let frac = step as f32 / total.max(1) as f32;
@@ -378,6 +431,11 @@ impl Trainer {
         lr_geo[6..10].fill(cfg.lr_quat);
         lr_geo[10] = cfg.lr_opacity;
         let (lr_dc, lr_rest) = (cfg.lr_dc, cfg.lr_rest);
+        st.lr_geo = lr_geo;
+        st.lr_dc = lr_dc;
+        st.lr_rest = lr_rest;
+        let t_now = st.t;
+        let sparse = self.sparse_adam;
         let view = &view;
         // One pass per gaussian: its gradient (zero if it was not
         // projected) and the dense Adam update, without per-step gradient
@@ -392,8 +450,17 @@ impl Trainer {
                     .par_chunks_mut(NCOL)
                     .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL))),
             )
-            .zip(idx.par_iter())
-            .for_each(|(((p, (m, v)), (pc, (mc, vc))), &c)| {
+            .zip(idx.par_iter().zip(st.last.par_iter_mut()))
+            .for_each(|(((p, (m, v)), (pc, (mc, vc))), (&c, last))| {
+                if sparse {
+                    if c == u32::MAX {
+                        return;
+                    }
+                    let d = t_now - 1 - *last;
+                    catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
+                    catch_up(pc, mc, vc, |i| if i % NSH == 0 { lr_dc } else { lr_rest }, d, bc1, bc2);
+                    *last = t_now;
+                }
                 let mut g = [0.0f32; NGEO];
                 let mut gc = [0.0f32; NCOL];
                 if c != u32::MAX {
@@ -413,18 +480,6 @@ impl Trainer {
                         for k in 0..NSH {
                             gc[ch * NSH + k] = gv * pr.basis[k];
                         }
-                    }
-                }
-                // Moments below 1e-30 are flushed to zero: a gaussian that
-                // gets no gradient for a few hundred steps (e.g. culled after
-                // an opacity reset) would otherwise decay into subnormals,
-                // which x86 computes on a slow path (the GPU flushes them).
-                #[inline(always)]
-                fn ftz(x: f32) -> f32 {
-                    if x.abs() < 1e-30 {
-                        0.0
-                    } else {
-                        x
                     }
                 }
                 for k in 0..NGEO {
@@ -448,11 +503,39 @@ impl Trainer {
         loss
     }
 
+    /// Bring every gaussian deferred by the sparse Adam up to the current
+    /// step (before rendering for evaluation, saving or densifying).
+    pub fn sync(&mut self) {
+        let Some(st) = self.adam.as_mut() else { return };
+        let t = st.t;
+        let bc1 = 1.0 - B1.powi(t);
+        let bc2 = 1.0 - B2.powi(t);
+        let (lr_geo, lr_dc, lr_rest) = (st.lr_geo, st.lr_dc, st.lr_rest);
+        self.model
+            .geo
+            .par_iter_mut()
+            .zip(st.m_geo.par_iter_mut().zip(st.v_geo.par_iter_mut()))
+            .zip(
+                self.model
+                    .col
+                    .par_chunks_mut(NCOL)
+                    .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL))),
+            )
+            .zip(st.last.par_iter_mut())
+            .for_each(|(((p, (m, v)), (pc, (mc, vc))), last)| {
+                let d = t - *last;
+                catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
+                catch_up(pc, mc, vc, |i| if i % NSH == 0 { lr_dc } else { lr_rest }, d, bc1, bc2);
+                *last = t;
+            });
+    }
+
     /// Inria's adaptive density control (`visloc_gsplat_train::densify`, the
     /// same rule `gsplat_train` runs): clone / split / prune with `grow`,
     /// and cap every opacity at 0.01 with `reset`. Adam moments are kept for
     /// kept gaussians and zeroed for new ones; the statistics restart.
     pub fn densify(&mut self, cfg: &DensifyConfig, grow: bool, reset: bool, step: usize, seed: u64) -> Option<DensifyReport> {
+        self.sync();
         let n = self.model.len();
         let st = self.adam.take();
         let zero_geo = vec![[0.0f32; NGEO]; n];
@@ -506,6 +589,7 @@ impl Trainer {
             a.v_geo = back(&pop.transforms.m2, &pop.opacity.m2);
             a.m_col = pop.sh.m1;
             a.v_col = pop.sh.m2;
+            a.last = vec![a.t; n2];
             self.adam = Some(a);
         }
         if grow {

@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ssim_weight = 0.2f32;
     let mut densify_cfg = Some(visloc_gsplat_train::densify::DensifyConfig::default());
     let mut truncate: Option<usize> = None;
+    let mut sparse_adam = false;
     let mut adam = AdamConfig::default();
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
@@ -68,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--truncate" => truncate = Some(next()?.parse()?),
             "--ssim-weight" => ssim_weight = next()?.parse()?,
             "--no-densify" => densify_cfg = None,
+            "--sparse-adam" => sparse_adam = true,
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
             "--step" => newton.step = next()?.parse()?,
@@ -109,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tr = Trainer::new(model, views, bg);
     tr.loss = loss;
     tr.overlap = overlap;
+    tr.sparse_adam = sparse_adam;
     tr.ssim_weight = if loss == Loss::L1 { ssim_weight } else { 0.0 };
     if optimizer == "newton" && loss != Loss::L2 {
         return Err("the Newton step needs --loss l2".into());
@@ -181,6 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loss_sum += l;
         loss_n += 1;
         if step % eval_every == 0 || step == steps {
+            tr.sync();
             let p = eval_psnr(&tr);
             println!(
                 "step {step:6}  train loss {:.5}  eval psnr {p:.3}  gaussians {}  ({train_s:.1}s train, {:.1} ms/step)",
@@ -205,6 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         t0.elapsed().as_secs_f64()
     );
     if let Some(out) = out {
+        tr.sync();
         save_ply(&tr.model.to_scene(), &out)?;
         println!("wrote {}", out.display());
     }
