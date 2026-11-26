@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sh_interval: Option<usize> = None;
     let mut max_gaussians: Option<usize> = None;
     let mut seed = 42u64;
+    let mut overlap = 1.0f32;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -58,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--sh-interval" => sh_interval = Some(next()?.parse()?),
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
             "--seed" => seed = next()?.parse()?,
+            "--overlap" => overlap = next()?.parse()?,
             o => return Err(format!("unknown argument {o}").into()),
         }
     }
@@ -86,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bg = [0.0f32; 3];
     let mut tr = Trainer::new(model, views, bg);
     tr.loss = loss;
+    tr.overlap = overlap;
     if optimizer == "newton" && loss != Loss::L2 {
         return Err("the Newton step needs --loss l2".into());
     }

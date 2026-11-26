@@ -224,6 +224,8 @@ pub struct Trainer {
     adam: Option<AdamState>,
     acc: Option<Accum>,
     pub loss: Loss,
+    /// See [`backward`]'s `overlap`.
+    pub overlap: f32,
     /// Seconds spent per stage: project+bin, forward, loss, backward, lift, update.
     pub timing: [f64; 6],
 }
@@ -257,6 +259,7 @@ impl Trainer {
             adam: None,
             acc: None,
             loss: Loss::L2,
+            overlap: 1.0,
             timing: [0.0; 6],
         }
     }
@@ -276,7 +279,7 @@ impl Trainer {
         // Gauss-Newton weight of a mean squared error: 2 / (3 N) per pixel.
         let h_px = weight * 2.0 / (gt.len() as f32);
         let t3 = Instant::now();
-        let out = backward(&frame, &raster, &d, h_px, gauss_newton);
+        let out = backward(&frame, &raster, &d, h_px, gauss_newton, self.overlap);
         let t4 = Instant::now();
         self.timing[0] += (t1 - t0).as_secs_f64();
         self.timing[1] += (t2 - t1).as_secs_f64();
@@ -618,7 +621,7 @@ pub fn view_gauss_newton(
     let n = model.len();
     let r = render(model, view, bg);
     let (loss, d) = image_loss(&r.raster.image, gt, Loss::L2);
-    let out = backward(&r.frame, &r.raster, &d, 2.0 / gt.len() as f32, true);
+    let out = backward(&r.frame, &r.raster, &d, 2.0 / gt.len() as f32, true, 0.0);
     let mut acc = Accum::new(n);
     Trainer::lift(&mut acc, model, view, &r, &out, n);
     (loss, acc.h, acc.g, acc.hcol, acc.gcol)

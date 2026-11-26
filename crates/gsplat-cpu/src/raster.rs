@@ -304,7 +304,14 @@ const MAX_BATCH: usize = 1 << 20;
 /// `gauss_newton`, the Gauss-Newton sums of `sum_px h_px |dC/d.|^2` with a
 /// uniform per-pixel weight `h_px` (`2 / (3 N)` for a mean squared error);
 /// without it those entries stay zero and the walk is cheaper.
-pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton: bool) -> Vec<[f32; NB]> {
+///
+/// `overlap` (0..=1) scales each pixel's Gauss-Newton term of a splat by
+/// `(W / (alpha T))^overlap`, `W = 1 - T_final` the pixel's total weight:
+/// at 1 the per-splat matrices majorize the joint one (Cauchy-Schwarz with
+/// weights `alpha T`), so all splats can take their own steps at once and
+/// the quadratic model still descends; at 0 it is plain Gauss-Newton, whose
+/// simultaneous steps overshoot by about the number of splats that overlap.
+pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton: bool, overlap: f32) -> Vec<[f32; NB]> {
     let nv = f.num_splats();
     let tile_bw = f.img_w.div_ceil(TILE);
     let tile_bh = f.img_h.div_ceil(TILE);
@@ -344,9 +351,9 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
         }
         jobs.par_iter_mut().for_each(|(t, s, slots)| {
             if gauss_newton {
-                tile_backward::<true>(f, r, d_image, h_px, tile_bw, *t, *s, slots)
+                tile_backward::<true>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
             } else {
-                tile_backward::<false>(f, r, d_image, h_px, tile_bw, *t, *s, slots)
+                tile_backward::<false>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
             }
         });
         for (k, g) in scratch.iter().enumerate() {
@@ -367,6 +374,7 @@ fn tile_backward<const GN: bool>(
     r: &Raster,
     d_image: &[f32],
     h_px: f32,
+    overlap: f32,
     tile_bw: u32,
     tile: u32,
     start: usize,
@@ -379,6 +387,7 @@ fn tile_backward<const GN: bool>(
     let w = ((x0 + TILE).min(f.img_w) - x0) as usize;
     let h = ((y0 + TILE).min(f.img_h) - y0) as usize;
     let mut t_cur = [[0.0f32; W]; W];
+    let mut w_tot = [[0.0f32; W]; W];
     let mut last = [[0u32; W]; W];
     let mut gr = [[[0.0f32; W]; W]; 3];
     let mut be = [[[0.0f32; W]; W]; 3];
@@ -387,6 +396,7 @@ fn tile_backward<const GN: bool>(
         for lx in 0..w {
             let pix = (y0 as usize + ly) * f.img_w as usize + x0 as usize + lx;
             t_cur[ly][lx] = r.final_t[pix];
+            w_tot[ly][lx] = 1.0 - r.final_t[pix];
             last[ly][lx] = r.last_idx[pix];
             for (c, g) in gr.iter_mut().enumerate() {
                 g[ly][lx] = d_image[pix * 3 + c];
@@ -467,7 +477,19 @@ fn tile_backward<const GN: bool>(
                         }
                         acc[B_STAT][k] += (d_alpha * ds[0]).abs() * img_w + (d_alpha * ds[1]).abs() * img_h;
                         if GN {
-                            let wpx = h_px * (dca[0] * dca[0] + dca[1] * dca[1] + dca[2] * dca[2]);
+                            let ratio = w_tot[ly][k] / at.max(1e-12);
+                            let fo = if overlap == 1.0 {
+                                ratio
+                            } else if overlap == 0.0 {
+                                1.0
+                            } else if overlap == 0.5 {
+                                ratio.sqrt()
+                            } else {
+                                ratio.powf(overlap)
+                            };
+                            let fo = if hit { fo.max(1.0) } else { 0.0 };
+                            let hp = h_px * fo;
+                            let wpx = hp * (dca[0] * dca[0] + dca[1] * dca[1] + dca[2] * dca[2]);
                             let mut n = B_H;
                             for q0 in 0..6 {
                                 let wq = wpx * ds[q0];
@@ -476,7 +498,7 @@ fn tile_backward<const GN: bool>(
                                     n += 1;
                                 }
                             }
-                            acc[B_HC][k] += h_px * at * at;
+                            acc[B_HC][k] += hp * at * at;
                         }
                     }
                 };
