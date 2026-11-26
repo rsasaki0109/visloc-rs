@@ -504,6 +504,17 @@ python3 scripts/plot_nav_sim.py --map runs/gz_nav/map/occupancy.yaml \
 
 ## Real to sim: a simulator made of a 3D Gaussian splat of real photos
 
+> **The street simulator now lives in Robot Native Engine.** visloc-rs builds
+> the street from the video (`real2sim.py --export-rne DIR`: the splat, the
+> maps, the walk, the kerbs, the crowd), and RNE's example 163 simulates it.
+> It runs headless in seconds, replays exactly, and steers on visloc-rs fixes
+> through `visloc_map_localize_server`. The details are in RNE's
+> [docs/STREET_SPLAT_NAV.md](https://github.com/rsasaki0109/RobotNativeEngine/blob/main/docs/STREET_SPLAT_NAV.md),
+> and the plan and its results in [rne_migration.md](rne_migration.md). The
+> ROS 2 simulator below (`gs_sim.py`, `people.py`, `chase_video.py`, with
+> Nav2) is frozen. It stays as the Nav2 reference, and its runs are the
+> numbers RNE's are compared with.
+
 Gazebo needs a world modelled by hand. Here the world is the splat that
 visloc-rs's own SfM and 3DGS make from photos of a real place, and Nav2
 drives a robot through it on visloc localization. Everything is from public
@@ -1097,7 +1108,9 @@ walked through anyone. Video:
 
 ### One command from a 360-degree video
 
-`gs/real2sim.py` runs the whole chain on an Insta360 `.insv` file:
+`gs/real2sim.py` runs the whole chain on an Insta360 `.insv` file. With
+`--export-rne DIR` it also writes the street bundle for Robot Native Engine
+(`rne_bundle.py`). `rne_crowd.py` adds the crowd to it.
 
 ```bash
 python3 ros2/visloc-ros2/gs/real2sim.py --insv walk.insv --out runs/walk \

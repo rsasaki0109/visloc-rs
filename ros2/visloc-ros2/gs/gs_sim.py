@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """A robot simulator whose camera sees a 3D Gaussian splat (docs/navigation.md).
 
+Frozen: the street simulator now lives in Robot Native Engine (example 163; see
+docs/rne_migration.md). This one stays as the ROS 2 / Nav2 reference.
+
     python3 ros2/visloc-ros2/gs/gs_sim.py --scene runs/gs_tum/scene.json [--record run.csv]
 
 The world is what a splat trained on real photos shows. The robot is a

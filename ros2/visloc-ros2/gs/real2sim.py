@@ -130,6 +130,9 @@ def main():
     p.add_argument('--gpu', action='store_true',
                    help="run SfM's matching on the GPU (wgpu) too; 3DGS training uses a GPU whenever wgpu finds one")
     p.add_argument('--nav', action='store_true', help='also drive the goals with Nav2')
+    p.add_argument('--export-rne', dest='export_rne', default='',
+                   help="also write a street bundle for Robot Native Engine's simulator to this directory "
+                        '(rne_bundle.py; with --nav, the road and pavement from that run)')
     p.add_argument('--lane-half-width', dest='lane_half_width', type=float, default=1.0,
                    help="Nav2's map is free only this far either side of the walk (lane_map.py), so the robot "
                         'keeps to the pavement; 0: the whole occupancy map')
@@ -310,6 +313,16 @@ kill -INT $LP; sleep 8
                 run(['ffmpeg', '-v', 'error', '-y', '-framerate', 30, '-i', os.path.join(frames, '%05d.jpg'),
                      '-vf', 'scale=960:-2', '-pix_fmt', 'yuv420p', '-crf', 26, os.path.join(out, 'chase.mp4')])
             step('video', video)
+
+    if args.export_rne:
+        def export():
+            lane = os.path.join(mapd, 'occupancy_lane.yaml')
+            people = os.path.join(sim, 'nav.sim.csv.people.json')
+            run([sys.executable, os.path.join(HERE, 'rne_bundle.py'), '--scene', scene_json,
+                 '--occupancy', lane if os.path.exists(lane) else os.path.join(mapd, 'occupancy.yaml'),
+                 '--map', mapd, '--out', args.export_rne]
+                + (['--people-json', people] if os.path.exists(people) else []))
+        step('export-rne', export)
 
     print(f'done: splat {splat}, scene {scene_json}, map {mapd}')
     print('timing (s):', {k: round(v) for k, v in times.items()})

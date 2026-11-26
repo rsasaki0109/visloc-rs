@@ -6,6 +6,25 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- The 3DGS street simulator moves to Robot Native Engine (RNE)
+  (`docs/rne_migration.md`). The ROS 2 simulator (`gs_sim.py` with Nav2) is
+  frozen as the reference.
+  - `rne_bundle.py` (and `real2sim.py --export-rne DIR`) writes a street as
+    a bundle for RNE's example 163: the splat manifest, the solid and lane
+    maps (`rne_nav` JSON), the ground grid, the walk, the kerbs and the
+    robot model as gaussians.
+  - `rne_crowd.py` adds the crowd: the start of `people.Crowd` with the
+    run's seed, and every agent at 12 gait phases as 3DGS PLYs.
+  - `visloc_map_localize_server` is `visloc_map_localize_node`'s core over
+    stdin and stdout. It loads the map once and answers one image per line,
+    with an optional prior.
+  - On the OverMaps360 street in RNE:
+    - On ground truth: 4/4 goals, no contacts, 9.9 s on the kerbs.
+    - On visloc-rs fixes: 4/4 goals, pose RMSE 5.5 to 8.6 cm.
+    - With the crowd, over 4 seeds: 4/4 goals, nobody on the road, nobody
+      within 6 cm of the robot's body.
+    - Headless, a drive takes seconds; a Nav2 run took 40 minutes.
+
 - **Map fixes and wheel speed inside the VIO.** The Basalt estimator takes
   external factors (`BasaltVioEstimator::add_external_factor`: a pose
   prior, a body velocity) in its window; none are queued by default, so its
@@ -23,6 +42,13 @@ All notable changes to `visloc-rs` will be documented here.
   testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
   and recorder for running the ROS 2 nodes on recorded data without ROS 2.
 - `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+- `lamaria_batch_ba.py online --jump-gate`: a window whose initial cost per
+  observation jumps past this many times the window before's drops
+  observations over 3 px from its first iteration. The BA chain passes
+  `--jump-gate 3` for a monocular run in low light; on LaMAria
+  sequence_4_3 (test) it removes a 25 m offset the online windows put in the
+  first six minutes, and it never fires on the Low light training
+  sequences. See `docs/lamaria_mono.md`.
 
 ## 0.5.0 - 2026-11-24
 
