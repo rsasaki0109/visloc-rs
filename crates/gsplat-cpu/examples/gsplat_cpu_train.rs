@@ -44,6 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut res_schedule: Vec<f64> = Vec::new();
     let mut adam = AdamConfig::default();
     let mut brush = false;
+    let mut mean_noise: Option<f32> = None;
+    let mut aux_weights: Option<(f32, f32)> = None;
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
     let mut max_gaussians: Option<usize> = None;
@@ -76,6 +78,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--truncate" => truncate = Some(next()?.parse()?),
             "--ssim-weight" => ssim_weight = next()?.parse()?,
             "--no-densify" => densify_cfg = None,
+            "--mean-noise" => mean_noise = Some(next()?.parse::<f32>()?),
+            "--aux-weights" => {
+                let v: Vec<f32> = next()?
+                    .split(',')
+                    .map(|x| x.parse())
+                    .collect::<Result<_, _>>()?;
+                aux_weights = Some((v[0], v[1]));
+            }
             "--strategy" => match next()?.as_str() {
                 "inria" => brush = false,
                 "brush" => brush = true,
@@ -151,9 +161,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // brush's strategy (gsplat_train --strategy brush, gsplat_photos'
     // default): its refine replaces the Inria rule, with its rates and aux
     // losses.
-    let brush_cfg = brush.then(|| visloc_gsplat_train::densify::BrushRefineConfig {
-        max_gaussians: max_gaussians.unwrap_or(10_000_000),
-        ..Default::default()
+    let brush_cfg = brush.then(|| {
+        let mut b = visloc_gsplat_train::densify::BrushRefineConfig {
+            max_gaussians: max_gaussians.unwrap_or(10_000_000),
+            ..Default::default()
+        };
+        if let Some(w) = mean_noise {
+            b.mean_noise_weight = w;
+        }
+        b
     });
     if brush {
         densify_cfg = None;
@@ -162,8 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sh_interval: sh,
             ..AdamConfig::brush_preset()
         };
-        tr.opac_loss_weight = 1e-9;
-        tr.scale_loss_weight = 1e-8;
+        (tr.opac_loss_weight, tr.scale_loss_weight) = aux_weights.unwrap_or((1e-9, 1e-8));
         tr.brush = brush_cfg.clone();
     }
     tr.stride = stride;
