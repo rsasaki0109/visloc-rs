@@ -112,6 +112,14 @@ All notable changes to `visloc-rs` will be documented here.
   points on average. No training mono reaches the gate on its own. See
   `docs/lamaria_mono.md`.
 
+### Changed
+
+- `visloc-gsplat-cpu` Adam skips SH bands past the active degree (their
+  gradient and moments are exactly zero until the band switches on) and
+  vectorizes the colour update. Results are bit-identical. bonsai
+  `images_8` brush, 7,000 steps: update stage 53.8 to 44.2 ms/step, total
+  1,433 to 1,413 s; most of the gain is in the first 3,000 steps.
+
 ### Fixed
 
 - `visloc-gsplat-cpu`: the dense Adam path (brush, `--dense-adam`) left
