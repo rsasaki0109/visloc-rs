@@ -23,6 +23,13 @@ All notable changes to `visloc-rs` will be documented here.
   testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
   and recorder for running the ROS 2 nodes on recorded data without ROS 2.
 - `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+- `lamaria_batch_ba.py online --jump-gate`: a window whose initial cost per
+  observation jumps past this many times the window before's drops
+  observations over 3 px from its first iteration. The BA chain passes
+  `--jump-gate 3` for a monocular run in low light; on LaMAria
+  sequence_4_3 (test) it removes a 25 m offset the online windows put in the
+  first six minutes, and it never fires on the Low light training
+  sequences. See `docs/lamaria_mono.md`.
 
 ## 0.5.0 - 2026-11-24
 
