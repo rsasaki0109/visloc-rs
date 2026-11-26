@@ -45,7 +45,7 @@ pub struct TrainConfig {
     pub normal_start: usize,
     /// Weight of the depth-prior loss `mean |D - P| / P` (relative L1 of the
     /// rendered depth channel against a per-view prior depth, e.g. LiDAR; see
-    /// `shaders/depth_prior.wgsl` and [`crate::Trainer::load_depth_priors`]);
+    /// `shaders/depth_prior.wgsl` and `Trainer::load_depth_priors`);
     /// 0 = off. Applied on every `depth_every`-th step: the geometry
     /// channels take the device rasterizer, slower than the host one on a
     /// CPU adapter.
