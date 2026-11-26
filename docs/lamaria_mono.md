@@ -273,6 +273,18 @@ gain averages +31.6 points with the default stiffness. A stiffer walk
 +28.6 and +25.3. A drift that stays under the gate is left alone, along with
 its gain, which is smaller there.
 
+On the test set (run 35, with run 36's sequence_4_3), each recording's GPS
+was fetched, and the Moving platform track was first bridged at its rides
+(`lamaria_gps_steps.py`, 25 m). That found rides in 5_2, 5_3, 5_5, 5_6,
+5_7, 5_8 and 5_9, and brought 5_6 from 47.6 m to 4.6 m and 5_9 from
+76.6 m to 3.2 m. The bend then ran on all 63 sequences. 15 of them reach the
+gate: 1_2 (11.4 m), 1_12 (6.6), 3_3 (6.3), 2_2 (5.5), 4_2 (5.0),
+3_16 (4.9), 4_8, 5_4 (4.8), 5_3, 5_5 (4.7), 5_1, 5_6 (4.6), 2_5 (4.5),
+2_1 (4.2) and 2_3 (4.1). The other 48 stay as they are. The test residuals
+run higher than the training ones (median 3.3 m against 2.5 m), so some of
+the sequences just above the gate may only have poorer fixes; the
+leaderboard will tell.
+
 ## Reproduce
 
 ```bash
