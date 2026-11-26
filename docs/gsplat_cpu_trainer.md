@@ -23,6 +23,11 @@ With Adam its defaults are `gsplat_train`'s (L1 + 0.2 D-SSIM, Inria
 densification, SH degree up every 1000 steps); the Newton step runs on a
 fixed population (`--loss l2 --no-densify`).
 
+The techniques tried here come from a survey of 2024-2026 fast-training
+papers ranked for a CPU trainer
+([`docs/research/cpu_3dgs_training_survey_ja.md`](research/cpu_3dgs_training_survey_ja.md),
+in Japanese, with its notes).
+
 ## Correctness
 
 `tests/oracle.rs`: the image and every parameter gradient against the f64

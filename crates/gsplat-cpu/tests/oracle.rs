@@ -16,14 +16,37 @@ fn scene(degree: u32) -> Scene {
         rotation: Quaternion::new(q[0], q[1], q[2], q[3]),
         opacity_logit: o,
         sh_dc: dc,
-        sh_rest: (0..rest).map(|k| 0.05 * ((k as f32 + seed) * 1.7).sin()).collect(),
+        sh_rest: (0..rest)
+            .map(|k| 0.05 * ((k as f32 + seed) * 1.7).sin())
+            .collect(),
         sh_degree: degree,
     };
     Scene::new(
         vec![
-            mk([0.0, 0.0, 4.0], [0.4, 0.2, 0.3], [0.9, 0.2, -0.3, 0.1], 0.2, [0.8, -0.3, 0.1], 0.0),
-            mk([0.3, -0.2, 5.0], [0.3, 0.5, 0.2], [0.7, -0.1, 0.4, 0.5], -0.4, [-0.2, 0.6, 0.3], 1.0),
-            mk([-0.4, 0.3, 6.0], [0.6, 0.3, 0.4], [1.1, 0.3, 0.2, -0.2], 0.5, [0.1, 0.2, -0.5], 2.0),
+            mk(
+                [0.0, 0.0, 4.0],
+                [0.4, 0.2, 0.3],
+                [0.9, 0.2, -0.3, 0.1],
+                0.2,
+                [0.8, -0.3, 0.1],
+                0.0,
+            ),
+            mk(
+                [0.3, -0.2, 5.0],
+                [0.3, 0.5, 0.2],
+                [0.7, -0.1, 0.4, 0.5],
+                -0.4,
+                [-0.2, 0.6, 0.3],
+                1.0,
+            ),
+            mk(
+                [-0.4, 0.3, 6.0],
+                [0.6, 0.3, 0.4],
+                [1.1, 0.3, 0.2, -0.2],
+                0.5,
+                [0.1, 0.2, -0.5],
+                2.0,
+            ),
         ],
         degree,
     )
@@ -31,11 +54,17 @@ fn scene(degree: u32) -> Scene {
 
 fn view() -> CameraView {
     let r = nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03).into_inner();
-    CameraView::new(r, Vector3::new(0.1, -0.05, 0.2), PinholeCamera::new(40, 32, 45.0, 44.0, 20.0, 16.0))
+    CameraView::new(
+        r,
+        Vector3::new(0.1, -0.05, 0.2),
+        PinholeCamera::new(40, 32, 45.0, 44.0, 20.0, 16.0),
+    )
 }
 
 fn target(n: usize) -> Vec<f32> {
-    (0..n * 3).map(|i| 0.5 + 0.3 * ((i as f32) * 0.37).sin()).collect()
+    (0..n * 3)
+        .map(|i| 0.5 + 0.3 * ((i as f32) * 0.37).sin())
+        .collect()
 }
 
 #[test]
@@ -71,7 +100,9 @@ fn gradients_match_oracle() {
     let d: Vec<[f64; 3]> = r
         .iter()
         .enumerate()
-        .map(|(p, c)| std::array::from_fn(|ch| 2.0 * (c[ch] - gt[p * 3 + ch] as f64) / (3 * n) as f64))
+        .map(|(p, c)| {
+            std::array::from_fn(|ch| 2.0 * (c[ch] - gt[p * 3 + ch] as f64) / (3 * n) as f64)
+        })
         .collect();
     let o = render_backward(&s, &v, [0.0; 3], &d);
     for i in 0..s.len() {
@@ -85,12 +116,20 @@ fn gradients_match_oracle() {
         let scale = want.iter().fold(1e-9f64, |a, b| a.max(b.abs()));
         for k in 0..11 {
             let err = (g[i][k] as f64 - want[k]).abs() / scale;
-            assert!(err < 1e-3, "gaussian {i} param {k}: {} vs {}", g[i][k], want[k]);
+            assert!(
+                err < 1e-3,
+                "gaussian {i} param {k}: {} vs {}",
+                g[i][k],
+                want[k]
+            );
         }
         for ch in 0..3 {
             let got = gcol[i * 3 * NSH + ch * NSH] as f64;
             let want = o.sh_dc[i][ch];
-            assert!((got - want).abs() < 1e-3 * want.abs().max(1e-6) + 1e-7, "dc {i} {ch}: {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1e-3 * want.abs().max(1e-6) + 1e-7,
+                "dc {i} {ch}: {got} vs {want}"
+            );
         }
     }
 }
@@ -107,9 +146,16 @@ fn gauss_newton_matches_finite_differences() {
     let (_, h, _, hcol, _) = view_gauss_newton(&m, &v, &gt, [0.0; 3]);
     let params = |g: &Gaussian| -> [f64; 11] {
         [
-            g.mean.x as f64, g.mean.y as f64, g.mean.z as f64,
-            g.scale_log.x as f64, g.scale_log.y as f64, g.scale_log.z as f64,
-            g.rotation.w as f64, g.rotation.i as f64, g.rotation.j as f64, g.rotation.k as f64,
+            g.mean.x as f64,
+            g.mean.y as f64,
+            g.mean.z as f64,
+            g.scale_log.x as f64,
+            g.scale_log.y as f64,
+            g.scale_log.z as f64,
+            g.rotation.w as f64,
+            g.rotation.i as f64,
+            g.rotation.j as f64,
+            g.rotation.k as f64,
             g.opacity_logit as f64,
         ]
     };
@@ -126,7 +172,10 @@ fn gauss_newton_matches_finite_differences() {
             // difference's square: with a fourth-order stencil, 3e-2 passes
             // and smaller steps overshoot the analytic matrix more the
             // smaller they are (1e-2: 2.5%, 3e-3: 6%), as that term does.
-            let eps: f64 = std::env::var("FD_EPS").ok().and_then(|x| x.parse().ok()).unwrap_or(3e-2);
+            let eps: f64 = std::env::var("FD_EPS")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(3e-2);
             let mut sp = s.clone();
             let mut p = params(&sp.gaussians[i]);
             p[k] += eps;
@@ -144,7 +193,8 @@ fn gauss_newton_matches_finite_differences() {
             // Fourth-order central difference.
             for px in 0..n {
                 for ch in 0..3 {
-                    jac[k][px * 3 + ch] = (8.0 * (a[px][ch] - b[px][ch]) - (a2[px][ch] - b2[px][ch])) / (12.0 * eps);
+                    jac[k][px * 3 + ch] =
+                        (8.0 * (a[px][ch] - b[px][ch]) - (a2[px][ch] - b2[px][ch])) / (12.0 * eps);
                 }
             }
         }
@@ -162,7 +212,11 @@ fn gauss_newton_matches_finite_differences() {
                 let got = h[i][tri(a, b)] as f64;
                 let err = (got - fd[a][b]).abs() / scale;
                 // Finite differences of a gated renderer: a loose bound.
-                assert!(err < 2e-2, "gaussian {i} H[{a}][{b}]: {got} vs {}", fd[a][b]);
+                assert!(
+                    err < 2e-2,
+                    "gaussian {i} H[{a}][{b}]: {got} vs {}",
+                    fd[a][b]
+                );
             }
         }
         // Colour: d C / d dc = alpha T * SH_C0.
@@ -178,7 +232,10 @@ fn gauss_newton_matches_finite_differences() {
             fdc += 2.0 / (3 * n) as f64 * jj * jj;
         }
         let got = hcol[i][0] as f64;
-        assert!((got - fdc).abs() < 2e-2 * fdc.abs() + 1e-9, "colour H {i}: {got} vs {fdc}");
+        assert!(
+            (got - fdc).abs() < 2e-2 * fdc.abs() + 1e-9,
+            "colour H {i}: {got} vs {fdc}"
+        );
     }
 }
 
@@ -203,7 +260,9 @@ fn screen_vjp_matches_the_dual_jacobian() {
     let mut clamped = 0;
     for v in &views {
         for i in 0..s.len() {
-            let Some(j) = jacobian(&m, i, v) else { continue };
+            let Some(j) = jacobian(&m, i, v) else {
+                continue;
+            };
             let g = [0.3, -0.7, 1.1, -0.4, 0.9, 0.5];
             let got = screen_vjp(&m, i, v, &g).expect("vjp");
             let pc = v.world_to_camera_point(s.gaussians[i].mean);
@@ -213,7 +272,11 @@ fn screen_vjp_matches_the_dual_jacobian() {
             for k in 0..11 {
                 let want: f32 = (0..6).map(|q| g[q] * j[q][k]).sum();
                 let scale = want.abs().max(1e-3);
-                assert!((got[k] - want).abs() / scale < 1e-3, "gaussian {i} param {k}: {} vs {want}", got[k]);
+                assert!(
+                    (got[k] - want).abs() / scale < 1e-3,
+                    "gaussian {i} param {k}: {} vs {want}",
+                    got[k]
+                );
             }
         }
     }

@@ -6,6 +6,22 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `visloc-gsplat-cpu`, a pure-CPU 3DGS trainer: no GPU, wgpu or lavapipe
+  (`docs/gsplat_cpu_trainer.md`).
+  - Projection, binning, both rasterizer passes, L1 + D-SSIM, Inria
+    densification and a deferred sparse Adam (GS-Scale) on the host, with
+    `gsplat_train`'s defaults.
+  - Mip-NeRF 360 bonsai, 4 vCPUs: 1.50x faster than `gsplat_train` at
+    390x260 over 7,000 steps (29.95 against 29.89 dB) and 1.38x at 780x520
+    over 3,000 steps (28.93 against 28.86 dB).
+  - Opt-in: a coarse-to-fine resolution schedule (`--res-schedule`, 10-17%
+    for ~0.3 dB on two of three scenes), strided pixels (`--stride 2`, not
+    worth it here) and an experimental per-gaussian Gauss-Newton step after
+    3DGS² (`--optimizer newton`; 2.8x slower than Adam in wall time).
+  - `visloc-gsplat-train` gains a `host-loss` feature: its host L1 / SSIM
+    without wgpu.
+  - A survey of 2024-2026 fast-training papers ranked for a CPU trainer
+    (`docs/research/`, in Japanese).
 - The 3DGS street simulator moves to Robot Native Engine (RNE)
   (`docs/rne_migration.md`). The ROS 2 simulator (`gs_sim.py` with Nav2) is
   frozen as the reference.

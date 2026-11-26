@@ -68,7 +68,11 @@ impl Frame {
         };
         let counts: Vec<usize> = proj
             .par_iter()
-            .map(|p| rect(p).map_or(0, |(x0, x1, y0, y1)| ((x1 - x0 + 1) * (y1 - y0 + 1)) as usize))
+            .map(|p| {
+                rect(p).map_or(0, |(x0, x1, y0, y1)| {
+                    ((x1 - x0 + 1) * (y1 - y0 + 1)) as usize
+                })
+            })
             .collect();
         // Each splat's (tile) entries at its own offset, in parallel, then a
         // stable counting sort by tile (lists stay front to back).
@@ -87,17 +91,20 @@ impl Frame {
                 chunks.push(a);
                 rest = b;
             }
-            chunks.into_par_iter().zip(proj.par_iter()).for_each(|(dst, p)| {
-                if let Some((x0, x1, y0, y1)) = rect(p) {
-                    let mut k = 0;
-                    for ty in y0..=y1 {
-                        for tx in x0..=x1 {
-                            dst[k] = (ty * tbw + tx) as u32;
-                            k += 1;
+            chunks
+                .into_par_iter()
+                .zip(proj.par_iter())
+                .for_each(|(dst, p)| {
+                    if let Some((x0, x1, y0, y1)) = rect(p) {
+                        let mut k = 0;
+                        for ty in y0..=y1 {
+                            for tx in x0..=x1 {
+                                dst[k] = (ty * tbw + tx) as u32;
+                                k += 1;
+                            }
                         }
                     }
-                }
-            });
+                });
         }
         let mut tile_count = vec![0usize; nt];
         for &t in &pairs_tile {
@@ -154,7 +161,10 @@ impl Frame {
     }
 
     fn range(&self, t: u32) -> Option<(usize, usize)> {
-        let (s, e) = (self.offsets[2 * t as usize], self.offsets[2 * t as usize + 1]);
+        let (s, e) = (
+            self.offsets[2 * t as usize],
+            self.offsets[2 * t as usize + 1],
+        );
         (s != u32::MAX && e > s).then_some((s as usize, e as usize))
     }
 }
@@ -179,7 +189,12 @@ fn fast_exp(x: f32) -> f32 {
 
 /// The 8-lane halves of a tile row a splat can reach (see `cpu_raster`).
 #[inline(always)]
-fn row_lanes(level: Option<(f32, f32, f32, f32)>, dy: f32, mu_x: f32, x0: f32) -> Option<(usize, usize)> {
+fn row_lanes(
+    level: Option<(f32, f32, f32, f32)>,
+    dy: f32,
+    mu_x: f32,
+    x0: f32,
+) -> Option<(usize, usize)> {
     let Some((c00, c01, c11, s2)) = level else {
         return Some((0, 16));
     };
@@ -197,9 +212,12 @@ fn row_lanes(level: Option<(f32, f32, f32, f32)>, dy: f32, mu_x: f32, x0: f32) -
     }
 }
 
+/// A conic and its `alpha = 1/255` level: `(c00, c01, c11, s2)`.
+type Level = (f32, f32, f32, f32);
+
 /// Rows of a tile a splat can reach and its conic level, or `None`.
 #[inline(always)]
-fn splat_rows(p: &[f32], y0: u32, h: usize) -> Option<(usize, usize, Option<(f32, f32, f32, f32)>)> {
+fn splat_rows(p: &[f32], y0: u32, h: usize) -> Option<(usize, usize, Option<Level>)> {
     let (mu_y, c00, c01, c11, opac) = (p[1], p[2], p[3], p[4], p[5]);
     if opac.is_nan() || opac < 1.0 / 255.0 {
         return None;
@@ -272,7 +290,8 @@ pub fn forward(f: &Frame) -> Raster {
                         let Some((ly0, ly1, level)) = splat_rows(p, y0 as u32, h) else {
                             continue;
                         };
-                        let (mu_x, mu_y, c00, c01, c11, opac) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+                        let (mu_x, mu_y, c00, c01, c11, opac) =
+                            (p[0], p[1], p[2], p[3], p[4], p[5]);
                         let col = [p[6], p[7], p[8]];
                         let next = j as u32 + 1;
                         for ly in ly0..=ly1 {
@@ -290,7 +309,8 @@ pub fn forward(f: &Frame) -> Raster {
                                 for kk in 0..8 {
                                     let k = base + kk;
                                     let dx = xs[k] - mu_x;
-                                    let sigma = 0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
+                                    let sigma =
+                                        0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
                                     let a = (opac * fast_exp(-sigma)).min(0.99);
                                     let t = trans[ly][k];
                                     let hit = t > 1e-4 && sigma >= 0.0 && a >= 1.0 / 255.0;
@@ -340,7 +360,14 @@ const MAX_BATCH: usize = 1 << 20;
 /// weights `alpha T`), so all splats can take their own steps at once and
 /// the quadratic model still descends; at 0 it is plain Gauss-Newton, whose
 /// simultaneous steps overshoot by about the number of splats that overlap.
-pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton: bool, overlap: f32) -> Vec<[f32; NB]> {
+pub fn backward(
+    f: &Frame,
+    r: &Raster,
+    d_image: &[f32],
+    h_px: f32,
+    gauss_newton: bool,
+    overlap: f32,
+) -> Vec<[f32; NB]> {
     if gauss_newton {
         backward_impl::<true, NB>(f, r, d_image, h_px, overlap)
     } else {
@@ -394,19 +421,14 @@ fn backward_impl<const GN: bool, const NA: usize>(
                 at = e;
             }
         }
-        jobs.par_iter_mut()
-            .for_each(|(t, s, slots)| tile_backward::<GN, NA>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots));
+        jobs.par_iter_mut().for_each(|(t, s, slots)| {
+            tile_backward::<GN, NA>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
+        });
         for (k, g) in scratch.iter().enumerate() {
             let c = f.sorted[lo + k] as usize;
-            let dst = &mut out[c];
-            if GN {
-                for (d, v) in dst.iter_mut().zip(g) {
-                    *d += v;
-                }
-            } else {
-                for (d, v) in dst.iter_mut().zip(g) {
-                    *d += v;
-                }
+            // The first NA of the NB floats (all of them with GN).
+            for (d, v) in out[c].iter_mut().zip(g) {
+                *d += v;
             }
         }
         row = row_end;

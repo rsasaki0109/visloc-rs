@@ -78,7 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // e.g. "0.2,0.5": a quarter of the resolution for the first 20%
             // of the steps, half until 50%, then full (coarse to fine).
             "--res-schedule" => {
-                res_schedule = next()?.split(',').map(|x| x.parse::<f64>()).collect::<Result<_, _>>()?;
+                res_schedule = next()?
+                    .split(',')
+                    .map(|x| x.parse::<f64>())
+                    .collect::<Result<_, _>>()?;
             }
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
@@ -86,7 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--decay" => newton.decay = next()?.parse()?,
             "--groups" => {
                 let v = next()?;
-                newton.groups = ["mean", "shape", "opacity", "color"].map(|g| v.split(',').any(|x| x == g));
+                newton.groups =
+                    ["mean", "shape", "opacity", "color"].map(|g| v.split(',').any(|x| x == g));
             }
             o => return Err(format!("unknown argument {o}").into()),
         }
@@ -100,7 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ds = load_colmap_dataset(&data, Some(8))?;
     // The CPU projection is an undistorted pinhole's: refuse lenses it
     // would silently mis-project (gsplat_train renders those).
-    if let Some(v) = ds.train.iter().chain(&ds.eval).find(|v| !v.camera.camera.lens.is_pinhole()) {
+    if let Some(v) = ds
+        .train
+        .iter()
+        .chain(&ds.eval)
+        .find(|v| !v.camera.camera.lens.is_pinhole())
+    {
         return Err(format!(
             "{}: a distorted or fisheye lens; gsplat_cpu_train handles undistorted pinholes only (use gsplat_train)",
             v.name
@@ -155,7 +164,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .raster
                 .image
                 .chunks(3)
-                .map(|c| [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)])
+                .map(|c| {
+                    [
+                        c[0].clamp(0.0, 1.0),
+                        c[1].clamp(0.0, 1.0),
+                        c[2].clamp(0.0, 1.0),
+                    ]
+                })
                 .collect();
             s += psnr(&img, gt);
         }
@@ -173,7 +188,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if order.is_empty() {
             order = (0..tr.views.len()).collect();
             for i in (1..order.len()).rev() {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let j = ((rng >> 33) as usize) % (i + 1);
                 order.swap(i, j);
             }
@@ -194,7 +211,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let at_densify = step >= d.start && step <= d.stop && step % d.interval == 0;
             let at_reset = step < d.stop && step % d.opacity_reset_interval == 0;
             if step != steps && (at_densify || at_reset) {
-                if let Some(rep) = tr.densify(d, at_densify, at_reset, step, seed ^ (step as u64).wrapping_mul(0x9E37_79B9)) {
+                if let Some(rep) = tr.densify(
+                    d,
+                    at_densify,
+                    at_reset,
+                    step,
+                    seed ^ (step as u64).wrapping_mul(0x9E37_79B9),
+                ) {
                     if step % 500 == 0 {
                         println!(
                             "  densify @{step}: {} -> {} (+{} clone, +{} split, -{} prune)",

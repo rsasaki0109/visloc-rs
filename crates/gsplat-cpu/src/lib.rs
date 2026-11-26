@@ -11,6 +11,10 @@
 //! the Jacobian), binning, both rasterizer passes and the optimizers run on
 //! the host.
 
+// The kernels index several small fixed-size arrays with one loop variable
+// (11x11 Cholesky, SH rows); iterator chains would read worse there.
+#![allow(clippy::needless_range_loop)]
+
 pub mod model;
 pub mod project;
 pub mod raster;

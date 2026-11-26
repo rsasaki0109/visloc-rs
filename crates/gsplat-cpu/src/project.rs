@@ -139,8 +139,14 @@ impl Add<f32> for D {
 /// The scalar the projection is written over: `f32` for values, [`D`] for
 /// values and the Jacobian.
 pub(crate) trait S:
-    Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Neg<Output = Self>
-    + Mul<f32, Output = Self> + Add<f32, Output = Self>
+    Copy
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + Neg<Output = Self>
+    + Mul<f32, Output = Self>
+    + Add<f32, Output = Self>
 {
     fn c(v: f32) -> Self;
     fn var(v: f32, i: usize) -> Self;
@@ -371,7 +377,11 @@ fn screen<T: S>(model: &Model, id: usize, view: &CameraView) -> Option<([T; 6], 
     if uv + ext_x < 0.0 || vv + ext_y < 0.0 || uv - ext_x > w - 1.0 || vv - ext_y > h - 1.0 {
         return None;
     }
-    Some(([u, v, conic[0], conic[1], conic[2], opacity], depth, [ext_x, ext_y]))
+    Some((
+        [u, v, conic[0], conic[1], conic[2], opacity],
+        depth,
+        [ext_x, ext_y],
+    ))
 }
 
 /// Project gaussian `id` (values only), or `None` if it is culled.
@@ -405,7 +415,9 @@ pub fn project_one(model: &Model, id: usize, view: &CameraView) -> Option<Proj> 
     Some(Proj {
         id: id as u32,
         depth,
-        s: [sc[0], sc[1], sc[2], sc[3], sc[4], sc[5], rgb[0], rgb[1], rgb[2]],
+        s: [
+            sc[0], sc[1], sc[2], sc[3], sc[4], sc[5], rgb[0], rgb[1], rgb[2],
+        ],
         basis,
         clamped,
         ext,
@@ -426,24 +438,30 @@ pub fn project_all(model: &Model, view: &CameraView) -> Vec<Proj> {
         .into_par_iter()
         .filter_map(|i| project_one(model, i, view))
         .collect();
-    out.par_sort_unstable_by(|a, b| {
-        a.depth
-            .total_cmp(&b.depth)
-            .then(a.id.cmp(&b.id))
-    });
+    out.par_sort_unstable_by(|a, b| a.depth.total_cmp(&b.depth).then(a.id.cmp(&b.id)));
     out
 }
 
 /// `J^T g` for `g = dL / d(u, v, A, B, C, opacity)` of gaussian `id`: the
 /// gradient of its 11 geometry parameters, by a hand-written reverse pass
 /// (what [`jacobian`] gives, at a fraction of the cost); `None` if culled.
-pub fn screen_vjp(model: &Model, id: usize, view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
+pub fn screen_vjp(
+    model: &Model,
+    id: usize,
+    view: &CameraView,
+    gs: &[f32; 6],
+) -> Option<[f32; NGEO]> {
     screen_vjp_geo(&model.geo[id], view, model.blur, gs)
 }
 
 /// [`screen_vjp`] of the geometry parameters `g` themselves, with the
 /// screen-space blur `blur` (px², [`Model::blur`]).
-pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, blur: f32, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
+pub fn screen_vjp_geo(
+    g: &[f32; NGEO],
+    view: &CameraView,
+    blur: f32,
+    gs: &[f32; 6],
+) -> Option<[f32; NGEO]> {
     // Forward, keeping what the reverse pass needs; the culls are
     // `screen`'s, which the caller already passed.
     let cam = &view.camera;
@@ -452,7 +470,8 @@ pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, blur: f32, gs: &[f32; 
     let r = view.rotation;
     let t = view.translation;
     let o = 1.0 / (1.0 + (-g[10]).exp());
-    let p: [f32; 3] = std::array::from_fn(|i| r[(i, 0)] * g[0] + r[(i, 1)] * g[1] + r[(i, 2)] * g[2] + t[i]);
+    let p: [f32; 3] =
+        std::array::from_fn(|i| r[(i, 0)] * g[0] + r[(i, 1)] * g[1] + r[(i, 2)] * g[2] + t[i]);
     let qr = [g[6], g[7], g[8], g[9]];
     let n2 = qr.iter().map(|x| x * x).sum::<f32>();
     if n2.is_nan() || n2 <= f32::EPSILON * f32::EPSILON || p[2] <= 0.1 {
@@ -461,13 +480,26 @@ pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, blur: f32, gs: &[f32; 
     let n = n2.sqrt();
     let (qw, qx, qy, qz) = (qr[0] / n, qr[1] / n, qr[2] / n, qr[3] / n);
     let rg = [
-        [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qw * qz), 2.0 * (qx * qz + qw * qy)],
-        [2.0 * (qx * qy + qw * qz), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qw * qx)],
-        [2.0 * (qx * qz - qw * qy), 2.0 * (qy * qz + qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)],
+        [
+            1.0 - 2.0 * (qy * qy + qz * qz),
+            2.0 * (qx * qy - qw * qz),
+            2.0 * (qx * qz + qw * qy),
+        ],
+        [
+            2.0 * (qx * qy + qw * qz),
+            1.0 - 2.0 * (qx * qx + qz * qz),
+            2.0 * (qy * qz - qw * qx),
+        ],
+        [
+            2.0 * (qx * qz - qw * qy),
+            2.0 * (qy * qz + qw * qx),
+            1.0 - 2.0 * (qx * qx + qy * qy),
+        ],
     ];
     let s2 = [(2.0 * g[3]).exp(), (2.0 * g[4]).exp(), (2.0 * g[5]).exp()];
-    let m: [[f32; 3]; 3] =
-        std::array::from_fn(|i| std::array::from_fn(|k| rg[0][k] * r[(i, 0)] + rg[1][k] * r[(i, 1)] + rg[2][k] * r[(i, 2)]));
+    let m: [[f32; 3]; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|k| rg[0][k] * r[(i, 0)] + rg[1][k] * r[(i, 1)] + rg[2][k] * r[(i, 2)])
+    });
     let z = p[2];
     let iz = 1.0 / z;
     let iz2 = iz * iz;
@@ -552,17 +584,28 @@ pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, blur: f32, gs: &[f32; 
         out[j] = r[(0, j)] * gp[0] + r[(1, j)] * gp[1] + r[(2, j)] * gp[2];
     }
     // Rotation: gRg = R^T gM, then through the normalised quaternion.
-    let grg: [[f32; 3]; 3] =
-        std::array::from_fn(|l| std::array::from_fn(|k| r[(0, l)] * gm[0][k] + r[(1, l)] * gm[1][k] + r[(2, l)] * gm[2][k]));
+    let grg: [[f32; 3]; 3] = std::array::from_fn(|l| {
+        std::array::from_fn(|k| r[(0, l)] * gm[0][k] + r[(1, l)] * gm[1][k] + r[(2, l)] * gm[2][k])
+    });
     let gq = [
-        2.0 * (-qz * grg[0][1] + qy * grg[0][2] + qz * grg[1][0] - qx * grg[1][2] - qy * grg[2][0] + qx * grg[2][1]),
-        2.0 * (qy * grg[0][1] + qz * grg[0][2] + qy * grg[1][0] - 2.0 * qx * grg[1][1] - qw * grg[1][2] + qz * grg[2][0]
+        2.0 * (-qz * grg[0][1] + qy * grg[0][2] + qz * grg[1][0] - qx * grg[1][2] - qy * grg[2][0]
+            + qx * grg[2][1]),
+        2.0 * (qy * grg[0][1] + qz * grg[0][2] + qy * grg[1][0]
+            - 2.0 * qx * grg[1][1]
+            - qw * grg[1][2]
+            + qz * grg[2][0]
             + qw * grg[2][1]
             - 2.0 * qx * grg[2][2]),
-        2.0 * (-2.0 * qy * grg[0][0] + qx * grg[0][1] + qw * grg[0][2] + qx * grg[1][0] + qz * grg[1][2] - qw * grg[2][0]
+        2.0 * (-2.0 * qy * grg[0][0]
+            + qx * grg[0][1]
+            + qw * grg[0][2]
+            + qx * grg[1][0]
+            + qz * grg[1][2]
+            - qw * grg[2][0]
             + qz * grg[2][1]
             - 2.0 * qy * grg[2][2]),
-        2.0 * (-2.0 * qz * grg[0][0] - qw * grg[0][1] + qx * grg[0][2] + qw * grg[1][0] - 2.0 * qz * grg[1][1]
+        2.0 * (-2.0 * qz * grg[0][0] - qw * grg[0][1] + qx * grg[0][2] + qw * grg[1][0]
+            - 2.0 * qz * grg[1][1]
             + qy * grg[1][2]
             + qx * grg[2][0]
             + qy * grg[2][1]),

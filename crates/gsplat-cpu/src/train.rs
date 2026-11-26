@@ -70,7 +70,14 @@ impl TrainView {
             cy: c.cy / f as f32,
             ..c
         };
-        (CameraView { camera: cam, ..self.view }, gt, pack_rgba8(&rgb, None))
+        (
+            CameraView {
+                camera: cam,
+                ..self.view
+            },
+            gt,
+            pack_rgba8(&rgb, None),
+        )
     }
 
     /// The pixels `(2 i + ox, 2 j + oy)` as an image of their own, and a
@@ -84,7 +91,8 @@ impl TrainView {
         for j in 0..h2 {
             for i in 0..w2 {
                 let src = (2 * j + oy) * w + 2 * i + ox;
-                gt[(j * w2 + i) * 3..(j * w2 + i) * 3 + 3].copy_from_slice(&self.gt[src * 3..src * 3 + 3]);
+                gt[(j * w2 + i) * 3..(j * w2 + i) * 3 + 3]
+                    .copy_from_slice(&self.gt[src * 3..src * 3 + 3]);
                 packed[j * w2 + i] = self.gt_packed[src];
             }
         }
@@ -98,7 +106,14 @@ impl TrainView {
             cy: 0.5 * c.cy - 0.5 * oy as f32 + 0.25,
             ..c
         };
-        (CameraView { camera: cam, ..self.view }, gt, packed)
+        (
+            CameraView {
+                camera: cam,
+                ..self.view
+            },
+            gt,
+            packed,
+        )
     }
 
     pub fn new(view: CameraView, rgb: &[[f32; 3]]) -> Self {
@@ -110,8 +125,11 @@ impl TrainView {
             for x in 0..hw {
                 for ch in 0..3 {
                     let s = |xx: usize, yy: usize| gt[(yy * w + xx) * 3 + ch];
-                    half_gt[(y * hw + x) * 3 + ch] =
-                        0.25 * (s(2 * x, 2 * y) + s(2 * x + 1, 2 * y) + s(2 * x, 2 * y + 1) + s(2 * x + 1, 2 * y + 1));
+                    half_gt[(y * hw + x) * 3 + ch] = 0.25
+                        * (s(2 * x, 2 * y)
+                            + s(2 * x + 1, 2 * y)
+                            + s(2 * x, 2 * y + 1)
+                            + s(2 * x + 1, 2 * y + 1));
                 }
             }
         }
@@ -129,7 +147,10 @@ impl TrainView {
             view,
             gt,
             gt_packed: pack_rgba8(rgb, None),
-            half_view: CameraView { camera: half_cam, ..view },
+            half_view: CameraView {
+                camera: half_cam,
+                ..view
+            },
             half_gt,
         }
     }
@@ -146,7 +167,11 @@ pub fn render(model: &Model, view: &CameraView, bg: [f32; 3]) -> Rendered {
     let proj = project_all(model, view);
     let frame = Frame::new(&proj, view.camera.width, view.camera.height, bg);
     let raster = forward(&frame);
-    Rendered { proj, frame, raster }
+    Rendered {
+        proj,
+        frame,
+        raster,
+    }
 }
 
 /// Which loss the image term is.
@@ -205,9 +230,15 @@ impl Accum {
     }
     /// Multiply every sum by `decay` (0 clears them).
     fn decay(&mut self, decay: f32) {
-        self.h.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
-        self.g.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
-        self.hcol.par_iter_mut().for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.h
+            .par_iter_mut()
+            .for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.g
+            .par_iter_mut()
+            .for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
+        self.hcol
+            .par_iter_mut()
+            .for_each(|x| x.iter_mut().for_each(|v| *v *= decay));
         self.gcol.par_iter_mut().for_each(|v| *v *= decay);
     }
 }
@@ -249,7 +280,15 @@ fn ftz(x: f32) -> f32 {
 /// bias corrections and learning rates of the current step and `eps`
 /// dropped (they change little over the skipped steps).
 #[inline(always)]
-fn catch_up(p: &mut [f32], m: &mut [f32], v: &mut [f32], lr: impl Fn(usize) -> f32, d: i32, bc1: f32, bc2: f32) {
+fn catch_up(
+    p: &mut [f32],
+    m: &mut [f32],
+    v: &mut [f32],
+    lr: impl Fn(usize) -> f32,
+    d: i32,
+    bc1: f32,
+    bc2: f32,
+) {
     if d <= 0 {
         return;
     }
@@ -378,9 +417,19 @@ pub struct Trainer {
 impl Trainer {
     pub fn new(model: Model, views: Vec<TrainView>, bg: [f32; 3]) -> Self {
         let centres: Vec<_> = views.iter().map(|v| v.view.camera_center()).collect();
-        let mean = centres.iter().fold(nalgebra::Vector3::zeros(), |a, c| a + c) / centres.len() as f32;
-        let extent = 1.1 * centres.iter().map(|c| (c - mean).norm()).fold(0.0f32, f32::max);
-        let dirs: Vec<_> = views.iter().map(|v| v.view.rotation.row(2).transpose()).collect();
+        let mean = centres
+            .iter()
+            .fold(nalgebra::Vector3::zeros(), |a, c| a + c)
+            / centres.len() as f32;
+        let extent = 1.1
+            * centres
+                .iter()
+                .map(|c| (c - mean).norm())
+                .fold(0.0f32, f32::max);
+        let dirs: Vec<_> = views
+            .iter()
+            .map(|v| v.view.rotation.row(2).transpose())
+            .collect();
         let neighbours = (0..views.len())
             .map(|i| {
                 let mut d: Vec<(f32, usize)> = (0..views.len())
@@ -460,7 +509,15 @@ impl Trainer {
         self.timing[1] += (t2 - t1).as_secs_f64();
         self.timing[2] += (t3 - t2).as_secs_f64();
         self.timing[3] += (t4 - t3).as_secs_f64();
-        (loss, Rendered { proj, frame, raster }, out)
+        (
+            loss,
+            Rendered {
+                proj,
+                frame,
+                raster,
+            },
+            out,
+        )
     }
 
     /// One Adam step on view `vi`.
@@ -496,7 +553,10 @@ impl Trainer {
             self.grad_accum = vec![0.0; n];
             self.grad_count = vec![0.0; n];
         }
-        let (hw, hh) = (0.5 * view.camera.width as f32, 0.5 * view.camera.height as f32);
+        let (hw, hh) = (
+            0.5 * view.camera.width as f32,
+            0.5 * view.camera.height as f32,
+        );
         for (p, o) in r.proj.iter().zip(&out) {
             let (du, dv) = (o[B_GRAD] * hw, o[B_GRAD + 1] * hh);
             self.grad_accum[p.id as usize] += (du * du + dv * dv).sqrt();
@@ -536,7 +596,11 @@ impl Trainer {
         st.lr_rest = lr_rest;
         let t_now = st.t;
         let sparse = self.sparse_adam;
-        let blur = if self.stride == 2 { 0.2 } else { self.model.blur };
+        let blur = if self.stride == 2 {
+            0.2
+        } else {
+            self.model.blur
+        };
         let view = &view;
         // One pass per gaussian: its gradient (zero if it was not
         // projected) and the dense Adam update, without per-step gradient
@@ -546,10 +610,11 @@ impl Trainer {
             .par_iter_mut()
             .zip(st.m_geo.par_iter_mut().zip(st.v_geo.par_iter_mut()))
             .zip(
-                self.model
-                    .col
-                    .par_chunks_mut(NCOL)
-                    .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL))),
+                self.model.col.par_chunks_mut(NCOL).zip(
+                    st.m_col
+                        .par_chunks_mut(NCOL)
+                        .zip(st.v_col.par_chunks_mut(NCOL)),
+                ),
             )
             .zip(idx.par_iter().zip(st.last.par_iter_mut()))
             .for_each(|(((p, (m, v)), (pc, (mc, vc))), (&c, last))| {
@@ -559,7 +624,15 @@ impl Trainer {
                     }
                     let d = t_now - 1 - *last;
                     catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
-                    catch_up(pc, mc, vc, |i| if i % NSH == 0 { lr_dc } else { lr_rest }, d, bc1, bc2);
+                    catch_up(
+                        pc,
+                        mc,
+                        vc,
+                        |i| if i % NSH == 0 { lr_dc } else { lr_rest },
+                        d,
+                        bc1,
+                        bc2,
+                    );
                     *last = t_now;
                 }
                 let mut g = [0.0f32; NGEO];
@@ -617,16 +690,25 @@ impl Trainer {
             .par_iter_mut()
             .zip(st.m_geo.par_iter_mut().zip(st.v_geo.par_iter_mut()))
             .zip(
-                self.model
-                    .col
-                    .par_chunks_mut(NCOL)
-                    .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL))),
+                self.model.col.par_chunks_mut(NCOL).zip(
+                    st.m_col
+                        .par_chunks_mut(NCOL)
+                        .zip(st.v_col.par_chunks_mut(NCOL)),
+                ),
             )
             .zip(st.last.par_iter_mut())
             .for_each(|(((p, (m, v)), (pc, (mc, vc))), last)| {
                 let d = t - *last;
                 catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
-                catch_up(pc, mc, vc, |i| if i % NSH == 0 { lr_dc } else { lr_rest }, d, bc1, bc2);
+                catch_up(
+                    pc,
+                    mc,
+                    vc,
+                    |i| if i % NSH == 0 { lr_dc } else { lr_rest },
+                    d,
+                    bc1,
+                    bc2,
+                );
                 *last = t;
             });
     }
@@ -635,7 +717,14 @@ impl Trainer {
     /// same rule `gsplat_train` runs): clone / split / prune with `grow`,
     /// and cap every opacity at 0.01 with `reset`. Adam moments are kept for
     /// kept gaussians and zeroed for new ones; the statistics restart.
-    pub fn densify(&mut self, cfg: &DensifyConfig, grow: bool, reset: bool, step: usize, seed: u64) -> Option<DensifyReport> {
+    pub fn densify(
+        &mut self,
+        cfg: &DensifyConfig,
+        grow: bool,
+        reset: bool,
+        step: usize,
+        seed: u64,
+    ) -> Option<DensifyReport> {
         self.sync();
         let n = self.model.len();
         let st = self.adam.take();
@@ -653,9 +742,24 @@ impl Trainer {
         };
         let op = |g: &[[f32; NGEO]]| -> Vec<f32> { g.iter().map(|x| x[10]).collect() };
         let mut pop = Population {
-            transforms: Group { stride: 10, values: tr(&self.model.geo), m1: tr(m_geo), m2: tr(v_geo) },
-            opacity: Group { stride: 1, values: op(&self.model.geo), m1: op(m_geo), m2: op(v_geo) },
-            sh: Group { stride: NCOL, values: self.model.col.clone(), m1: m_col.clone(), m2: v_col.clone() },
+            transforms: Group {
+                stride: 10,
+                values: tr(&self.model.geo),
+                m1: tr(m_geo),
+                m2: tr(v_geo),
+            },
+            opacity: Group {
+                stride: 1,
+                values: op(&self.model.geo),
+                m1: op(m_geo),
+                m2: op(v_geo),
+            },
+            sh: Group {
+                stride: NCOL,
+                values: self.model.col.clone(),
+                m1: m_col.clone(),
+                m2: v_col.clone(),
+            },
         };
         let mut report = None;
         // At the cap gsplat_train neither grows nor prunes (its classify
@@ -667,7 +771,15 @@ impl Trainer {
                 self.grad_count = vec![0.0; n];
             }
             let prune_large = step > cfg.opacity_reset_interval;
-            let (p, rep) = densify::densify(&pop, &self.grad_accum, &self.grad_count, self.extent, cfg, prune_large, seed);
+            let (p, rep) = densify::densify(
+                &pop,
+                &self.grad_accum,
+                &self.grad_count,
+                self.extent,
+                cfg,
+                prune_large,
+                seed,
+            );
             pop = p;
             report = Some(rep);
         }
@@ -679,7 +791,9 @@ impl Trainer {
             (0..n2)
                 .map(|i| {
                     let r = &t[i * 10..i * 10 + 10];
-                    [r[0], r[1], r[2], r[7], r[8], r[9], r[3], r[4], r[5], r[6], o[i]]
+                    [
+                        r[0], r[1], r[2], r[7], r[8], r[9], r[3], r[4], r[5], r[6], o[i],
+                    ]
                 })
                 .collect()
         };
@@ -702,7 +816,14 @@ impl Trainer {
     }
 
     /// Add one view's gradients and Gauss-Newton matrices into `acc`.
-    fn lift(acc: &mut Accum, model: &Model, view: &CameraView, r: &Rendered, out: &[[f32; NB]], n: usize) {
+    fn lift(
+        acc: &mut Accum,
+        model: &Model,
+        view: &CameraView,
+        r: &Rendered,
+        out: &[[f32; NB]],
+        n: usize,
+    ) {
         let mut idx = vec![u32::MAX; n];
         for (c, p) in r.proj.iter().enumerate() {
             idx[p.id as usize] = c as u32;
@@ -787,10 +908,18 @@ impl Trainer {
         }
         acc.decay(cfg.decay);
         let mut primary_loss = 0.0;
-        let nb: Vec<usize> = self.neighbours[vi].iter().take(cfg.neighbours).copied().collect();
+        let nb: Vec<usize> = self.neighbours[vi]
+            .iter()
+            .take(cfg.neighbours)
+            .copied()
+            .collect();
         for (k, v) in std::iter::once(vi).chain(nb).enumerate() {
             let (view, gt, w) = if k == 0 {
-                (self.views[v].view, std::mem::take(&mut self.views[v].gt), 1.0)
+                (
+                    self.views[v].view,
+                    std::mem::take(&mut self.views[v].gt),
+                    1.0,
+                )
             } else {
                 (
                     self.views[v].half_view,
@@ -861,7 +990,13 @@ impl Trainer {
 
 /// Damped Newton step of one gaussian's geometry, scaled down to the trust
 /// limits, applied in place.
-fn solve_geometry(p: &mut [f32; NGEO], h: &[f32; NTRI], g: &[f32; NGEO], lambda: f64, cfg: &NewtonConfig) {
+fn solve_geometry(
+    p: &mut [f32; NGEO],
+    h: &[f32; NTRI],
+    g: &[f32; NGEO],
+    lambda: f64,
+    cfg: &NewtonConfig,
+) {
     let mut a = [[0.0f64; NGEO]; NGEO];
     let mut maxd = 0.0f64;
     for i in 0..NGEO {
@@ -932,7 +1067,9 @@ fn solve_geometry(p: &mut [f32; NGEO], h: &[f32; NTRI], g: &[f32; NGEO], lambda:
     // Trust limits: shrink the whole step to fit the tightest.
     let scale_max = p[3].max(p[4]).max(p[5]).exp() as f64;
     let dm = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
-    let qn = ((p[6] * p[6] + p[7] * p[7] + p[8] * p[8] + p[9] * p[9]) as f64).sqrt().max(1e-12);
+    let qn = ((p[6] * p[6] + p[7] * p[7] + p[8] * p[8] + p[9] * p[9]) as f64)
+        .sqrt()
+        .max(1e-12);
     let dq = (x[6] * x[6] + x[7] * x[7] + x[8] * x[8] + x[9] * x[9]).sqrt() / qn;
     let dls = x[3].abs().max(x[4].abs()).max(x[5].abs());
     let mut s = 1.0f64;
@@ -969,7 +1106,13 @@ pub fn view_gauss_newton(
     view: &CameraView,
     gt: &[f32],
     bg: [f32; 3],
-) -> (f64, Vec<[f32; NTRI]>, Vec<[f32; NGEO]>, Vec<[f32; NSH]>, Vec<f32>) {
+) -> (
+    f64,
+    Vec<[f32; NTRI]>,
+    Vec<[f32; NGEO]>,
+    Vec<[f32; NSH]>,
+    Vec<f32>,
+) {
     let n = model.len();
     let r = render(model, view, bg);
     let (loss, d) = image_loss(&r.raster.image, gt, Loss::L2);
