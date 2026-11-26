@@ -171,6 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         b
     });
+    // --no-densify: no refine (and so no mean noise) either, as gsplat_train.
+    let keep_refine = densify_cfg.is_some();
     if brush {
         densify_cfg = None;
         let sh = adam.sh_interval;
@@ -179,7 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..AdamConfig::brush_preset()
         };
         (tr.opac_loss_weight, tr.scale_loss_weight) = aux_weights.unwrap_or((1e-9, 1e-8));
-        tr.brush = brush_cfg.clone();
+        if keep_refine {
+            tr.brush = brush_cfg.clone();
+        }
     }
     tr.stride = stride;
     tr.ssim_weight = if loss == Loss::L1 { ssim_weight } else { 0.0 };
