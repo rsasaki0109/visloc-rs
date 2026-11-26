@@ -503,14 +503,6 @@ fn tile_backward<const GN: bool, const NA: usize>(
     for (lx, x) in xs.iter_mut().enumerate() {
         *x = (x0 as usize + lx) as f32 + 0.5;
     }
-    // Per 8-lane half row, the largest `last`: a splat at or past it hits
-    // none of those pixels (and leaves their `t_cur` and `be` alone), so
-    // the half is skipped outright.
-    let mut half_last = [[0u32; 2]; W];
-    for (hl, row) in half_last.iter_mut().zip(&last) {
-        hl[0] = row[..8].iter().copied().max().unwrap_or(0);
-        hl[1] = row[8..].iter().copied().max().unwrap_or(0);
-    }
     let stop = (tile_last as usize).min(end);
     let (img_w, img_h) = (f.img_w as f32, f.img_h as f32);
     let mut j = stop;
@@ -606,10 +598,10 @@ fn tile_backward<const GN: bool, const NA: usize>(
                     }
                 };
             }
-            if k_lo == 0 && ju < half_last[ly][0] {
+            if k_lo == 0 {
                 lanes8!(0);
             }
-            if k_hi == 16 && ju < half_last[ly][1] {
+            if k_hi == 16 {
                 lanes8!(8);
             }
             any |= row_any != 0;

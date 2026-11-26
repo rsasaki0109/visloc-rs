@@ -738,6 +738,9 @@ impl Trainer {
         } else {
             self.model.blur
         };
+        let nsh_active = ((self.model.active_degree + 1) * (self.model.active_degree + 1)) as usize;
+        let mut lr_col = [lr_rest; NSH];
+        lr_col[0] = lr_dc;
         let view = &view;
         // One pass per gaussian: its gradient (zero if it was not
         // projected) and the dense Adam update, without per-step gradient
@@ -762,15 +765,19 @@ impl Trainer {
                     }
                     let d = t_now - 1 - *last;
                     catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
-                    catch_up(
-                        pc,
-                        mc,
-                        vc,
-                        |i| if i % NSH == 0 { lr_dc } else { lr_rest },
-                        d,
-                        bc1,
-                        bc2,
-                    );
+                    // Inactive bands have zero moments: nothing to replay.
+                    for ch in 0..3 {
+                        let r = ch * NSH..ch * NSH + nsh_active;
+                        catch_up(
+                            &mut pc[r.clone()],
+                            &mut mc[r.clone()],
+                            &mut vc[r],
+                            |k| lr_col[k],
+                            d,
+                            bc1,
+                            bc2,
+                        );
+                    }
                 }
                 // Dense steps bring the gaussian up to date too: a stale
                 // `last` made every `sync` (each refine and evaluation)
@@ -809,13 +816,20 @@ impl Trainer {
                     v[k] = ftz(b2 * v[k] + (1.0 - b2) * g[k] * g[k]);
                     p[k] -= lr_geo[k] * (m[k] / bc1) / ((v[k] / bc2).sqrt() + eps);
                 }
+                // Bands past the active degree have a zero basis, so their
+                // gradient, moments and step are all exactly zero.
+                // Branch-free slices, so the loop vectorizes (same IEEE
+                // results as the scalar one).
                 for ch in 0..3 {
-                    for k in 0..NSH {
-                        let i = ch * NSH + k;
-                        let lr = if k == 0 { lr_dc } else { lr_rest };
-                        mc[i] = ftz(b1 * mc[i] + (1.0 - b1) * gc[i]);
-                        vc[i] = ftz(b2 * vc[i] + (1.0 - b2) * gc[i] * gc[i]);
-                        pc[i] -= lr * (mc[i] / bc1) / ((vc[i] / bc2).sqrt() + eps);
+                    let r = ch * NSH..ch * NSH + nsh_active;
+                    for ((p, (m, v)), (&g, &lr)) in pc[r.clone()]
+                        .iter_mut()
+                        .zip(mc[r.clone()].iter_mut().zip(vc[r.clone()].iter_mut()))
+                        .zip(gc[r].iter().zip(&lr_col[..nsh_active]))
+                    {
+                        *m = ftz(b1 * *m + (1.0 - b1) * g);
+                        *v = ftz(b2 * *v + (1.0 - b2) * g * g);
+                        *p -= lr * (*m / bc1) / ((*v / bc2).sqrt() + eps);
                     }
                 }
                 if let Some((scale, max_noise)) = noise {
