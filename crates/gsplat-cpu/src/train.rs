@@ -260,19 +260,6 @@ struct AdamState {
     lr_geo: [f32; NGEO],
     lr_dc: f32,
     lr_rest: f32,
-    /// The latest step's treatment of unprojected gaussians.
-    unseen: Unseen,
-}
-
-/// What a step does to a gaussian it does not project, beyond decaying its
-/// Adam moments: brush's aux-loss gradients (already times the unseen
-/// weight 1e-3) and its mean noise `(scale, clamp)`, keyed by `seed`.
-#[derive(Clone, Copy, Debug, Default)]
-struct Unseen {
-    scale_coef: f32,
-    opac_coef: f32,
-    noise: Option<(f32, f32)>,
-    seed: u64,
 }
 
 const B1: f32 = 0.9;
@@ -365,88 +352,6 @@ fn catch_up(
         }
         m[i] = ftz(m[i] * f1);
         v[i] = ftz(v[i] * f2);
-    }
-}
-
-/// [`catch_up`] for the 11 geometry parameters, with the constant
-/// gradients brush's aux losses give an unprojected gaussian (log-scales
-/// `scale_coef * exp(s)`, opacity logit `opac_coef`, frozen at entry) and
-/// `d` steps of its mean noise summed into one draw (`sqrt(d)` times the
-/// per-step scale). While the old second moment still dominates (`b2^d v`
-/// over 100 `g^2`) the aux part is closed-form too:
-/// `p -= lr sqrt(bc2) / bc1 (S_r m + (S_q - S_r) g) / sqrt(v)` with
-/// `S_x = sum_{k=1..d} x^k`, `r = b1 / sqrt(b2)`, `q = 1 / sqrt(b2)`;
-/// otherwise (a gaussian with no real gradient yet) it steps exactly.
-#[allow(clippy::too_many_arguments)]
-fn catch_up_geo(
-    p: &mut [f32; NGEO],
-    m: &mut [f32; NGEO],
-    v: &mut [f32; NGEO],
-    lr: &[f32; NGEO],
-    d: i32,
-    bc1: f32,
-    bc2: f32,
-    u: &Unseen,
-    gi: usize,
-) {
-    if d <= 0 {
-        return;
-    }
-    let mut g = [0.0f32; NGEO];
-    if u.scale_coef > 0.0 {
-        for k in 3..6 {
-            g[k] = u.scale_coef * p[k].exp();
-        }
-    }
-    if u.opac_coef > 0.0 {
-        g[10] = u.opac_coef;
-    }
-    let kbc = bc2.sqrt() / bc1;
-    let r = B1 / B2.sqrt();
-    let q = 1.0 / B2.sqrt();
-    let s_r = r * (1.0 - r.powi(d)) / (1.0 - r);
-    let s_q = q * (q.powi(d) - 1.0) / (q - 1.0);
-    let (f1, f2) = (B1.powi(d), B2.powi(d));
-    for i in 0..NGEO {
-        let gi_ = g[i];
-        if gi_ == 0.0 {
-            if v[i] > 0.0 {
-                p[i] -= lr[i] * kbc * s_r * m[i] / v[i].sqrt();
-            }
-            m[i] = ftz(m[i] * f1);
-            v[i] = ftz(v[i] * f2);
-        } else if v[i] > 0.0 && f2 * v[i] > 100.0 * gi_ * gi_ {
-            p[i] -= lr[i] * kbc * (s_r * m[i] + (s_q - s_r) * gi_) / v[i].sqrt();
-            m[i] = ftz(f1 * m[i] + (1.0 - f1) * gi_);
-            v[i] = ftz(f2 * v[i] + (1.0 - f2) * gi_ * gi_);
-        } else {
-            for _ in 0..d {
-                let gi_ = if (3..6).contains(&i) {
-                    u.scale_coef * p[i].exp()
-                } else {
-                    gi_
-                };
-                m[i] = ftz(B1 * m[i] + (1.0 - B1) * gi_);
-                v[i] = ftz(B2 * v[i] + (1.0 - B2) * gi_ * gi_);
-                p[i] -= lr[i] * (m[i] / bc1) / ((v[i] / bc2).sqrt() + 1e-15);
-            }
-        }
-    }
-    if let Some((scale, max_noise)) = u.noise {
-        let a = 1.0 / (1.0 + (-p[10]).exp());
-        let sd = (d as f32).sqrt();
-        let w = (1.0 - a).powi(100).clamp(0.0, 1.0) * scale * sd;
-        if w > 0.0 {
-            let z = normals3(u.seed ^ (gi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-            let s3 = [p[3].exp(), p[4].exp(), p[5].exp()];
-            let dir = rotate(
-                [p[6], p[7], p[8], p[9]],
-                [z[0] * s3[0], z[1] * s3[1], z[2] * s3[2]],
-            );
-            for k in 0..3 {
-                p[k] += (dir[k] * w).clamp(-max_noise * sd, max_noise * sd);
-            }
-        }
     }
 }
 
@@ -788,7 +693,6 @@ impl Trainer {
             lr_geo: [0.0; NGEO],
             lr_dc: 0.0,
             lr_rest: 0.0,
-            unseen: Unseen::default(),
         });
         st.t += 1;
         let (b1, b2, eps) = (B1, B2, 1e-15f32);
@@ -812,9 +716,7 @@ impl Trainer {
         st.lr_rest = lr_rest;
         let t_now = st.t;
         // brush's aux losses reach every gaussian, so its Adam is dense.
-        // brush's aux losses and mean noise reach unprojected gaussians too;
-        // the deferred catch-up (`catch_up_geo`) folds them in.
-        let sparse = self.sparse_adam;
+        let sparse = self.sparse_adam && !brush;
         let aux_w = (self.aux_loss_time - frac).clamp(0.0, 1.0);
         let (scale_coef, opac_coef) = if brush {
             (
@@ -831,13 +733,6 @@ impl Trainer {
             .map(|b| (lr_mean * b.mean_noise_weight, 0.25 * self.bound_size));
         self.rng = splitmix(self.rng);
         let seed = self.rng;
-        let unseen = Unseen {
-            scale_coef: 1e-3 * scale_coef,
-            opac_coef: 1e-3 * opac_coef,
-            noise,
-            seed: splitmix(seed ^ 0x5DEE_CE66_D1CE_4E5B),
-        };
-        st.unseen = unseen;
         let blur = if self.stride == 2 {
             0.2
         } else {
@@ -866,7 +761,7 @@ impl Trainer {
                         return;
                     }
                     let d = t_now - 1 - *last;
-                    catch_up_geo(p, m, v, &lr_geo, d, bc1, bc2, &unseen, gi);
+                    catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
                     catch_up(
                         pc,
                         mc,
@@ -953,7 +848,7 @@ impl Trainer {
         let t = st.t;
         let bc1 = 1.0 - B1.powi(t);
         let bc2 = 1.0 - B2.powi(t);
-        let (lr_geo, lr_dc, lr_rest, unseen) = (st.lr_geo, st.lr_dc, st.lr_rest, st.unseen);
+        let (lr_geo, lr_dc, lr_rest) = (st.lr_geo, st.lr_dc, st.lr_rest);
         self.model
             .geo
             .par_iter_mut()
@@ -966,10 +861,9 @@ impl Trainer {
                 ),
             )
             .zip(st.last.par_iter_mut())
-            .enumerate()
-            .for_each(|(gi, (((p, (m, v)), (pc, (mc, vc))), last))| {
+            .for_each(|(((p, (m, v)), (pc, (mc, vc))), last)| {
                 let d = t - *last;
-                catch_up_geo(p, m, v, &lr_geo, d, bc1, bc2, &unseen, gi);
+                catch_up(p, m, v, |k| lr_geo[k], d, bc1, bc2);
                 catch_up(
                     pc,
                     mc,
@@ -1567,79 +1461,4 @@ pub fn view_gauss_newton(
 pub fn tri(i: usize, j: usize) -> usize {
     let (i, j) = if i <= j { (i, j) } else { (j, i) };
     tri11(i, j)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `d` plain Adam steps with brush's unseen aux gradients, as the dense
-    /// path takes them (bias corrections frozen, as the catch-up assumes).
-    #[allow(clippy::too_many_arguments)]
-    fn stepped(
-        p: &mut [f32; NGEO],
-        m: &mut [f32; NGEO],
-        v: &mut [f32; NGEO],
-        lr: &[f32; NGEO],
-        d: i32,
-        bc1: f32,
-        bc2: f32,
-        u: &Unseen,
-    ) {
-        for _ in 0..d {
-            for i in 0..NGEO {
-                let g = match i {
-                    3..=5 => u.scale_coef * p[i].exp(),
-                    10 => u.opac_coef,
-                    _ => 0.0,
-                };
-                m[i] = B1 * m[i] + (1.0 - B1) * g;
-                v[i] = B2 * v[i] + (1.0 - B2) * g * g;
-                p[i] -= lr[i] * (m[i] / bc1) / ((v[i] / bc2).sqrt() + 1e-15);
-            }
-        }
-    }
-
-    #[test]
-    fn catch_up_geo_matches_stepping() {
-        let lr = [
-            1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-2,
-        ];
-        let (bc1, bc2) = (1.0 - B1.powi(3000), 1.0 - B2.powi(3000));
-        let u = Unseen {
-            scale_coef: 1e-3 * 1e-8 / 2.0,
-            opac_coef: 1e-3 * 1e-9,
-            noise: None,
-            seed: 0,
-        };
-        // A gaussian with real-gradient history, and a fresh one (v = 0).
-        for (m0, v0) in [(3e-6f32, 4e-11f32), (0.0, 0.0)] {
-            for d in [1, 7, 60, 400] {
-                let p0 = [0.1, 0.2, 0.3, -3.0, -4.0, -5.0, 1.0, 0.0, 0.0, 0.0, -1.0];
-                let (mut pa, mut ma, mut va) = (p0, [m0; NGEO], [v0; NGEO]);
-                let (mut pb, mut mb, mut vb) = (p0, [m0; NGEO], [v0; NGEO]);
-                catch_up_geo(&mut pa, &mut ma, &mut va, &lr, d, bc1, bc2, &u, 0);
-                stepped(&mut pb, &mut mb, &mut vb, &lr, d, bc1, bc2, &u);
-                for i in 0..NGEO {
-                    let moved = (pb[i] - p0[i]).abs().max(1e-9);
-                    assert!(
-                        (pa[i] - pb[i]).abs() <= 1e-3 * moved + 1e-6 * lr[i],
-                        "m0 {m0} d {d} param {i}: {} vs {} (from {})",
-                        pa[i],
-                        pb[i],
-                        p0[i]
-                    );
-                    // The log-scale aux gradient moves with exp(s), frozen in the catch-up.
-                    let tol = if (3..6).contains(&i) { 0.05 } else { 1e-3 };
-                    assert!(
-                        (ma[i] - mb[i]).abs() <= tol * mb[i].abs() + 1e-30,
-                        "m d {d} i {i}: {} vs {}",
-                        ma[i],
-                        mb[i]
-                    );
-                    assert!((va[i] - vb[i]).abs() <= 1e-3 * vb[i].abs() + 1e-38);
-                }
-            }
-        }
-    }
 }
