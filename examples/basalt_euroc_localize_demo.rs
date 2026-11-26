@@ -109,6 +109,8 @@
 //! it had too few inliers: with `--vio` / `--odometry` it can still be a
 //! weak fix. Inliers bunched on one patch (the rest of the view hidden by
 //! people) give poorly conditioned poses (docs/dynamic_obstacle_localization.md).
+//! `--min-inlier-ratio R` does the same below an inlier ratio (inliers over
+//! correspondences) of R.
 //!
 //! Outputs, under `--out-dir`:
 //!
@@ -286,6 +288,9 @@ struct Args {
     /// Turn down a localization whose inliers sit in fewer than this many
     /// cells of the `--diag-grid` grid to a weak one (0: off).
     min_inlier_cells: u32,
+    /// Turn down a localization with a lower inlier ratio (inliers over
+    /// correspondences) to a weak one (0: off).
+    min_inlier_ratio: f64,
 }
 
 impl Args {
@@ -306,7 +311,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R]"
             .into()
     }
 
@@ -372,6 +377,7 @@ impl Args {
             diag_grid: 4,
             eval_mask_dir: None,
             min_inlier_cells: 0,
+            min_inlier_ratio: 0.0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -505,6 +511,7 @@ impl Args {
                 "--diag-grid" => args.diag_grid = number(&option, value()?)?,
                 "--eval-mask-dir" => args.eval_mask_dir = Some(PathBuf::from(value()?)),
                 "--min-inlier-cells" => args.min_inlier_cells = number(&option, value()?)?,
+                "--min-inlier-ratio" => args.min_inlier_ratio = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -611,6 +618,7 @@ fn pipeline(args: &Args) -> Pipeline {
         ransac_iterations: args.ransac_iterations,
         reprojection_threshold: args.reprojection_px,
         min_inliers: args.min_inliers,
+        min_inlier_ratio: args.min_inlier_ratio,
         ..LocalizationConfig::default()
     };
     let ransac = PnPRansac {
