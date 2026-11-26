@@ -380,6 +380,49 @@ first fixes (`--init-min-inliers`), which does not transfer to Bonn as an
 absolute number. A threshold relative to the map's own fixes is the next
 thing to try, not more agreement.
 
+## Starting from the strongest fixes after a warm-up
+
+`OdomCorrectionConfig::init_warmup_s` (`--init-warmup-s S`; off by
+default): the correction waits S seconds, then seeds itself with the fix
+that has the most inliers among the fixes of the last 10 s (the next
+strongest if too few agree with it) and starts once `init_fixes` agree
+with the seed. Relative to the fixes the map actually gives, not an
+absolute count, and a still camera starts too. With it off, the outputs
+are unchanged (checked on walking_xyz).
+
+Map pose RMSE (max), median of three seeds; frames with a map pose. Bonn
+counts fixes as wrong from 15 cm, and its ground truth carries about 5 cm
+of calibration error.
+
+| Setting | TUM sitting_static | TUM walking_static | TUM walking_xyz | TUM walking_halfsphere | TUM walking_rpy |
+| --- | --- | --- | --- | --- | --- |
+| none | 1.5 (2.8) cm, 701 | 2.2 (4.0) cm, 737 | 2.0 (5.9) cm, 855 | 3.1 (9.2) cm, 1062 | 10.0 (20.2) cm, 901 |
+| `--init-min-inliers 35 --min-inlier-cells 6` | 1.5 (2.8) cm, 701 | 2.2 (4.1) cm, 737 | 1.7 (3.5) cm, 855 | 2.8 (8.0) cm, 1057 | 3.7 (8.0) cm, 802 |
+| `--init-warmup-s 2` | 1.5 (2.3) cm, 642 | 1.9 (3.1) cm, 678 | 2.5 (11.0) cm, 796 | 2.9 (8.0) cm, 1003 | 3.8 (12.1) cm, 845 |
+| `--init-warmup-s 3` | 1.4 (2.2) cm, 613 | 2.1 (3.3) cm, 648 | 2.0 (5.9) cm, 766 | 2.9 (7.7) cm, 973 | **2.9 (5.4) cm**, 812 |
+| `--init-warmup-s 5` | 1.6 (2.4) cm, 553 | 2.0 (3.1) cm, 589 | 1.8 (5.9) cm, 706 | 2.8 (7.0) cm, 914 | 2.9 (5.4) cm, 687 |
+| `--init-warmup-s 3 --min-inlier-cells 6` | 1.4 (2.2) cm, 613 | 2.1 (3.3) cm, 648 | 1.8 (3.8) cm, 766 | 2.8 (7.8) cm, 973 | 3.5 (6.3) cm, 812 |
+
+| Setting | Bonn person_tracking | Bonn moving_obstructing_box | Bonn removing_obstructing_box |
+| --- | --- | --- | --- |
+| none | 9.5 (15.4) cm, 569 | 5.1 (9.1) cm, 587 | 9.6 (13.6) cm, 959 |
+| `--init-min-inliers 35 --min-inlier-cells 6` | 7.8 (8.5) cm, 54 | none, 0 | 5.1 (5.7) cm, 223 |
+| `--init-warmup-s 3` | **13.6** (17.1) cm, 273 | **11.8** (5.9–15.1) cm, 499 | 6.7 (10.6) cm, 871 |
+| `--init-warmup-s 5` | 13.6 (17.1) cm, 273 | 7.6 (9.5) cm, 237 | 8.0 (10.6) cm, 806 |
+
+- **On TUM it does what the inlier threshold did, without a number to
+  tune:** walking_rpy 10.0 → 2.9 cm (worst 20 → 5.4 cm) with 3 s, the
+  still-camera sequences start (3 s later), the others hold or improve.
+- **On Bonn it does not carry over:** better on removing_obstructing_box,
+  worse on the other two. There the fixes are few and weak (median 4–12
+  inliers per image, most images not localized), and the strongest fix of
+  the first seconds is not reliably right; Bonn's 5 cm ground-truth error
+  also blurs the comparison.
+- So no default changes. With a map that covers the place (TUM-like),
+  `--init-warmup-s 3` is the start rule to use; with sparse, weak fixes
+  (Bonn), none of the start rules measured here is reliably better than
+  the default.
+
 ## Not yet measured
 
 - **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.
