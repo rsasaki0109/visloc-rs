@@ -49,6 +49,13 @@ All notable changes to `visloc-rs` will be documented here.
   sequence_4_3 (test) it removes a 25 m offset the online windows put in the
   first six minutes, and it never fires on the Low light training
   sequences. See `docs/lamaria_mono.md`.
+- `scripts/lamaria_gps_bend.py` bends a LaMAria trajectory's slow heading
+  and scale drift toward its recording's own GPS fixes. It works as a 2D pose
+  graph on nodes every 5 s, with Cauchy pulls toward the fixes, and runs only
+  when the median residual to the fixes is 4 m or more. On the six training
+  monos with injected drift, the bent cases above the gate gain 31.6 CP
+  points on average. No training mono reaches the gate on its own. See
+  `docs/lamaria_mono.md`.
 
 ## 0.5.0 - 2026-11-24
 

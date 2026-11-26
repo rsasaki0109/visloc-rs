@@ -11,9 +11,12 @@ offset that each follow a random walk (--heading-rw degrees and --scale-rw per c
 --cauchy metres. The fixes' frame is fitted first (a robust 2D similarity), so the
 solve starts from the trajectory as it is.
 
-The bend is kept only when it is large against the GPS's own errors (docs/lamaria_gps.md: 2-8 m at the median,
+The bend is kept only when the drift is large against the GPS's own errors (docs/lamaria_gps.md: 2-8 m at the median,
 correlated over about 30 s): when the trajectory's median residual after the similarity is --min-residual metres or
-more and the bend moves some node by --min-move metres or more. Otherwise the trajectory is written as it is. Every
+more (and the bend moves some node by --min-move metres or more). On a trajectory that does not drift the bend only
+adds the GPS's own errors: ungated it costs the training monos 5 to 13 CP points, while their residuals are 1.8 to
+2.9 m; the default 4 m leaves them all as they are and bends every injected drift of 0.5 deg and 0.5 % per minute or
+more that reaches it (docs/lamaria_mono.md). Otherwise the trajectory is written as it is. Every
 pose moves by the bend of its time (interpolated between nodes): x, y by the node's correction, the rotation by its
 heading offset about the vertical. z and the timestamps stay. The output keeps the input's format (nanosecond
 estimates or TUM in seconds). No ground truth is used.
@@ -124,7 +127,7 @@ def main():
     p.add_argument("--scale-rw", type=float, default=1.0, help="per cent per square-root minute")
     p.add_argument("--step-sigma", type=float, default=0.05, help="metres of slack per node step")
     p.add_argument("--cauchy", type=float, default=5.0, help="metres")
-    p.add_argument("--min-residual", type=float, default=0.0,
+    p.add_argument("--min-residual", type=float, default=4.0,
                    help="bend only a trajectory whose median residual to the fixes is this or more (m)")
     p.add_argument("--min-move", type=float, default=0.0, help="keep the bend only if it moves a node this far (m)")
     p.add_argument("--min-fixes", type=int, default=60)
