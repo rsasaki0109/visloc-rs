@@ -45,6 +45,7 @@ p.add_argument('--limit', type=int, default=10 ** 9, help='at most this many fra
 p.add_argument('--back', type=float, default=3.2)
 p.add_argument('--up', type=float, default=2.75)
 p.add_argument('--pitch-deg', type=float, default=16.0)
+p.add_argument('--near', type=float, default=1.5, help='m: the chase camera skips the splat nearer than this')
 p.add_argument('--seed', type=int, default=0, help="gs_sim.py's --seed (the people's looks)")
 p.add_argument('--people-style', dest='people_style', choices=['splat', 'mesh'], default='splat',
                help='splat: the people are gaussians rendered with the scene; mesh: drawn over it')
@@ -93,6 +94,7 @@ if os.path.exists(PEOPLE_CSV):
     road = [tuple(r) for r in road] if isinstance(road, list) else road
     CROWD = Crowd([scene['start']] + scene.get('goals', []), counts[0], _Free(), seed=args.seed,
                   cyclists=counts[1], dog_walkers=counts[2], strollers=counts[3], cars=counts[4], road_offset=road, road_lines=meta.get('road_lines'),
+                  pavement=meta.get('pavement'), walk=meta.get('walk'), narrow=meta.get('narrow'),
                   crossing=bool(meta.get('crossing')))
     DYN = 3000 * counts[0] + 6000 * counts[1] + 4500 * counts[2] + 5500 * counts[3] + 7000 * counts[4]
 
@@ -121,7 +123,10 @@ def gz_raw(x, y):
 
 SPLAT = CROWD is not None and args.people_style == 'splat'
 DYN_ARGS = ['--dynamic', str(DYN)] if SPLAT else []
-srv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', f'PINHOLE {W} {H} {FX} {FX} {W / 2} {H / 2}', '--depth']
+# --near: a sign or a trunk the chase camera passes close by is not drawn (the robot and the
+# people are drawn over the render, or are splats kept 2 m clear of the camera).
+srv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', f'PINHOLE {W} {H} {FX} {FX} {W / 2} {H / 2}', '--depth',
+                        '--near', str(args.near)]
                        + DYN_ARGS, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 fpv = subprocess.Popen([SERVER, '--ply', args.splat, '--camera', CAM['model']] + (['--depth'] if CROWD else [])
                        + DYN_ARGS, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -162,17 +167,18 @@ for t in np.arange(NT[0] + args.skip, NT[-1] + 2.0, STEP):
     zmid, pitch = KERBS.pose(x, y, yaw) if KERBS else (0.0, 0.0)
     z0 = gz_raw(x, y) + zmid                     # the body rests on its wheels, a pair maybe down a kerb
     cam_yaw = yaw if cam_yaw is None else cam_yaw + 0.12 * math.atan2(math.sin(yaw - cam_yaw), math.cos(yaw - cam_yaw))
-    c_w = np.array([x - BACK * math.cos(cam_yaw), y - BACK * math.sin(cam_yaw), gz(x, y) + UP])
     R_wc = cam_axes(cam_yaw, PITCH); R_cw = R_wc.T
     if SPLAT:
         people_at(t)
+    c_w = np.array([x - BACK * math.cos(cam_yaw), y - BACK * math.sin(cam_yaw), gz(x, y) + UP])
+    if SPLAT:
         # the people, except those brushing past the chase camera itself
         clear = np.hypot(CROWD.xy[:, 0] - c_w[0], CROWD.xy[:, 1] - c_w[1]) > 2.0
         buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7, CROWD.splats(c_w, gz, max_m=40.0, only=clear))
     else:
         buf = ask(srv, R_cw, -R_cw @ c_w, W * H * 7)
-    rgb = np.frombuffer(buf[:W * H * 3], np.uint8).reshape(H, W, 3).astype(float)
     depth = np.frombuffer(buf[W * H * 3:], '<f4').reshape(H, W)
+    rgb = np.frombuffer(buf[:W * H * 3], np.uint8).reshape(H, W, 3).astype(float)
     # shadow
     rgb = robot_model.shadow(rgb, project, (x, y, yaw), z0, R_wc, c_w)
     # ground overlays first (the robot stands on them)

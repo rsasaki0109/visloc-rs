@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """A robot simulator whose camera sees a 3D Gaussian splat (docs/navigation.md).
 
+Frozen: the street simulator now lives in Robot Native Engine (example 163; see
+docs/rne_migration.md). This one stays as the ROS 2 / Nav2 reference.
+
     python3 ros2/visloc-ros2/gs/gs_sim.py --scene runs/gs_tum/scene.json [--record run.csv]
 
 The world is what a splat trained on real photos shows. The robot is a
@@ -167,14 +170,22 @@ class Sim(Node):
             if args.road:
                 road_offset = [tuple(r) for r in json.load(open(args.road))]
             road_lines = None
+            walk = None
+            if scene.get('walk'):                 # the line the video was walked: people follow it
+                from people import walk_offsets  # noqa: PLC0415
+                walk = walk_offsets(route, scene['walk'])
+                w = np.abs([v for _, v in walk])
+                self.get_logger().info(f'people: along the walk, {w.max():.1f} m from the route at most')
+            from people import kerb_spans  # noqa: PLC0415
+            narrow = kerb_spans(route, scene.get('kerbs'))      # crossing a street: people keep to the walk
             if args.cars:
                 from make_gs_scene import read_ply  # noqa: PLC0415
                 ply = read_ply(sp(scene['splat']))
                 xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
                 opacity = 1 / (1 + np.exp(-ply['opacity']))
+                rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
             if args.cars and road_offset is None:
                 from people import estimate_road  # noqa: PLC0415
-                rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
                 road_offset = estimate_road(xyz, rgb, opacity, route, self.ground_z)
                 from people import check_road  # noqa: PLC0415
 
@@ -195,13 +206,26 @@ class Sim(Node):
                 for s0, s1, px, py, ux, uy in road_lines:
                     self.get_logger().info(f'cars: road centre line {s0:.0f}-{s1:.0f}: through ({px:.1f}, {py:.1f}), '
                                            f'heading {math.degrees(math.atan2(uy, ux)):.1f} deg')
+            pavement = None
+            if args.cars and not np.isscalar(road_offset):
+                # where the pavement ends on the road side: people keep off the road
+                from people import pavement_edges  # noqa: PLC0415
+                pavement = pavement_edges(xyz, rgb, opacity, route, self.ground_z, road_offset, walk=walk)
+                if pavement:
+                    e = np.array([(v - (np.interp(s_, *np.array(walk).T) if walk else 0.0)) * side
+                                  for s_, v, side in pavement])
+                    self.get_logger().info(f'people: pavement edge on the road side at s {pavement[0][0]:.0f}-'
+                                           f'{pavement[-1][0]:.0f}: {e.min():.2f}-{e.max():.2f} m from the walk '
+                                           f'(median {np.median(e):.2f})')
             self.crowd = Crowd(route, args.pedestrians, self.grid, seed=args.seed, speed=args.pedestrian_speed,
                                cyclists=args.cyclists, cyclist_speed=args.cyclist_speed,
                                dog_walkers=args.dog_walkers, strollers=args.strollers,
                                cars=args.cars, road_offset=road_offset, car_speed=args.car_speed,
-                               road_lines=road_lines,
+                               road_lines=road_lines, pavement=pavement, walk=walk, narrow=narrow,
                                crossing=args.crossing)
-            self.crowd.robot_radius = scene.get("robot_radius", 0.2)
+            # People keep clear of the robot's body as drawn (robot_model.py: 0.87 x 0.70 m), not only
+            # of Nav2's footprint circle, or a bike's wheel runs through it in the video.
+            self.crowd.robot_radius = max(scene.get("robot_radius", 0.2), args.robot_body)
         self.radius = scene.get('robot_radius', 0.2)
         x, y, yaw = scene['start']
         self.pose = [x, y, yaw]          # true pose in the map frame
@@ -234,6 +258,9 @@ class Sim(Node):
             self.people.write('time_s,id,x,y,yaw,phase,kind\n')
             json.dump({'road_offset': getattr(self.crowd, 'road_offset', None),  # number or segments
                        'road_lines': getattr(self.crowd, 'road_lines', None),
+                       'pavement': None if self.crowd.pavement is None else self.crowd.pavement.tolist(),
+                       'walk': None if self.crowd.walk is None else self.crowd.walk.tolist(),
+                       'narrow': self.crowd.narrow,
                        'crossing': args.crossing},
                       open(args.record + '.people.json', 'w'))
 
@@ -405,6 +432,8 @@ def main():
     p.add_argument('--dog-walkers', dest='dog_walkers', type=int, default=0, help='people walking a dog on a lead')
     p.add_argument('--strollers', type=int, default=0, help='people pushing a pushchair')
     p.add_argument('--cars', type=int, default=0, help='cars driving along the road beside the route')
+    p.add_argument('--robot-body', dest='robot_body', type=float, default=0.6,
+                   help="m: the robot's body and a gap, as people keep clear of it (robot_model.py is 0.87 x 0.70 m)")
     p.add_argument('--kerb-speed', dest='kerb_speed', type=float, default=0.12,
                    help="m/s at most while a wheel is on a kerb (the scene's 'kerbs')")
     p.add_argument('--road-offset', dest='road_offset', type=float, default=None,

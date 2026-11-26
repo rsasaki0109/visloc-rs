@@ -6,6 +6,55 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- The wgpu trainer takes a depth prior, as gsplat-cuda's: `gsplat_train
+  --depth-prior DIR --depth-weight W --depth-every N` trains the rendered
+  depth against `DIR/<image stem>.bin` (e.g. a LiDAR scan projected into each
+  view) with a relative L1. On three KITTI street segments posed by LiDAR SLAM
+  (w = 10 chosen on one, every 4th step), the held-out median depth error
+  against the projected scans falls from 6.1 % to 2.3-2.7 % with eval PSNR
+  within -0.03..+0.35 dB; training takes ~1.6x as long on lavapipe.
+- `gsplat_cpu_train --strategy brush`: brush's refine strategy, rates, aux
+  losses and mean noise on the CPU trainer, as `gsplat_train --strategy
+  brush` (`docs/gsplat_cpu_trainer.md`). bonsai `images_8`, 7,000 steps:
+  31.39 dB in 1,416 s against `gsplat_train`'s 31.40 / 31.43 dB in
+  1,775 / 1,709 s.
+- `gsplat_train --seed`; `--mean-noise` and `--aux-weights` on both
+  trainers (brush ablations).
+- `visloc-gsplat-cpu`, a pure-CPU 3DGS trainer: no GPU, wgpu or lavapipe
+  (`docs/gsplat_cpu_trainer.md`).
+  - Projection, binning, both rasterizer passes, L1 + D-SSIM, Inria
+    densification and a deferred sparse Adam (GS-Scale) on the host, with
+    `gsplat_train`'s defaults.
+  - Mip-NeRF 360 bonsai, 4 vCPUs: 1.50x faster than `gsplat_train` at
+    390x260 over 7,000 steps (29.95 against 29.89 dB) and 1.38x at 780x520
+    over 3,000 steps (28.93 against 28.86 dB).
+  - Opt-in: a coarse-to-fine resolution schedule (`--res-schedule`, 10-17%
+    for ~0.3 dB on two of three scenes), strided pixels (`--stride 2`, not
+    worth it here) and an experimental per-gaussian Gauss-Newton step after
+    3DGS² (`--optimizer newton`; 2.8x slower than Adam in wall time).
+  - `visloc-gsplat-train` gains a `host-loss` feature: its host L1 / SSIM
+    without wgpu.
+  - A survey of 2024-2026 fast-training papers ranked for a CPU trainer
+    (`docs/research/`, in Japanese).
+- The 3DGS street simulator moves to Robot Native Engine (RNE)
+  (`docs/rne_migration.md`). The ROS 2 simulator (`gs_sim.py` with Nav2) is
+  frozen as the reference.
+  - `rne_bundle.py` (and `real2sim.py --export-rne DIR`) writes a street as
+    a bundle for RNE's example 163: the splat manifest, the solid and lane
+    maps (`rne_nav` JSON), the ground grid, the walk, the kerbs and the
+    robot model as gaussians.
+  - `rne_crowd.py` adds the crowd: the start of `people.Crowd` with the
+    run's seed, and every agent at 12 gait phases as 3DGS PLYs.
+  - `visloc_map_localize_server` is `visloc_map_localize_node`'s core over
+    stdin and stdout. It loads the map once and answers one image per line,
+    with an optional prior.
+  - On the OverMaps360 street in RNE:
+    - On ground truth: 4/4 goals, no contacts, 9.9 s on the kerbs.
+    - On visloc-rs fixes: 4/4 goals, pose RMSE 5.5 to 8.6 cm.
+    - With the crowd, over 4 seeds: 4/4 goals, nobody on the road, nobody
+      within 6 cm of the robot's body.
+    - Headless, a drive takes seconds; a Nav2 run took 40 minutes.
+
 - **Map fixes and wheel speed inside the VIO.** The Basalt estimator takes
   external factors (`BasaltVioEstimator::add_external_factor`: a pose
   prior, a body velocity) in its window; none are queued by default, so its
@@ -48,6 +97,28 @@ All notable changes to `visloc-rs` will be documented here.
   tune; not better on Bonn), and `init_min_travel_m` / `init_min_turn_deg`
   (recorded as not recommended). `visloc_map_localize_node` takes
   `min_inlier_cells` and `init_warmup_s`; all off by default.
+- `lamaria_batch_ba.py online --jump-gate`: a window whose initial cost per
+  observation jumps past this many times the window before's drops
+  observations over 3 px from its first iteration. The BA chain passes
+  `--jump-gate 3` for a monocular run in low light; on LaMAria
+  sequence_4_3 (test) it removes a 25 m offset the online windows put in the
+  first six minutes, and it never fires on the Low light training
+  sequences. See `docs/lamaria_mono.md`.
+- `scripts/lamaria_gps_bend.py` bends a LaMAria trajectory's slow heading
+  and scale drift toward its recording's own GPS fixes. It works as a 2D pose
+  graph on nodes every 5 s, with Cauchy pulls toward the fixes, and runs only
+  when the median residual to the fixes is 4 m or more. On the six training
+  monos with injected drift, the bent cases above the gate gain 31.6 CP
+  points on average. No training mono reaches the gate on its own. See
+  `docs/lamaria_mono.md`.
+
+### Fixed
+
+- `visloc-gsplat-cpu`: the dense Adam path (brush, `--dense-adam`) left
+  each gaussian's last-updated step stale, so every refine and evaluation
+  replayed phantom momentum steps; this was the 0.35 dB gap to
+  `gsplat_train --strategy brush`. `--no-densify` now also turns off
+  brush's refine, as in `gsplat_train`.
 
 ## 0.5.0 - 2026-11-24
 
@@ -440,6 +511,32 @@ All notable changes to `visloc-rs` will be documented here.
   software Vulkan device (docs/docker.md).
 
 ### Fixed
+
+- The README's street GIFs credit OverMaps360 (OverTheReality), CC BY-NC
+  4.0 in every frame, and show the latest drive: the hero no longer has
+  the robot down the side street, and the cars GIF shows what its caption
+  says (cars passing, the crossing and its light). The chase camera skips
+  the splat within 1.5 m (`--near`, new in `gsplat_render_server` and
+  `Renderer::set_near_plane`), so a sign it passes no longer fills the frame.
+- 3DGS sim people keep off the road. Their side offsets (±1.6 m from the
+  walk, plus dodging) took them up to 1.6 m onto the road where the
+  pavement is narrow. `people.pavement_edges` finds where the pavement
+  ends on the road side, along the route, from the splat's colours (warm
+  flags until grey or no ground). `gs_sim.py` hands it to the crowd, and
+  people and bikes, except on the crossing, stay on their side of it.
+  Offline, 3 seeds × 400 s: from 20-40% of samples past the edge (up to
+  1.6 m) to none, and nobody stood still longer than before (24 s).
+- 3DGS sim people walk along the walk (the line the 360 video was walked,
+  scene.json's new `walk`, written by `real2sim.py`), not along the
+  straight lines between the goals. At the side street's mouth those cut
+  1.2-1.7 m towards the road, so people walked along the real zebra
+  crossing in the splat. Between kerbs they keep within 0.9 m of the walk
+  (`people.kerb_spans`), as on a crossing, not out into the side street.
+- 3DGS sim: room round the robot's body. People kept clear of a 0.2 m
+  circle while the robot drawn in the video is 0.87 x 0.70 m, so a bike
+  rode through it. `gs_sim.py --robot-body` (0.6 m) keeps people off the
+  body, and `gs_nav.launch.py robot_radius:=` sets Nav2's footprint (0.45
+  m for this robot), so it no longer squeezes between people.
 
 - 3DGS sim cars (`gs/people.py`): a car held up in the queue at the light
   no longer turns back mid-road and drives on the wrong side while it

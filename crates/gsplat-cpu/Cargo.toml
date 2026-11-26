@@ -1,0 +1,27 @@
+[package]
+name = "visloc-gsplat-cpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-CPU 3D Gaussian Splatting trainer (rayon + SIMD), with Adam and a per-gaussian local Gauss-Newton optimizer."
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nalgebra = { workspace = true }
+rayon = { workspace = true }
+visloc-gsplat-core = { path = "../gsplat-core", version = "0.5.0" }
+visloc-gsplat-train = { path = "../gsplat-train", version = "0.5.0", features = ["host-loss"] }
+
+[[example]]
+name = "gsplat_cpu_train"
+path = "examples/gsplat_cpu_train.rs"
+
+[lib]
+doctest = false
+
+[lints.rust]
+unsafe_code = "deny"

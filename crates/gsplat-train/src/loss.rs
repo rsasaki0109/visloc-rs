@@ -1,6 +1,8 @@
 //! Device-side D-SSIM loss term (tiled, see `shaders/ssim.wgsl`), shared by the
-//! trainer and the GPU-vs-CPU gradient test.
+//! trainer and the GPU-vs-CPU gradient test, and its host versions (also
+//! without the `gpu` feature, with `host-loss`).
 
+#[cfg(feature = "gpu")]
 /// The two tiled SSIM kernels plus their scratch buffers for one image size.
 pub struct SsimKernels {
     width: u32,
@@ -13,12 +15,14 @@ pub struct SsimKernels {
     pub acc: wgpu::Buffer,
 }
 
+#[cfg(feature = "gpu")]
 /// Bind groups for one (render, ground truth, d_image) triple.
 pub struct SsimBinds {
     fwd: wgpu::BindGroup,
     bwd: wgpu::BindGroup,
 }
 
+#[cfg(feature = "gpu")]
 fn storage(dev: &wgpu::Device, label: &str, bytes: u64) -> wgpu::Buffer {
     dev.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -30,6 +34,7 @@ fn storage(dev: &wgpu::Device, label: &str, bytes: u64) -> wgpu::Buffer {
     })
 }
 
+#[cfg(feature = "gpu")]
 fn bind_at(
     dev: &wgpu::Device,
     pipeline: &wgpu::ComputePipeline,
@@ -49,6 +54,7 @@ fn bind_at(
     })
 }
 
+#[cfg(feature = "gpu")]
 impl SsimKernels {
     pub fn new(dev: &wgpu::Device, width: u32, height: u32) -> Self {
         let module = dev.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -353,7 +359,7 @@ pub fn ssim_grad_host(render: &[f32], gt: &[u32], w: usize, h: usize, lambda: f3
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
     use crate::metrics::ssim_with_grad;

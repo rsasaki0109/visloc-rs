@@ -3,8 +3,16 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu --example gsplat_train -- \
 //!     --data <colmap_root> --steps 7000 --out scene.ply [--eval-every 1000] \
-//!     [--max-face-size 1600] [--min-face-points 15] [--faces-dir <dir>] [--alpha-mask]
+//!     [--max-face-size 1600] [--min-face-points 15] [--faces-dir <dir>] [--alpha-mask] \
+//!     [--depth-prior <dir> [--depth-weight 0.1] [--depth-every 1]]
 //! ```
+//!
+//! `--depth-prior` trains the rendered depth against a prior depth per
+//! training view, `<dir>/<image name>.bin` (width, height `u32`, camera-z
+//! `f32` per pixel, 0 = none; e.g. a LiDAR scan projected into the view):
+//! `--depth-weight` x the mean relative L1 `|D - P| / P` over all pixels,
+//! on every `--depth-every`-th step (each such step takes the device
+//! rasterizer, slower than the host one on a CPU adapter).
 //!
 //! `--alpha-mask` leaves out of the loss the pixels whose image alpha is
 //! below 128 (RGBA images: masked-out content such as blurred faces or the
@@ -43,7 +51,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eval_every = 1000usize;
     let mut export_steps: Vec<usize> = Vec::new();
     let mut init_ply: Option<PathBuf> = None;
+    let mut depth_prior: Option<PathBuf> = None;
+    let mut depth_weight = 0.1f32;
     let mut brush_strategy = false;
+    let mut mean_noise: Option<f32> = None;
+    let mut aux_weights: Option<(f32, f32)> = None;
     let mut max_gaussians: Option<usize> = None;
     let mut equirect = EquirectOptions::default();
     while let Some(a) = args.next() {
@@ -58,6 +70,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--ssim-every" => cfg.ssim_every = next()?.parse()?,
             "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
+            // The view order, refine sampling and mean noise (default 42).
+            "--seed" => cfg.seed = next()?.parse()?,
+            // brush strategy ablations: mean noise weight (brush: 40) and
+            // the opacity / scale aux-loss weights (brush: 1e-9, 1e-8).
+            "--mean-noise" => mean_noise = Some(next()?.parse::<f32>()?),
+            "--aux-weights" => {
+                let v: Vec<f32> = next()?
+                    .split(',')
+                    .map(|x| x.parse())
+                    .collect::<Result<_, _>>()?;
+                aux_weights = Some((v[0], v[1]));
+            }
             // brush 0.3's refine strategy, mean noise and learning rates.
             "--strategy" => match next()?.as_str() {
                 "brush" => brush_strategy = true,
@@ -71,6 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Per-image affine colour correction (exposure / white balance).
             "--appearance" => cfg.appearance = true,
             "--alpha-mask" => cfg.alpha_mask = true,
+            "--depth-prior" => depth_prior = Some(PathBuf::from(next()?)),
+            "--depth-weight" => depth_weight = next()?.parse()?,
+            "--depth-every" => cfg.depth_every = next()?.parse()?,
             "--max-face-size" => equirect.max_face_size = next()?.parse()?,
             "--min-face-points" => equirect.min_face_points = next()?.parse()?,
             "--faces-dir" => equirect.faces_dir = Some(PathBuf::from(next()?)),
@@ -85,6 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let data = data.ok_or("--data <colmap root> is required")?;
+    if depth_prior.is_some() {
+        cfg.depth_weight = depth_weight;
+    }
     if brush_strategy {
         let keep_densify_off = cfg.densify.is_none();
         cfg = TrainConfig {
@@ -96,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             background: cfg.background,
             normal_weight: cfg.normal_weight,
             normal_start: cfg.normal_start,
+            depth_every: cfg.depth_every,
             appearance: cfg.appearance,
             ..TrainConfig::brush_preset()
         };
@@ -103,6 +134,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --no-densify: no refine either (fixed population).
             cfg.brush_refine = None;
         }
+    }
+    if let Some(w) = mean_noise {
+        if let Some(b) = cfg.brush_refine.as_mut() {
+            b.mean_noise_weight = w;
+        }
+    }
+    if let Some((o, sc)) = aux_weights {
+        cfg.opac_loss_weight = o;
+        cfg.scale_loss_weight = sc;
     }
     if let Some(cap) = max_gaussians {
         if let Some(d) = cfg.densify.as_mut() {
@@ -135,6 +175,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("adapter: {}", ctx.adapter_info.name);
     let t0 = Instant::now();
     let mut trainer = Trainer::new(ctx, &dataset, &init, cfg.clone())?;
+    if let Some(dir) = &depth_prior {
+        let found = trainer.load_depth_priors(dir);
+        println!(
+            "depth priors for {found} / {} training views (weight {}, every {} steps)",
+            dataset.train.len(),
+            cfg.depth_weight,
+            cfg.depth_every.max(1)
+        );
+    }
     println!(
         "setup {:.1}s, scene extent {:.3}",
         t0.elapsed().as_secs_f64(),

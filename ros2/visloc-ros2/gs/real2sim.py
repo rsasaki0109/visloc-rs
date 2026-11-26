@@ -130,6 +130,9 @@ def main():
     p.add_argument('--gpu', action='store_true',
                    help="run SfM's matching on the GPU (wgpu) too; 3DGS training uses a GPU whenever wgpu finds one")
     p.add_argument('--nav', action='store_true', help='also drive the goals with Nav2')
+    p.add_argument('--export-rne', dest='export_rne', default='',
+                   help="also write a street bundle for Robot Native Engine's simulator to this directory "
+                        '(rne_bundle.py; with --nav, the road and pavement from that run)')
     p.add_argument('--lane-half-width', dest='lane_half_width', type=float, default=1.0,
                    help="Nav2's map is free only this far either side of the walk (lane_map.py), so the robot "
                         'keeps to the pavement; 0: the whole occupancy map')
@@ -260,6 +263,7 @@ def main():
                 make_scene(open_path=lane_walk, crossings=crossings if os.path.exists(crossings) else '')
                 sc = json.load(open(scene_json))
                 sc['goals'] = goals_along(np.loadtxt(lane_walk, ndmin=2), args.goals)
+                sc['walk'] = np.round(np.loadtxt(lane_walk, ndmin=2), 2).tolist()   # people walk along it
                 json.dump(sc, open(scene_json, 'w'), indent=1)
                 print(f"goals on the lane {sc['goals']}")
     step('map', build_map)
@@ -281,7 +285,7 @@ def main():
 source /opt/ros/jazzy/setup.bash
 export RCUTILS_COLORIZED_OUTPUT=0
 for attempt in 1 2 3; do
-  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}record:={sim}/nav.sim.csv \\
+  ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} {occ}robot_radius:=0.45 record:={sim}/nav.sim.csv \\
     "sim_args:={sim_args}" "localize_args:={loc}" > {sim}/nav.launch.log 2>&1 &
   LP=$!; ok=0
   for t in $(seq 1 60); do sleep 5; grep -q "lifecycle_manager_navigation\\]: .*Managed nodes are active" {sim}/nav.launch.log && {{ ok=1; break; }}; done
@@ -310,10 +314,20 @@ kill -INT $LP; sleep 8
                      '-vf', 'scale=960:-2', '-pix_fmt', 'yuv420p', '-crf', 26, os.path.join(out, 'chase.mp4')])
             step('video', video)
 
+    if args.export_rne:
+        def export():
+            lane = os.path.join(mapd, 'occupancy_lane.yaml')
+            people = os.path.join(sim, 'nav.sim.csv.people.json')
+            run([sys.executable, os.path.join(HERE, 'rne_bundle.py'), '--scene', scene_json,
+                 '--occupancy', lane if os.path.exists(lane) else os.path.join(mapd, 'occupancy.yaml'),
+                 '--map', mapd, '--out', args.export_rne]
+                + (['--people-json', people] if os.path.exists(people) else []))
+        step('export-rne', export)
+
     print(f'done: splat {splat}, scene {scene_json}, map {mapd}')
     print('timing (s):', {k: round(v) for k, v in times.items()})
     if not args.nav:
-        print(f'drive it: ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} sim_args:=--mono '
+        print(f'drive it: ros2 launch {HERE}/gs_nav.launch.py scene:={scene_json} map:={mapd} robot_radius:=0.45 sim_args:=--mono '
               f'"localize_args:={" ".join(TUNED)}"')
 
 

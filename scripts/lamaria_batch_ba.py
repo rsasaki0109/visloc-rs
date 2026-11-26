@@ -61,6 +61,10 @@ import time
 
 import numpy as np
 
+# Cameras per keyframe: 2 (both SLAM cameras), or 1 (cam0 only, a monocular-inertial run). Image i of the
+# features is keyframe i // NC, camera i % NC. Set by `features --cameras`, which records it in features.npz,
+# and read back from there by every later step (load_features); the calibration is then cut to NC cameras.
+NC = 2
 DOF = 15  # per keyframe: pose 6 (rotation, translation), velocity 3, bias 6 (accel, gyro)
 
 
@@ -90,8 +94,8 @@ def load_calib(path):
             "t_ic": np.array([e["px"], e["py"], e["pz"]]),
             "K": np.array([[intr["fx"], 0, intr["cx"]], [0, intr["fy"], intr["cy"]], [0, 0, 1.0]]),
         })
-    if len(cams) != 2:
-        sys.exit("a two-camera calibration is expected")
+    if len(cams) not in (1, 2):
+        sys.exit("a one- or two-camera calibration is expected")
     noise = {k: float(v[k][0]) for k in ("accel_noise_std", "gyro_noise_std", "accel_bias_std", "gyro_bias_std")}
     return cams, noise
 
@@ -104,8 +108,17 @@ def load_tum(path):
 
 
 def load_features(work, desc=True):
+    global NC
     f = np.load(os.path.join(work, "features.npz"))  # lazy: the descriptors are read only when asked for
+    NC = int(f["cameras"]) if "cameras" in f else 2  # written before it was recorded: both cameras
     return f["kf_ns"], f["offsets"], f["xy"], f["desc"] if desc else None
+
+
+def first_cameras(cams):
+    """The calibration's first NC cameras, those the features hold (call after load_features)."""
+    if len(cams) < NC:
+        sys.exit(f"the features hold {NC} cameras per keyframe, the calibration {len(cams)}")
+    return cams[:NC]
 
 
 def feature_kind(work):
@@ -184,16 +197,18 @@ def _learned_features(a, paths):
 
 def cmd_features(a):
     os.makedirs(a.work, exist_ok=True)
+    global NC
+    NC = a.cameras
     vio_ns, _, _ = load_tum(a.vio)
     frames = []
-    for c in range(2):
+    for c in range(NC):
         names = os.listdir(os.path.join(a.mav0, f"cam{c}", "data"))
         frames.append({int(n[:-4]): n for n in names if n.endswith(".png")})
     vio_set = set(vio_ns.tolist())
-    usable = [t for t in sorted(set(frames[0]) & set(frames[1])) if t in vio_set]
+    usable = [t for t in sorted(set.intersection(*(set(f) for f in frames))) if t in vio_set]
     kf_ns = np.array(usable[::a.kf_step], dtype=np.int64)
-    print(f"{len(usable)} stereo frames with a VIO pose, {len(kf_ns)} keyframes", flush=True)
-    paths = [os.path.join(a.mav0, f"cam{c}", "data", frames[c][int(t)]) for t in kf_ns for c in range(2)]
+    print(f"{len(usable)} frames of {NC} camera(s) with a VIO pose, {len(kf_ns)} keyframes", flush=True)
+    paths = [os.path.join(a.mav0, f"cam{c}", "data", frames[c][int(t)]) for t in kf_ns for c in range(NC)]
     t0 = time.time()
     extra = {}
     if a.extractor == "sift":
@@ -207,7 +222,8 @@ def cmd_features(a):
     offsets = np.concatenate([[0], np.cumsum(counts)])
     np.savez(os.path.join(a.work, "features.npz"), kf_ns=kf_ns, offsets=offsets,
              xy=np.concatenate([r[0] for r in res]), desc=np.concatenate([r[1] for r in res]),
-             size=np.concatenate([r[2] for r in res]), extractor=np.array(a.extractor), **extra)
+             size=np.concatenate([r[2] for r in res]), extractor=np.array(a.extractor), cameras=np.array(NC),
+             **extra)
     print(f"features ({a.extractor}): {offsets[-1]} keypoints, {counts.mean():.0f}/image, {time.time() - t0:.0f} s",
           flush=True)
 
@@ -225,7 +241,7 @@ def _cam_pose(k, c):
 
 
 def _image(k, c):
-    i = 2 * k + c
+    i = NC * k + c
     s, e = _G["offsets"][i], _G["offsets"][i + 1]
     d = _G["desc"][s:e]
     return _G["xy"][s:e], d.astype(np.float32) if d.dtype == np.float16 else d
@@ -457,8 +473,8 @@ def _lightglue_pairs(tasks, a, cache_images=1200):
 
     tasks = iter(tasks)
     while chunk := list(islice(tasks, a.lg_batch)):
-        fa = [feats(2 * t[0] + t[1]) for t in chunk]
-        fb = [feats(2 * t[2] + t[3]) for t in chunk]
+        fa = [feats(NC * t[0] + t[1]) for t in chunk]
+        fb = [feats(NC * t[2] + t[3]) for t in chunk]
         out = [np.zeros((0, 2), np.int32)] * len(chunk)
         ok = [i for i in range(len(chunk)) if fa[i]["keypoints"].shape[1] and fb[i]["keypoints"].shape[1]]
         if ok:
@@ -474,7 +490,7 @@ def _lightglue_guided(pairs, a, count):
         count[0] += len(m)
         if len(m):
             ka, ca, kb, cb, tau = pair
-            xya, xyb = _G["xy"][off[2 * ka + ca]:], _G["xy"][off[2 * kb + cb]:]
+            xya, xyb = _G["xy"][off[NC * ka + ca]:], _G["xy"][off[NC * kb + cb]:]
             m = m[_band_dist(ka, ca, kb, cb, xya[m[:, 0]], xyb[m[:, 1]]) < tau / _G["cams"][cb]["K"][0, 0]]
         count[1] += len(m)
         yield pair, m
@@ -507,7 +523,7 @@ def cmd_match(a):
     matcher = _matcher(a.matcher, extractor)
     if a.verify == "essential" and matcher != "lightglue":
         sys.exit("match --verify essential takes LightGlue's matches (learned features)")
-    cams, _ = load_calib(a.calib)
+    cams = first_cameras(load_calib(a.calib)[0])
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r,
               ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor), extractor=extractor, image_wh=image_wh,
@@ -521,9 +537,9 @@ def cmd_match(a):
             kb = ka + d
             if kb >= n:
                 break
-            for ca in range(2):
+            for ca in range(NC):
                 ra, ta = _cam_pose(ka, ca)
-                for cb in range(2):
+                for cb in range(NC):
                     rb, tb = _cam_pose(kb, cb)
                     if ra[:, 2] @ rb[:, 2] < cos_max or np.linalg.norm(ta - tb) > a.max_dist:
                         continue
@@ -608,12 +624,15 @@ def _loop_worker(task, m=None):
         return task, empty, 0
     pa = (np.c_[xya[m[:, 0]], np.ones(len(m))] @ np.linalg.inv(_G["cams"][ca]["K"]).T)[:, :2]
     pb = (np.c_[xyb[m[:, 1]], np.ones(len(m))] @ np.linalg.inv(_G["cams"][cb]["K"]).T)[:, :2]
-    e, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999,
-                                   threshold=1.0 / _G["cams"][cb]["K"][0, 0])
-    if e is None or mask is None or e.shape != (3, 3) or mask.sum() < _G["min_inliers"]:
+    try:  # a degenerate pair (e.g. matches piled on a few pixels) can fail OpenCV's polynomial solver
+        e, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999,
+                                       threshold=1.0 / _G["cams"][cb]["K"][0, 0])
+        if e is None or mask is None or e.shape != (3, 3) or mask.sum() < _G["min_inliers"]:
+            return task, empty, 0
+        mask = mask.ravel().astype(bool)
+        _, r_est, _, _ = cv2.recoverPose(e, pa[mask], pb[mask], np.eye(3))
+    except cv2.error:  # test sequence_5_11, cam0 only: no revisit from this pair, as with too few inliers
         return task, empty, 0
-    mask = mask.ravel().astype(bool)
-    _, r_est, _, _ = cv2.recoverPose(e, pa[mask], pb[mask], np.eye(3))
     r_ba = _cam_pose(kb, cb)[0].T @ _cam_pose(ka, ca)[0]
     angle = np.degrees(np.arccos(np.clip((np.trace(r_est.T @ r_ba) - 1) / 2, -1, 1)))
     if angle > _G["max_rot"]:
@@ -626,18 +645,18 @@ def cmd_loops(a):
     kf_ns, offsets, xy, desc = load_features(a.work)
     extractor, image_wh = feature_kind(a.work)
     matcher = _matcher(a.matcher, extractor)
-    cams, _ = load_calib(a.calib)
+    cams = first_cameras(load_calib(a.calib)[0])
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r, ratio=a.ratio,
               max_desc=_max_desc(a.max_desc, extractor), min_inliers=a.min_inliers, max_rot=a.max_rot,
               extractor=extractor, image_wh=image_wh)
     n = len(kf_ns)
-    axes = np.array([[_cam_pose(k, c)[0][:, 2] for c in range(2)] for k in range(n)])
+    axes = np.array([[_cam_pose(k, c)[0][:, 2] for c in range(NC)] for k in range(n)])
     ks = np.arange(0, n, a.step)
     dist = np.linalg.norm(kf_p[ks][:, None, :2] - kf_p[ks][None, :, :2], axis=2)
     ia, ib = np.nonzero((ks[None, :] - ks[:, None] > a.min_gap) & (dist < a.max_dist))
     cos_max = np.cos(np.radians(a.max_axis_angle))
-    tasks = [(int(ks[i]), ca, int(ks[j]), cb) for i, j in zip(ia, ib) for ca in range(2) for cb in range(2)
+    tasks = [(int(ks[i]), ca, int(ks[j]), cb) for i, j in zip(ia, ib) for ca in range(NC) for cb in range(NC)
              if axes[ks[i], ca] @ axes[ks[j], cb] >= cos_max]
     print(f"{len(ia)} revisit keyframe pairs, {len(tasks)} image pairs to verify ({extractor}, {matcher})",
           flush=True)
@@ -667,8 +686,8 @@ def build_tracks(offsets, pairs, matches, max_offset):
     from scipy.sparse.csgraph import connected_components
     keep = (pairs[:, 2] - pairs[:, 0]) <= max_offset
     pairs, matches = pairs[keep], matches[keep]
-    ga = offsets[2 * pairs[:, 0] + pairs[:, 1]] + matches[:, 0]
-    gb = offsets[2 * pairs[:, 2] + pairs[:, 3]] + matches[:, 1]
+    ga = offsets[NC * pairs[:, 0] + pairs[:, 1]] + matches[:, 0]
+    gb = offsets[NC * pairs[:, 2] + pairs[:, 3]] + matches[:, 1]
     n = int(offsets[-1])
     _, roots = connected_components(coo_matrix((np.ones(len(ga), np.int8), (ga, gb)), shape=(n, n)),
                                     directed=False)
@@ -697,21 +716,21 @@ def triangulate(tracks, image_of, xy, kf_p, kf_r, cams, max_err, min_angle_deg):
     or more than max_err off, and keep it once a round drops nothing, with at least two observations and a
     triangulation angle of min_angle_deg. All tracks at once; returns the points and the kept features.
     """
-    nimg = len(kf_p) * 2
+    nimg = len(kf_p) * NC
     centers = np.zeros((nimg, 3))
     rots = np.zeros((nimg, 3, 3))
     for k in range(len(kf_p)):
-        for c in range(2):
-            rots[2 * k + c] = kf_r[k] @ cams[c]["R_ic"]
-            centers[2 * k + c] = kf_r[k] @ cams[c]["t_ic"] + kf_p[k]
-    kmat = np.array([cams[c]["K"] for c in range(2)])
+        for c in range(NC):
+            rots[NC * k + c] = kf_r[k] @ cams[c]["R_ic"]
+            centers[NC * k + c] = kf_r[k] @ cams[c]["t_ic"] + kf_p[k]
+    kmat = np.array([cams[c]["K"] for c in range(NC)])
     kinv = np.linalg.inv(kmat)
     n_t = len(tracks)
     lens = np.array([len(t) for t in tracks], np.int64)
     feats = np.concatenate(tracks).astype(np.int64) if n_t else np.zeros(0, np.int64)
     tid = np.repeat(np.arange(n_t), lens)
     imgs = image_of[feats]
-    cam = imgs % 2
+    cam = imgs % NC
     rays = np.einsum("nij,nj->ni", kinv[cam], np.c_[xy[feats], np.ones(len(feats))])
     rays = np.einsum("nij,nj->ni", rots[imgs], rays)
     rays /= np.linalg.norm(rays, axis=1, keepdims=True)
@@ -1374,6 +1393,7 @@ def cmd_solve(a):
     kf_ns, offsets, xy, _ = load_features(a.work, desc=False)
     kf_ns_all = kf_ns
     cams, noise = load_calib(a.calib)
+    cams = first_cameras(cams)
     vio = load_tum(a.vio)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     m = np.load(os.path.join(a.work, "matches.npz"))
@@ -1392,11 +1412,11 @@ def cmd_solve(a):
     # a landmark keeps the observations within --band keyframes of its first one; with --loops all of them
     obs_kf, obs_cam, obs_lm, obs_z, obs_f = [], [], [], [], []
     for j, feats in enumerate(kept):
-        k = image_of[feats] // 2
+        k = image_of[feats] // NC
         keep = (k - k.min() <= a.band) | bool(a.loops)
         if keep.sum() >= 2:
             obs_kf.append(k[keep] - k0)
-            obs_cam.append(image_of[feats[keep]] % 2)
+            obs_cam.append(image_of[feats[keep]] % NC)
             obs_lm.append(np.full(keep.sum(), j))
             obs_z.append(xy[feats[keep]].astype(np.float64))
             obs_f.append(feats[keep])
@@ -1414,14 +1434,14 @@ def cmd_solve(a):
     pts = pts[used].copy()
     print(f"tracks {len(tracks)} (dropped {conflicts} with conflicts), landmarks {len(pts)}, "
           f"{time.time() - t0:.0f} s", flush=True)
-    phys_est = [int(ch) for ch in a.est_extrinsic]
+    phys_est = [int(ch) for ch in a.est_extrinsic if int(ch) < NC]  # "01" on a one-camera run: camera 0
     est_cams, n_seg = phys_est, max(a.ext_segments, 1)
     obs_kf, obs_cam = np.concatenate(obs_kf), np.concatenate(obs_cam)
     seg_of_kf = np.minimum(np.arange(len(kf_ns)) * n_seg // len(kf_ns), n_seg - 1)
     if n_seg > 1:
         # an IMU-camera rotation per time segment: camera c in segment s becomes camera c * n_seg + s
         obs_cam = obs_cam * n_seg + seg_of_kf[obs_kf]
-        cams = [cams[c] for c in range(2) for _ in range(n_seg)]
+        cams = [cams[c] for c in range(NC) for _ in range(n_seg)]
         est_cams = [c * n_seg + s for c in phys_est for s in range(n_seg)]
         print(f"  {n_seg} time segments per camera rotation", flush=True)
     rp = Reprojection(obs_kf, obs_cam, remap[obs_lm], np.concatenate(obs_z), len(pts), cams, est_cams,
@@ -1475,6 +1495,14 @@ def cmd_solve(a):
     r_wi, t_wi = poses(values)
     cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic)
     print(f"initial cost {cost:.6g}", flush=True)
+    cost_per_obs = cost / max(int(rp.active.sum()), 1)
+    # --jump-gate (online): the new keyframes disagree with the window far more than the window before did
+    # with its own; gate with the tight threshold before the first step instead of letting it pull the window
+    prev = init.get("cost_per_obs") if init is not None else None
+    early_gate = getattr(a, "jump_gate", 0) > 0 and prev and cost_per_obs > a.jump_gate * prev
+    if early_gate:
+        print(f"  initial cost per observation {cost_per_obs:.3g}, {cost_per_obs / prev:.1f} times the window "
+              f"before: {a.outlier_px2} px from the first iteration", flush=True)
     lam = a.lambda0
     mu = 0.0  # damping of the modes relative to their own curvature: none until a step with them fails
     for it in range(a.iterations):
@@ -1482,7 +1510,7 @@ def cmd_solve(a):
         if a.outlier_px > 0:
             # drop observations that moved far off, then landmarks left with a single observation;
             # from --outlier-start2 on with the tighter --outlier-px2
-            thr = a.outlier_px2 if 0 < a.outlier_px2 and it >= a.outlier_start2 else a.outlier_px
+            thr = a.outlier_px2 if 0 < a.outlier_px2 and (it >= a.outlier_start2 or early_gate) else a.outlier_px
             bad = rp.active & (rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[1] * rp.sigma > thr)
             if bad.any():
                 rp.active &= ~bad
@@ -1707,7 +1735,8 @@ def cmd_solve(a):
         np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic,
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
-    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg}
+    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
+            "cost_per_obs": cost_per_obs}
 
 
 def cmd_online(a):
@@ -1910,11 +1939,14 @@ def pnp_body_pose(p3, p2, kmat, r_ic, t_ic, r_wb0, t_wb0, min_inliers):
     r_wc = r_wb0 @ r_ic
     c_w = r_wb0 @ t_ic + t_wb0
     rvec, tvec = cv2.Rodrigues(r_wc.T)[0], (-r_wc.T @ c_w).reshape(3, 1)
-    found, rvec, tvec, inl = cv2.solvePnPRansac(p3, p2, kmat, None, rvec, tvec, useExtrinsicGuess=True,
-                                                iterationsCount=200, reprojectionError=3.0, confidence=0.999)
-    if not found or inl is None or len(inl) < min_inliers:
+    try:  # degenerate points can fail OpenCV's minimal solvers (as findEssentialMat in _loop_worker)
+        found, rvec, tvec, inl = cv2.solvePnPRansac(p3, p2, kmat, None, rvec, tvec, useExtrinsicGuess=True,
+                                                    iterationsCount=200, reprojectionError=3.0, confidence=0.999)
+        if not found or inl is None or len(inl) < min_inliers:
+            return None
+        rvec, tvec = cv2.solvePnPRefineLM(p3[inl[:, 0]], p2[inl[:, 0]], kmat, None, rvec, tvec)
+    except cv2.error:
         return None
-    rvec, tvec = cv2.solvePnPRefineLM(p3[inl[:, 0]], p2[inl[:, 0]], kmat, None, rvec, tvec)
     r_wc = cv2.Rodrigues(rvec)[0].T
     r_wb = r_wc @ r_ic.T
     return r_wb, -r_wc @ tvec.ravel() - r_wb @ t_ic
@@ -1938,27 +1970,27 @@ def cmd_loop_correct(a):
     from scipy.spatial.transform import Rotation
 
     st = np.load(a.states)
-    cams, _ = load_calib(a.calib)
+    _, offsets, xy, _ = load_features(a.work, desc=False)
+    cams = first_cameras(load_calib(a.calib)[0])
     k0, kf_ns, r_wi, t_wi, r_ic, pts = (st[k] for k in ("k0", "kf_ns", "r_wi", "t_wi", "r_ic", "pts"))
     k0, n = int(k0), len(kf_ns)
     t_ic = np.array([c["t_ic"] for c in cams])
     n_seg = int(st["ext_segments"]) if "ext_segments" in st else 1
     seg_of_kf = np.minimum(np.arange(n) * n_seg // n, n_seg - 1)  # as in solve
-    foc = st["foc"] if "foc" in st else np.zeros(2 * n_seg)  # focal length scales of solve --est-focal
+    foc = st["foc"] if "foc" in st else np.zeros(NC * n_seg)  # focal length scales of solve --est-focal
     act = st["active"]
     okf, ocam, olm, oz = st["obs_kf"][act], st["obs_cam"][act], st["obs_lm"][act], st["obs_z"][act]
-    _, offsets, xy, _ = load_features(a.work, desc=False)
     lp = np.load(os.path.join(a.work, "loops.npz"))
     sel = (lp["pairs"][:, 0] >= k0) & (lp["pairs"][:, 2] < k0 + n)
     pairs, matches = lp["pairs"][sel].astype(np.int64), lp["matches"][sel]
     pairs[:, [0, 2]] -= k0
     # landmark of a feature, found by its pixel among the solve's active observations
-    lookup = {(int(2 * k + c), round(float(z[0]), 3), round(float(z[1]), 3)): int(j)
+    lookup = {(int(NC * k + c), round(float(z[0]), 3), round(float(z[1]), 3)): int(j)
               for k, c, z, j in zip(okf, ocam, oz, olm)}
 
     def edge(k3, c3, f3, k2, c2, f2):
         """Body pose of keyframe k2 placed by PnP against the landmarks seen by features f3 of (k3, c3)."""
-        lms = np.array([lookup.get((2 * k3 + c3, round(float(xy[i, 0]), 3), round(float(xy[i, 1]), 3)), -1)
+        lms = np.array([lookup.get((NC * k3 + c3, round(float(xy[i, 0]), 3), round(float(xy[i, 1]), 3)), -1)
                         for i in f3])
         ok = lms >= 0
         if ok.sum() < a.min_inliers:
@@ -1983,8 +2015,8 @@ def cmd_loop_correct(a):
     for j in range(inv.max() + 1 if len(inv) else 0):
         rows = np.flatnonzero(inv == j)
         ka, ca, kb, cb = pairs[rows[0]]
-        fa = offsets[2 * (ka + k0) + ca] + matches[rows, 0]
-        fb = offsets[2 * (kb + k0) + cb] + matches[rows, 1]
+        fa = offsets[NC * (ka + k0) + ca] + matches[rows, 0]
+        fb = offsets[NC * (kb + k0) + cb] + matches[rows, 1]
         for e in (edge(ka, ca, fa, kb, cb, fb), edge(kb, cb, fb, ka, ca, fa)):
             if e is None:
                 continue
@@ -2031,7 +2063,9 @@ def main():
     f.add_argument("--mav0", required=True, help="ASL mav0 directory (cam0/data, cam1/data)")
     f.add_argument("--vio", required=True, help="VIO trajectory (TUM, seconds); keyframes need a pose")
     f.add_argument("--work", required=True)
-    f.add_argument("--kf-step", type=int, default=10, help="every Nth stereo frame is a keyframe")
+    f.add_argument("--kf-step", type=int, default=10, help="every Nth frame (of every camera) is a keyframe")
+    f.add_argument("--cameras", type=int, choices=(1, 2), default=2,
+                   help="cameras per keyframe: 2, or 1 for cam0 only (a monocular-inertial run, docs/lamaria_mono.md)")
     f.add_argument("--num-features", type=int, default=1500)
     f.add_argument("--jobs", type=int, default=2)
     f.add_argument("--clahe", action="store_true", help="contrast-limited histogram equalization (low light)")
@@ -2164,6 +2198,9 @@ def main():
     solve_args(o)
     o.add_argument("--window", type=int, default=480, help="keyframes per window (the most recent ones)")
     o.add_argument("--step", type=int, default=60, help="keyframes between two windows")
+    o.add_argument("--jump-gate", type=float, default=0.0,
+                   help="a window whose initial cost per observation exceeds this many times the window before's "
+                   "drops observations over --outlier-px2 from its first iteration (0: off)")
     o.set_defaults(iterations=10, ext_segments=2)  # per window
     c = sub.add_parser("loop-correct", help="close the revisits of a solve with a pose graph (after solve "
                        "--save-states and loops)")
