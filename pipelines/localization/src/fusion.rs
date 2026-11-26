@@ -28,6 +28,14 @@
 //! is block-tridiagonal, so dropping the oldest node is one Schur complement
 //! into a linear prior on the next one.
 //!
+//! With [`MapFusionConfig::source_check_window_s`] set, each source is also
+//! checked against the fixes: at every fix, the motion a source reports since
+//! the oldest fix of that window is compared with the motion between the two
+//! fixes. A source that disagrees (a VIO dragged off by people walking in
+//! front of its camera, while the wheels and the fixes agree) has its edges
+//! over that stretch left out of the graph, and the pose is carried by the
+//! sources that agree; it comes back where it agrees again. Off by default.
+//!
 //! The fusion does not gate fixes. Callers feed it the fixes that an
 //! `OdomCorrection` running beside it accepted (or initialized), so the two
 //! see the same fixes and differ only in how they combine them.
@@ -126,6 +134,15 @@ pub struct MapFusionConfig {
     pub gap_sigma_yaw_deg: f64,
     /// Gauss-Newton iterations per update.
     pub iterations: usize,
+    /// When positive, the source check described in the module
+    /// documentation looks back this far (s) at every fix. 0 turns it off.
+    pub source_check_window_s: f64,
+    /// A source disagrees with the fixes past this position error (m) ...
+    pub source_check_tolerance_m: f64,
+    /// ... plus this share of the distance between the two fixes ...
+    pub source_check_tolerance_per_m: f64,
+    /// ... or past this yaw error (deg).
+    pub source_check_tolerance_yaw_deg: f64,
 }
 
 impl Default for MapFusionConfig {
@@ -140,6 +157,10 @@ impl Default for MapFusionConfig {
             gap_sigma_m: 1.0,
             gap_sigma_yaw_deg: 30.0,
             iterations: 3,
+            source_check_window_s: 0.0,
+            source_check_tolerance_m: 0.05,
+            source_check_tolerance_per_m: 0.1,
+            source_check_tolerance_yaw_deg: 3.0,
         }
     }
 }
@@ -155,6 +176,10 @@ struct Node {
     odometry: Vec<Option<SE3>>,
     /// The fix at this node: map position and yaw.
     fix: Option<State>,
+    /// Per source: its edge from the previous node to this one is left out
+    /// (the source disagreed with the fixes over it, or at the last check
+    /// before this node was added).
+    excluded: Vec<bool>,
 }
 
 /// Linear prior left on the oldest node by marginalization:
@@ -194,15 +219,33 @@ pub struct MapFusion {
     config: MapFusionConfig,
     nodes: VecDeque<Node>,
     prior: Option<Prior>,
+    /// Per source: whether the newest check found it disagreeing.
+    suspect: Vec<bool>,
+    /// Per source: edges left out so far.
+    excluded_edges: Vec<u64>,
 }
 
 impl MapFusion {
     pub fn new(config: MapFusionConfig) -> Self {
+        let sources = config.sources.len();
         Self {
             config,
             nodes: VecDeque::new(),
             prior: None,
+            suspect: vec![false; sources],
+            excluded_edges: vec![0; sources],
         }
+    }
+
+    /// Per source: the number of edges the source check has left out.
+    pub fn excluded_edges(&self) -> &[u64] {
+        &self.excluded_edges
+    }
+
+    /// Per source: whether the newest check found it disagreeing with the
+    /// fixes (its motion is then not used for the current pose).
+    pub fn suspect_sources(&self) -> &[bool] {
+        &self.suspect
     }
 
     pub const fn config(&self) -> &MapFusionConfig {
@@ -252,27 +295,99 @@ impl MapFusion {
                     stored.clone_from(pose);
                 }
             }
+            self.check_sources();
             self.optimize();
             return;
         }
         self.push(timestamp_ns, odometry, Some(fix));
     }
 
+    /// The source check (see the module documentation), at the newest node,
+    /// which holds a fix.
+    fn check_sources(&mut self) {
+        if self.config.source_check_window_s <= 0.0 || self.nodes.len() < 2 {
+            return;
+        }
+        let newest = self.nodes.len() - 1;
+        let Some(fix_b) = self.nodes[newest].fix else {
+            return;
+        };
+        let window_ns = (self.config.source_check_window_s * 1e9) as i64;
+        let start_ns = self.nodes[newest].timestamp_ns - window_ns;
+        let sources = self.config.sources.len();
+        let mut disagree = vec![None::<usize>; sources];
+        for (source, verdict) in disagree.iter_mut().enumerate() {
+            let Some(pose_b) = self.nodes[newest].odometry[source].clone() else {
+                continue;
+            };
+            // The oldest node of the window with a fix and this source's pose.
+            let Some(a) = (0..newest).find(|&i| {
+                self.nodes[i].timestamp_ns >= start_ns
+                    && self.nodes[i].fix.is_some()
+                    && self.nodes[i].odometry[source].is_some()
+            }) else {
+                continue;
+            };
+            let fix_a = self.nodes[a].fix.expect("checked");
+            let pose_a = self.nodes[a].odometry[source].as_ref().expect("checked");
+            let fix_delta = rz(fix_a[3]).transpose() * (fix_b.xyz() - fix_a.xyz());
+            let fix_turn = wrap_angle(fix_b[3] - fix_a[3]);
+            let yaw_a = yaw_of(&pose_a.rotation);
+            let source_delta = rz(yaw_a).transpose() * (pose_b.translation - pose_a.translation);
+            let source_turn = wrap_angle(yaw_of(&pose_b.rotation) - yaw_a);
+            let tolerance = self.config.source_check_tolerance_m
+                + self.config.source_check_tolerance_per_m * fix_delta.norm();
+            let off = (source_delta - fix_delta).norm() > tolerance
+                || wrap_angle(source_turn - fix_turn).abs().to_degrees()
+                    > self.config.source_check_tolerance_yaw_deg;
+            if off {
+                *verdict = Some(a);
+            }
+        }
+        // Every source disagreeing says more about the fixes than about the
+        // sources: leave them all in.
+        let checked = (0..sources)
+            .filter(|&s| self.nodes[newest].odometry[s].is_some())
+            .count();
+        let disagreeing = disagree.iter().filter(|d| d.is_some()).count();
+        let drop = disagreeing > 0 && disagreeing < checked;
+        for (source, from) in disagree.iter().enumerate() {
+            self.suspect[source] = drop && from.is_some();
+            if !drop {
+                continue;
+            }
+            if let Some(a) = *from {
+                for i in a + 1..=newest {
+                    if !self.nodes[i].excluded[source] {
+                        self.nodes[i].excluded[source] = true;
+                        self.excluded_edges[source] += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// Forgets everything (e.g. after the caller's fix gate reset).
     pub fn reset(&mut self) {
         self.nodes.clear();
         self.prior = None;
+        self.suspect.iter_mut().for_each(|s| *s = false);
     }
 
     /// The body's map pose now, from the newest node and the motion of the
-    /// first source that has a pose both there and in `odometry`.
+    /// first source that has a pose both there and in `odometry`, skipping
+    /// sources the source check found disagreeing unless none other has one.
     pub fn map_from_body(&self, odometry: &[Option<SE3>]) -> Option<SE3> {
         let node = self.nodes.back()?;
-        let (then, now) = node
-            .odometry
-            .iter()
-            .zip(odometry)
-            .find_map(|(then, now)| Some((then.as_ref()?, now.as_ref()?)))?;
+        let pairs =
+            || {
+                node.odometry.iter().zip(odometry).enumerate().filter_map(
+                    |(source, (then, now))| Some((source, then.as_ref()?, now.as_ref()?)),
+                )
+            };
+        let (_, then, now) = pairs()
+            .find(|(source, _, _)| !self.suspect.get(*source).copied().unwrap_or(false))
+            .or_else(|| pairs().next())?;
         // map <- odom of this source, as the node's state puts it.
         let yaw = node.state[3] - yaw_of(&then.rotation);
         let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw);
@@ -307,12 +422,26 @@ impl MapFusion {
                 }
             }
         };
+        // A source found disagreeing at the last check stays out until a
+        // check finds it agreeing again.
+        let excluded = if self.nodes.is_empty() {
+            vec![false; self.config.sources.len()]
+        } else {
+            self.suspect.clone()
+        };
+        for (count, &out) in self.excluded_edges.iter_mut().zip(&excluded) {
+            *count += u64::from(out);
+        }
         self.nodes.push_back(Node {
             timestamp_ns,
             state,
             odometry,
             fix,
+            excluded,
         });
+        if fix.is_some() {
+            self.check_sources();
+        }
         while self.nodes.len() > 2
             && (timestamp_ns - self.nodes[0].timestamp_ns) as f64 * 1e-9 > self.config.window_s
         {
@@ -330,6 +459,9 @@ impl MapFusion {
             let (Some(pa), Some(pb)) = (&a.odometry[source], &b.odometry[source]) else {
                 continue;
             };
+            if b.excluded[source] {
+                continue;
+            }
             let yaw_a = yaw_of(&pa.rotation);
             let delta = rz(yaw_a).transpose() * (pb.translation - pa.translation);
             let delta_yaw = wrap_angle(yaw_of(&pb.rotation) - yaw_a);
@@ -631,6 +763,92 @@ mod tests {
         }
         // Between fixes 0.5 s apart the odometry drifts about 2 cm.
         assert!(worst < 0.05, "worst {worst}");
+    }
+
+    /// A VIO that runs off (from 5 s on it reports three times the true
+    /// motion, as when people walking along in front of its camera drag it),
+    /// fused with exact wheels and exact fixes every 0.5 s. Returns the worst
+    /// map pose error from the first fix after the VIO runs off (the check
+    /// runs at fixes, so until then nothing tells the two sources apart),
+    /// and the fusion.
+    fn runaway_vio(check_window_s: f64) -> (f64, MapFusion) {
+        let mut fusion = MapFusion::new(MapFusionConfig {
+            sources: vec![OdometryNoise::VIO, OdometryNoise::WHEEL],
+            source_check_window_s: check_window_s,
+            ..MapFusionConfig::default()
+        });
+        let wheel_frame = pose(-3.0, 4.0, 0.0, -1.2);
+        let mut vio = map_from_odom().inverse().compose(&truth(0));
+        let mut worst: f64 = 0.0;
+        for index in 0..300 {
+            if index > 0 {
+                let mut step = truth(index - 1).inverse().compose(&truth(index));
+                if index >= 100 {
+                    step.translation *= 3.0;
+                }
+                vio = vio.compose(&step);
+            }
+            let poses = [Some(vio.clone()), Some(wheel_frame.compose(&truth(index)))];
+            fusion.observe(index as i64 * 50_000_000, &poses);
+            if index % 10 == 0 {
+                fusion.add_fix(index as i64 * 50_000_000, &truth(index), &poses);
+            }
+            if index >= 110 {
+                let estimate = fusion.map_from_body(&poses).expect("set");
+                worst = worst.max((estimate.translation - truth(index).translation).norm());
+            }
+        }
+        (worst, fusion)
+    }
+
+    #[test]
+    fn the_source_check_drops_a_runaway_vio_that_the_wheels_and_fixes_contradict() {
+        let (without, plain) = runaway_vio(0.0);
+        let (with, checked) = runaway_vio(1.0);
+        assert!(without > 0.1, "without the check: {without}");
+        assert!(with < 0.05, "with the check: {with}");
+        assert_eq!(plain.excluded_edges(), &[0, 0]);
+        assert!(checked.excluded_edges()[0] > 0);
+        assert_eq!(checked.excluded_edges()[1], 0);
+        assert_eq!(checked.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn the_source_check_keeps_sound_sources_and_a_lone_one() {
+        // Exact sources: nothing is left out.
+        let mut fusion = MapFusion::new(MapFusionConfig {
+            sources: vec![OdometryNoise::VIO, OdometryNoise::WHEEL],
+            source_check_window_s: 1.0,
+            ..MapFusionConfig::default()
+        });
+        let wheel_frame = pose(-3.0, 4.0, 0.0, -1.2);
+        let odom = map_from_odom().inverse();
+        for index in 0..200 {
+            let poses = [
+                Some(odom.compose(&truth(index))),
+                Some(wheel_frame.compose(&truth(index))),
+            ];
+            fusion.observe(index as i64 * 50_000_000, &poses);
+            if index % 10 == 0 {
+                fusion.add_fix(index as i64 * 50_000_000, &truth(index), &poses);
+            }
+        }
+        assert_eq!(fusion.excluded_edges(), &[0, 0]);
+        // One source that disagrees is still the only one: kept.
+        let mut lone = MapFusion::new(MapFusionConfig {
+            source_check_window_s: 1.0,
+            ..MapFusionConfig::default()
+        });
+        for index in 0..60 {
+            let mut odom_pose = odom.compose(&truth(index));
+            odom_pose.translation *= 3.0;
+            let poses = [Some(odom_pose)];
+            lone.observe(index as i64 * 50_000_000, &poses);
+            if index % 10 == 0 {
+                lone.add_fix(index as i64 * 50_000_000, &truth(index), &poses);
+            }
+        }
+        assert_eq!(lone.excluded_edges(), &[0]);
     }
 
     #[test]

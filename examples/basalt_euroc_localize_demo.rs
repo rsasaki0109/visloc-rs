@@ -311,6 +311,9 @@ struct Args {
     /// (`visloc_basalt::dynamic_objects::read_object_boxes_csv`), for the
     /// VIO's moving-object filter. Off by default.
     object_boxes: Option<PathBuf>,
+    /// With `--fusion`: `MapFusionConfig::source_check_window_s` (0: off), so
+    /// an odometry that disagrees with the fixes is left out while it does.
+    fusion_source_check_s: f64,
 }
 
 impl Args {
@@ -331,7 +334,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S]"
             .into()
     }
 
@@ -405,6 +408,7 @@ impl Args {
             init_min_turn_deg: 0.0,
             init_warmup_s: 0.0,
             object_boxes: None,
+            fusion_source_check_s: 0.0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -548,6 +552,9 @@ impl Args {
                 "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
                 "--init-warmup-s" => args.init_warmup_s = number(&option, value()?)?,
                 "--object-boxes" => args.object_boxes = Some(PathBuf::from(value()?)),
+                "--fusion-source-check-s" => {
+                    args.fusion_source_check_s = number(&option, value()?)?;
+                }
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -595,6 +602,9 @@ impl Args {
         }
         if args.object_boxes.is_some() && !args.vio {
             return Err("--object-boxes needs --vio".into());
+        }
+        if args.fusion_source_check_s != 0.0 && !args.fusion {
+            return Err("--fusion-source-check-s needs --fusion".into());
         }
         if args.diagnostics.is_none() && args.eval_mask_dir.is_some() {
             return Err("--eval-mask-dir needs --diagnostics".into());
@@ -1363,6 +1373,7 @@ impl CorrectedRun {
                 }
                 MapFusion::new(MapFusionConfig {
                     sources,
+                    source_check_window_s: args.fusion_source_check_s,
                     ..MapFusionConfig::default()
                 })
             }),
@@ -1632,6 +1643,16 @@ impl CorrectedRun {
     /// `odometry_file`.
     fn finish(self, args: &Args, odometry_file: &str) -> Result<(), Box<dyn std::error::Error>> {
         let wall_s = self.started.elapsed().as_secs_f64();
+        if let Some(fusion) = self
+            .fusion
+            .as_ref()
+            .filter(|f| f.config().source_check_window_s > 0.0)
+        {
+            eprintln!(
+                "fusion source check: edges left out per source {:?}",
+                fusion.excluded_edges()
+            );
+        }
         fs::create_dir_all(&args.out_dir)?;
         fs::write(args.out_dir.join("localization.tum"), self.fixes_tum)?;
         fs::write(args.out_dir.join("trajectory_map.tum"), self.map_tum)?;
