@@ -414,6 +414,13 @@ fn run() -> Result<(), String> {
         std::fs::read_to_string(path).map_err(|error| format!("reading {path}: {error}"))
     };
     let core = VioCore::from_json(&read(&calibration_path)?, &read(&config_path)?, &options)?;
+    // `config.vio_init_accel_average_s`, as the EuRoC reader reads it: the
+    // stream starts that long after its first frame, levelled by the mean
+    // IMU sample over the span (for a robot that starts still).
+    let init_accel_average_s = core
+        .config()
+        .init_accel_average_s()
+        .map_err(|error| format!("config: {error:?}"))?;
     let expected = [core.expected_resolution(0), core.expected_resolution(1)];
     let shared = Arc::new(Shared {
         inputs: Mutex::new(Inputs {
@@ -427,7 +434,8 @@ fn run() -> Result<(), String> {
                     imu_buffer,
                     core.cam_time_offset_ns(),
                 )
-            },
+            }
+            .with_init_accel_average(init_accel_average_s),
             generation: 0,
         }),
         ready: Condvar::new(),
