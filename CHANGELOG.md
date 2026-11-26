@@ -23,6 +23,18 @@ All notable changes to `visloc-rs` will be documented here.
   testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
   and recorder for running the ROS 2 nodes on recorded data without ROS 2.
 - `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+- **View diagnostics for map localization** (measurement only, for the
+  dynamic-obstacle work in `docs/dynamic_obstacle_localization_plan.md`).
+  `visloc_localization::{ExpectedVisibility, ImageGrid, view_diagnostics}`
+  count the image cells holding inliers and the landmarks the map's nearest
+  keyframes saw from the camera's pose that went unmatched.
+  `basalt_euroc_localize_demo --diagnostics FILE [--diag-grid N]
+  [--eval-mask-dir DIR]` writes them per attempt; every other output is
+  unchanged (checked byte for byte with and without). Scripts:
+  `tum_rgbd_to_euroc.py` (TUM RGB-D queries in the EuRoC layout),
+  `synth_drift_odometry.py` (a drifting odometry from a ground truth) and
+  `eval_dynamic_localization.py` (scores the runs). Results in
+  `docs/dynamic_obstacle_localization.md`.
 
 ## 0.5.0 - 2026-11-24
 

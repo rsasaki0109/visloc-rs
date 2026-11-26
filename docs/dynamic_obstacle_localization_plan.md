@@ -1,6 +1,7 @@
 # Map-based localization among moving people and objects (plan)
 
-Status: **plan only, nothing implemented yet** (2026-11-24).
+Status: Phase 0 under way (2026-11-26): measurement added, TUM RGB-D
+results in [dynamic_obstacle_localization.md](dynamic_obstacle_localization.md).
 
 Goal: keep localizing against a saved visual map when people and other
 movable things are in view, **indoors first** (robots in offices, cafés,

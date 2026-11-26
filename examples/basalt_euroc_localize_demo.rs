@@ -129,6 +129,13 @@
 //! - With `--dump-inliers FILE`: per accepted localization, one CSV row per
 //!   PnP inlier, `timestamp_ns,x,y,landmark_id` (the query keypoint in
 //!   pixels and the map landmark it matched), e.g. for drawing the matches.
+//! - With `--diagnostics FILE`: per attempt, how the result sits in the map's
+//!   view (measurement only; nothing else changes): the cells of a
+//!   `--diag-grid` (4) x 4 image grid holding inliers, the landmarks the map's
+//!   nearest keyframes saw from the predicted pose (or, without one, the
+//!   solved pose), how many of them are inliers, and the cells where none
+//!   is. With `--eval-mask-dir DIR` (`<timestamp_ns>.png`, non-zero = a
+//!   moving thing), also the keypoints and inliers on the masks.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -150,8 +157,9 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, MapFusion,
-    MapFusionConfig, OdomCorrection, OdomCorrectionConfig, OdometryNoise,
+    view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates, ExpectedVisibility, FixOutcome,
+    ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
+    OdometryNoise, ViewDiagnostics, VisibilityGates, VIEW_GRID_MAX,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -261,6 +269,13 @@ struct Args {
     stale_projection_min_inliers: usize,
     /// Write each accepted localization's inliers here.
     dump_inliers: Option<PathBuf>,
+    /// Write per-attempt view diagnostics here (measurement only).
+    diagnostics: Option<PathBuf>,
+    /// Side of the diagnostics' image grid (4: 4 x 4 cells, at most 8).
+    diag_grid: usize,
+    /// Per-frame binary masks of moving things (`<timestamp_ns>.png`,
+    /// non-zero = mover), to count the inliers on them. Evaluation only.
+    eval_mask_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -281,7 +296,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE]"
+         [--dump-inliers FILE] [--diagnostics FILE [--diag-grid N] [--eval-mask-dir DIR]]"
             .into()
     }
 
@@ -343,6 +358,9 @@ impl Args {
             projection_fresh_m: 2.0,
             stale_projection_min_inliers: 0,
             dump_inliers: None,
+            diagnostics: None,
+            diag_grid: 4,
+            eval_mask_dir: None,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -472,6 +490,9 @@ impl Args {
                         .map_err(|_| format!("{option}: expected a count"))?;
                 }
                 "--dump-inliers" => args.dump_inliers = Some(PathBuf::from(value()?)),
+                "--diagnostics" => args.diagnostics = Some(PathBuf::from(value()?)),
+                "--diag-grid" => args.diag_grid = number(&option, value()?)?,
+                "--eval-mask-dir" => args.eval_mask_dir = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -516,6 +537,12 @@ impl Args {
         }
         if args.imu_from_body.is_some() && args.odometry.is_none() {
             return Err("--imu-from-body needs --odometry".into());
+        }
+        if args.diagnostics.is_none() && args.eval_mask_dir.is_some() {
+            return Err("--eval-mask-dir needs --diagnostics".into());
+        }
+        if !(1..=VIEW_GRID_MAX).contains(&args.diag_grid) {
+            return Err("--diag-grid must be between 1 and 8".into());
         }
         if args.vio || args.odometry.is_some() {
             if args.stride != 1 {
@@ -659,6 +686,29 @@ struct Attempt {
     weak_world_from_imu: Option<SE3>,
     /// When accepted: each inlier's query keypoint and map landmark.
     inliers: Vec<(Point2<f64>, u64)>,
+    /// With `--diagnostics`.
+    diagnostics: Option<AttemptDiagnostics>,
+}
+
+/// `--diagnostics` of one attempt. Computed after the attempt's latency is
+/// taken, and changes nothing in it.
+struct AttemptDiagnostics {
+    /// The pose the expected landmarks are seen from: `predicted` (the
+    /// corrected odometry's), `solved` (the accepted localization's) or `-`.
+    view_pose: &'static str,
+    view: ViewDiagnostics,
+    /// The result's inlier keypoints, accepted or not (for the masks).
+    inlier_pixels: Vec<Point2<f64>>,
+    /// Every query keypoint (for the masks; empty without them).
+    keypoints: Vec<Point2<f64>>,
+    millis: f64,
+}
+
+/// The map indexed for `--diagnostics`.
+struct DiagnosticsContext {
+    visibility: ExpectedVisibility,
+    grid: ImageGrid,
+    with_keypoints: bool,
 }
 
 /// The saved map plus everything needed to localize one image against it.
@@ -688,6 +738,7 @@ struct Localizer {
     /// too.
     weak_projected: bool,
     previous: Option<Pose>,
+    diagnostics: Option<DiagnosticsContext>,
 }
 
 impl Localizer {
@@ -741,6 +792,11 @@ impl Localizer {
                 top_k,
             )
         });
+        let diagnostics = args.diagnostics.as_ref().map(|_| DiagnosticsContext {
+            visibility: ExpectedVisibility::new(&map.map),
+            grid: ImageGrid::new(&camera, args.diag_grid),
+            with_keypoints: args.eval_mask_dir.is_some(),
+        });
         Ok(Self {
             max_points: args.max_points.unwrap_or(map.max_points),
             map,
@@ -765,6 +821,7 @@ impl Localizer {
                 .filter(|&weak| weak < args.min_inliers),
             retrieval,
             previous: None,
+            diagnostics,
         })
     }
 
@@ -934,7 +991,54 @@ impl Localizer {
         } else {
             Vec::new()
         };
+        let diagnostics = self.diagnostics.as_ref().map(|context| {
+            let started = Instant::now();
+            // The predicted view when there is one: it is what an occluded
+            // or failed attempt should have seen. Otherwise the solved one.
+            let view = match (predicted, result.pose.as_ref().filter(|_| success)) {
+                (Some(map_from_imu), _) => Some((
+                    "predicted",
+                    Pose {
+                        world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
+                    },
+                )),
+                (None, Some(pose)) => Some(("solved", pose.clone())),
+                (None, None) => None,
+            };
+            let inlier_pixels: Vec<Point2<f64>> = result
+                .inlier_query_indices
+                .iter()
+                .filter_map(|&index| query.keypoints.get(index).copied())
+                .collect();
+            let expected = view
+                .as_ref()
+                .map(|(_, pose)| {
+                    context
+                        .visibility
+                        .expected(&self.camera, pose, VisibilityGates::default())
+                })
+                .unwrap_or_default();
+            let view_diagnostics = view_diagnostics(
+                &context.grid,
+                &inlier_pixels,
+                &result.inlier_landmark_ids,
+                &expected,
+                3,
+            );
+            AttemptDiagnostics {
+                view_pose: view.map_or("-", |(name, _)| name),
+                view: view_diagnostics,
+                inlier_pixels,
+                keypoints: if context.with_keypoints {
+                    query.keypoints.clone()
+                } else {
+                    Vec::new()
+                },
+                millis: started.elapsed().as_secs_f64() * 1e3,
+            }
+        });
         Ok(Attempt {
+            diagnostics,
             inliers,
             keypoints: query.keypoints.len(),
             result,
@@ -979,6 +1083,56 @@ fn inlier_rows(rows: &mut String, timestamp_ns: i64, attempt: &Attempt) {
     }
 }
 
+const DIAGNOSTICS_HEADER: &str =
+    "timestamp_ns,success,inliers,view_pose,inlier_cells,expected,expected_inliers,\
+     expected_cells,missing_cells,mask_keypoints,mask_inliers,diag_ms\n";
+
+/// One `--diagnostics` row; the mask columns are empty without
+/// `--eval-mask-dir` or without a mask for this frame.
+fn diagnostics_row(
+    rows: &mut String,
+    timestamp_ns: i64,
+    attempt: &Attempt,
+    mask_dir: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(diagnostics) = &attempt.diagnostics else {
+        return Ok(());
+    };
+    let mask = match mask_dir.map(|dir| dir.join(format!("{timestamp_ns}.png"))) {
+        Some(path) if path.exists() => Some(read_camera_image(&path)?),
+        _ => None,
+    };
+    let on_mask = |pixels: &[Point2<f64>]| {
+        mask.as_ref().map(|mask| {
+            pixels
+                .iter()
+                .filter(|pixel| {
+                    let (x, y) = (pixel.x.round(), pixel.y.round());
+                    x >= 0.0 && y >= 0.0 && mask.pixel(x as usize, y as usize).unwrap_or(0) > 0
+                })
+                .count()
+                .to_string()
+        })
+    };
+    let view = &diagnostics.view;
+    writeln!(
+        rows,
+        "{timestamp_ns},{},{},{},{},{},{},{},{},{},{},{:.3}",
+        attempt.world_from_imu.is_some(),
+        attempt.result.inlier_count,
+        diagnostics.view_pose,
+        view.inlier_cells,
+        view.expected,
+        view.expected_inliers,
+        view.expected_cells,
+        view.missing_cells,
+        on_mask(&diagnostics.keypoints).unwrap_or_default(),
+        on_mask(&diagnostics.inlier_pixels).unwrap_or_default(),
+        diagnostics.millis,
+    )?;
+    Ok(())
+}
+
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     values.get(values.len() / 2).copied().unwrap_or(0.0)
@@ -1005,6 +1159,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut tum = String::from("# timestamp tx ty tz qx qy qz qw\n");
     let mut csv = String::from(CSV_HEADER);
     let mut inliers = String::from(INLIERS_HEADER);
+    let mut diagnostics = String::from(DIAGNOSTICS_HEADER);
     let mut latencies = Vec::with_capacity(images.len());
     let mut localized = 0_usize;
     for entry in &images {
@@ -1016,6 +1171,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         csv_row(&mut csv, entry.timestamp_ns, &attempt, "-");
         inlier_rows(&mut inliers, entry.timestamp_ns, &attempt);
+        diagnostics_row(
+            &mut diagnostics,
+            entry.timestamp_ns,
+            &attempt,
+            args.eval_mask_dir.as_deref(),
+        )?;
     }
 
     fs::create_dir_all(&args.out_dir)?;
@@ -1023,6 +1184,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     fs::write(args.out_dir.join("per_frame.csv"), csv)?;
     if let Some(path) = &args.dump_inliers {
         fs::write(path, inliers)?;
+    }
+    if let Some(path) = &args.diagnostics {
+        fs::write(path, diagnostics)?;
     }
     println!(
         "localized {localized}/{} images (median {:.1} ms/image) -> {}",
@@ -1061,6 +1225,9 @@ struct CorrectedRun {
     odometry_tum: String,
     csv: String,
     inliers: String,
+    diagnostics: String,
+    /// `--eval-mask-dir`.
+    mask_dir: Option<PathBuf>,
     map_csv: String,
     latencies: Vec<f64>,
     attempts: usize,
@@ -1107,6 +1274,8 @@ impl CorrectedRun {
             odometry_tum: header.to_owned(),
             csv: String::from(CSV_HEADER),
             inliers: String::from(INLIERS_HEADER),
+            diagnostics: String::from(DIAGNOSTICS_HEADER),
+            mask_dir: args.eval_mask_dir.clone(),
             map_csv: String::from(
                 "timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n",
             ),
@@ -1225,6 +1394,12 @@ impl CorrectedRun {
             *self.outcomes.entry(outcome).or_default() += 1;
             csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
             inlier_rows(&mut self.inliers, timestamp_ns, &attempt);
+            diagnostics_row(
+                &mut self.diagnostics,
+                timestamp_ns,
+                &attempt,
+                self.mask_dir.as_deref(),
+            )?;
         }
         if let (Some(map_from_imu), Some((fix_ns, fix_position))) = (
             self.map_pose(Some(odom_from_imu), sources),
@@ -1314,6 +1489,12 @@ impl CorrectedRun {
             }
             *self.outcomes.entry(outcome).or_default() += 1;
             csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
+            diagnostics_row(
+                &mut self.diagnostics,
+                timestamp_ns,
+                &attempt,
+                self.mask_dir.as_deref(),
+            )?;
         }
         if let Some(map_from_imu) = self.map_pose(None, sources) {
             self.map_tum
@@ -1335,6 +1516,9 @@ impl CorrectedRun {
         fs::write(args.out_dir.join("per_frame.csv"), self.csv)?;
         if let Some(path) = &args.dump_inliers {
             fs::write(path, self.inliers)?;
+        }
+        if let Some(path) = &args.diagnostics {
+            fs::write(path, self.diagnostics)?;
         }
         println!(
             "frames {}, localized {}/{} attempts (median {:.1} ms), map poses {}/{} frames, \
