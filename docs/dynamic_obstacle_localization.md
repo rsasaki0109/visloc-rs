@@ -423,6 +423,42 @@ of calibration error.
   (Bonn), none of the start rules measured here is reliably better than
   the default.
 
+## OpenLORIS-Scene cafe: a real robot among people
+
+The switches on a real wheeled robot's data, in a café with people about:
+cafe1-1's map (stereo-inertial SLAM, `--smooth-features 1.5
+--detector-quality 0.003`, as in
+[openloris_map_localization.md](openloris_map_localization.md#two-more-scenes-cafe-and-home)),
+cafe1-2 localized with the stereo-inertial VIO + map (`--vio
+--localize-every 5`), with the demo's default matching settings (ratio test
+on, 30 inliers), not the TUM ones. Two runs per setting gave identical
+outputs. Fixes are scored with the local fit (the map around each, 5 m),
+map poses with the map's fixed alignment, since many lie far from the
+map's own path.
+
+| Setting | Fixes (scored) | Fix error RMSE / median / max | Fixes within 5 cm | Map poses | Map pose RMSE / median / max (fixed) |
+| --- | --- | --- | --- | --- | --- |
+| none | 206 (166) | 7.7 / 5.9 / 18.3 cm | 43% | 2,698 | 18.1 / 15.5 / 33.9 cm |
+| `--min-inlier-cells 6` | 195 (159) | 7.7 / 5.8 / 18.3 cm | 44% | 2,698 | 17.9 / 15.4 / 33.8 cm |
+| `--init-warmup-s 3` | 263 (214) | 7.5 / 6.4 / 18.3 cm | 35% | 2,609 | 17.9 / 15.5 / 34.1 cm |
+| both | 246 (204) | 7.5 / 6.4 / 18.3 cm | 36% | 2,609 | 17.6 / 15.2 / 33.8 cm |
+
+- **Neutral here.** Neither switch changes the map pose by more than 0.5
+  cm; the warm-up costs the first 3 s of map poses (91 frames). The
+  café's people do not cause the failures the switches address: no fix is
+  more than 18 cm off, and the start is not biased.
+- **What limits the café is the map, not the people**: the map itself is
+  17–19 cm from the ground truth (no loop closes; see the OpenLORIS page),
+  and a fix comes every 10 s (median; 55 s at most), so the VIO carries
+  the pose 2.9 m between fixes at the median.
+- Per image 53–56 ms on 4 cores with either switch (the cell count is
+  free; the warm-up only waits).
+
+Data: `package/cafe1-1_2-package.tar` from the dataset's Hugging Face
+mirror (revision `cbc03108723d08322b23d0338680bffa9404cce9`), SHA-256
+`6f42810f87f21b3c720f517f0c514c6ba37ccf789c596f96e75df60226f43899`,
+converted with `scripts/openloris_to_euroc.py`. CC BY-ND 4.0.
+
 ## On ROS 2
 
 `visloc_map_localize_node` takes the two measured switches as parameters,
@@ -444,7 +480,7 @@ relying on them.
 
 ## Not yet measured
 
-- **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.
+- The Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware.
 
 ## Targets (proposed with Phase 0)
