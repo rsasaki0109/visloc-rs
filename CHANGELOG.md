@@ -13,6 +13,29 @@ All notable changes to `visloc-rs` will be documented here.
   (w = 10 chosen on one, every 4th step), the held-out median depth error
   against the projected scans falls from 6.1 % to 2.3-2.7 % with eval PSNR
   within -0.03..+0.35 dB; training takes ~1.6x as long on lavapipe.
+- `gsplat_cpu_train --strategy brush`: brush's refine strategy, rates, aux
+  losses and mean noise on the CPU trainer, as `gsplat_train --strategy
+  brush` (`docs/gsplat_cpu_trainer.md`). bonsai `images_8`, 7,000 steps:
+  31.39 dB in 1,416 s against `gsplat_train`'s 31.40 / 31.43 dB in
+  1,775 / 1,709 s.
+- `gsplat_train --seed`; `--mean-noise` and `--aux-weights` on both
+  trainers (brush ablations).
+- `visloc-gsplat-cpu`, a pure-CPU 3DGS trainer: no GPU, wgpu or lavapipe
+  (`docs/gsplat_cpu_trainer.md`).
+  - Projection, binning, both rasterizer passes, L1 + D-SSIM, Inria
+    densification and a deferred sparse Adam (GS-Scale) on the host, with
+    `gsplat_train`'s defaults.
+  - Mip-NeRF 360 bonsai, 4 vCPUs: 1.50x faster than `gsplat_train` at
+    390x260 over 7,000 steps (29.95 against 29.89 dB) and 1.38x at 780x520
+    over 3,000 steps (28.93 against 28.86 dB).
+  - Opt-in: a coarse-to-fine resolution schedule (`--res-schedule`, 10-17%
+    for ~0.3 dB on two of three scenes), strided pixels (`--stride 2`, not
+    worth it here) and an experimental per-gaussian Gauss-Newton step after
+    3DGS² (`--optimizer newton`; 2.8x slower than Adam in wall time).
+  - `visloc-gsplat-train` gains a `host-loss` feature: its host L1 / SSIM
+    without wgpu.
+  - A survey of 2024-2026 fast-training papers ranked for a CPU trainer
+    (`docs/research/`, in Japanese).
 - The 3DGS street simulator moves to Robot Native Engine (RNE)
   (`docs/rne_migration.md`). The ROS 2 simulator (`gs_sim.py` with Nav2) is
   frozen as the reference.
@@ -49,6 +72,28 @@ All notable changes to `visloc-rs` will be documented here.
   testing; `ros2/visloc-ros2/examples/euroc_dds_replay.rs`, a DDS player
   and recorder for running the ROS 2 nodes on recorded data without ROS 2.
 - `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`.
+- `lamaria_batch_ba.py online --jump-gate`: a window whose initial cost per
+  observation jumps past this many times the window before's drops
+  observations over 3 px from its first iteration. The BA chain passes
+  `--jump-gate 3` for a monocular run in low light; on LaMAria
+  sequence_4_3 (test) it removes a 25 m offset the online windows put in the
+  first six minutes, and it never fires on the Low light training
+  sequences. See `docs/lamaria_mono.md`.
+- `scripts/lamaria_gps_bend.py` bends a LaMAria trajectory's slow heading
+  and scale drift toward its recording's own GPS fixes. It works as a 2D pose
+  graph on nodes every 5 s, with Cauchy pulls toward the fixes, and runs only
+  when the median residual to the fixes is 4 m or more. On the six training
+  monos with injected drift, the bent cases above the gate gain 31.6 CP
+  points on average. No training mono reaches the gate on its own. See
+  `docs/lamaria_mono.md`.
+
+### Fixed
+
+- `visloc-gsplat-cpu`: the dense Adam path (brush, `--dense-adam`) left
+  each gaussian's last-updated step stale, so every refine and evaluation
+  replayed phantom momentum steps; this was the 0.35 dB gap to
+  `gsplat_train --strategy brush`. `--no-densify` now also turns off
+  brush's refine, as in `gsplat_train`.
 
 ## 0.5.0 - 2026-11-24
 

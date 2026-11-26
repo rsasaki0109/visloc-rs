@@ -1495,6 +1495,14 @@ def cmd_solve(a):
     r_wi, t_wi = poses(values)
     cost = rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[0] + graph.error(values) + seg_cost(r_ic)
     print(f"initial cost {cost:.6g}", flush=True)
+    cost_per_obs = cost / max(int(rp.active.sum()), 1)
+    # --jump-gate (online): the new keyframes disagree with the window far more than the window before did
+    # with its own; gate with the tight threshold before the first step instead of letting it pull the window
+    prev = init.get("cost_per_obs") if init is not None else None
+    early_gate = getattr(a, "jump_gate", 0) > 0 and prev and cost_per_obs > a.jump_gate * prev
+    if early_gate:
+        print(f"  initial cost per observation {cost_per_obs:.3g}, {cost_per_obs / prev:.1f} times the window "
+              f"before: {a.outlier_px2} px from the first iteration", flush=True)
     lam = a.lambda0
     mu = 0.0  # damping of the modes relative to their own curvature: none until a step with them fails
     for it in range(a.iterations):
@@ -1502,7 +1510,7 @@ def cmd_solve(a):
         if a.outlier_px > 0:
             # drop observations that moved far off, then landmarks left with a single observation;
             # from --outlier-start2 on with the tighter --outlier-px2
-            thr = a.outlier_px2 if 0 < a.outlier_px2 and it >= a.outlier_start2 else a.outlier_px
+            thr = a.outlier_px2 if 0 < a.outlier_px2 and (it >= a.outlier_start2 or early_gate) else a.outlier_px
             bad = rp.active & (rp.cost(r_wi, t_wi, r_ic, t_ic, pts)[1] * rp.sigma > thr)
             if bad.any():
                 rp.active &= ~bad
@@ -1727,7 +1735,8 @@ def cmd_solve(a):
         np.savez(os.path.splitext(a.out)[0] + "_states.npz", k0=k0, kf_ns=kf_ns, r_wi=r_wi, t_wi=t_wi, r_ic=r_ic,
                  ext_segments=n_seg, pts=pts, obs_kf=rp.kf, obs_cam=rp.cam // n_seg, obs_lm=rp.lm, obs_z=rp.z,
                  active=rp.active, vel=vel, bias=bias, foc=rp.foc, sigma=rp.sigma, huber=a.huber)
-    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg}
+    return {"kf_ns": kf_ns, "vel": vel, "bias": bias, "r_ic": r_ic, "foc": rp.foc.copy(), "n_seg": n_seg,
+            "cost_per_obs": cost_per_obs}
 
 
 def cmd_online(a):
@@ -2189,6 +2198,9 @@ def main():
     solve_args(o)
     o.add_argument("--window", type=int, default=480, help="keyframes per window (the most recent ones)")
     o.add_argument("--step", type=int, default=60, help="keyframes between two windows")
+    o.add_argument("--jump-gate", type=float, default=0.0,
+                   help="a window whose initial cost per observation exceeds this many times the window before's "
+                   "drops observations over --outlier-px2 from its first iteration (0: off)")
     o.set_defaults(iterations=10, ext_segments=2)  # per window
     c = sub.add_parser("loop-correct", help="close the revisits of a solve with a pose graph (after solve "
                        "--save-states and loops)")

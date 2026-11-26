@@ -28,7 +28,7 @@ pub mod equirect;
 #[cfg(feature = "euroc")]
 pub mod euroc;
 pub mod init;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "host-loss"))]
 pub mod loss;
 #[cfg(feature = "euroc")]
 pub mod masks;

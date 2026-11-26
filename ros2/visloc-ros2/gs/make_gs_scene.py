@@ -27,9 +27,13 @@ The splat has no collision geometry, so the robot's world is made from it:
 - **Where the camera was carried**: cells within `--clear-path-m` of the
   capture path are free (floaters near the camera would block it).
 
-`--terrain` takes the ground's height from the camera path instead of a
+`--terrain` takes the ground's height along the camera path instead of a
 flat floor (`<out stem>_ground.npy`, the grid's frame), for a walk up a
-sloping street; heights above are then measured from it.
+sloping street; heights above are then measured from it. Under each camera
+the ground is the densest layer of the splat's opaque gaussians within
+1.5 m of it, at least 0.3 m below it (`ground_under_cameras`). The capture
+camera's own height over the ground is not assumed: OverMaps360's pole
+carries it 2.3 to 2.5 m up, the robot's camera is 1.2 m up.
 
 Writes the grid (`<out stem>_grid.npy`, 1 = occupied, row j = y) and the
 scene JSON (splat, camera, grid frame, start pose, robot radius), plus a PNG
@@ -74,6 +78,32 @@ def camera_centres(model):
     return np.array(centres)
 
 
+def ground_under_cameras(cams, xyz, opacity, radius=1.5, bin_m=0.05):
+    """The ground's height under each camera centre: the densest 5 cm layer of opaque
+    gaussians within `radius` of it horizontally and at least 0.3 m below it. Cameras with
+    too few gaussians under them take the median camera height over the ground found
+    elsewhere, and the heights are smoothed along the path."""
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy import ndimage  # noqa: PLC0415
+    keep = opacity > 0.3
+    pts = xyz[keep]
+    tree = cKDTree(pts[:, :2])
+    ground = np.full(len(cams), np.nan)
+    for k, c in enumerate(cams):
+        z = pts[tree.query_ball_point(c[:2], radius), 2]
+        z = z[z < c[2] - 0.3]
+        if len(z) < 20:
+            continue
+        hist, edges = np.histogram(z, bins=np.arange(z.min(), c[2] - 0.3 + bin_m, bin_m))
+        ground[k] = edges[int(np.argmax(hist))] + bin_m / 2
+    found = ~np.isnan(ground)
+    height = float(np.median(cams[found, 2] - ground[found])) if found.any() else 1.2
+    ground[~found] = cams[~found, 2] - height
+    print(f'ground under {found.sum()} of {len(cams)} cameras from the splat; the capture camera '
+          f'{height:.2f} m above it (median)')
+    return ndimage.median_filter(ground, size=9, mode='nearest')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--splat', required=True)
@@ -85,7 +115,7 @@ def main():
     p.add_argument('--start', required=True, help='x,y,yaw of the robot at start')
     p.add_argument('--floor-z', type=float, default=0.0)
     p.add_argument('--terrain', action='store_true',
-                   help='the ground follows the camera path (camera z minus --camera-height), for a sloping street')
+                   help="the ground follows the camera path (the splat's ground under each camera), for a sloping street")
     p.add_argument('--z-min', type=float, default=0.06)
     p.add_argument('--z-max', type=float, default=0.8)
     p.add_argument('--min-opacity', type=float, default=0.5)
@@ -124,7 +154,7 @@ def main():
         jj, ii = np.mgrid[0:H, 0:W]
         tree = cKDTree(cams[:, :2])
         _, near = tree.query(np.stack([x0 + (ii.ravel() + 0.5) * res, y0 + (jj.ravel() + 0.5) * res], 1))
-        ground = (cams[near, 2] - args.camera_height).reshape(H, W).astype(np.float32)
+        ground = ground_under_cameras(cams, xyz, opacity)[near].reshape(H, W).astype(np.float32)
         ground = ndimage.uniform_filter(ground, int(2.0 / res))
     gi = ((xyz[:, 0] - x0) / res).astype(int).clip(0, W - 1)
     gj = ((xyz[:, 1] - y0) / res).astype(int).clip(0, H - 1)

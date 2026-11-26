@@ -54,6 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut depth_prior: Option<PathBuf> = None;
     let mut depth_weight = 0.1f32;
     let mut brush_strategy = false;
+    let mut mean_noise: Option<f32> = None;
+    let mut aux_weights: Option<(f32, f32)> = None;
     let mut max_gaussians: Option<usize> = None;
     let mut equirect = EquirectOptions::default();
     while let Some(a) = args.next() {
@@ -68,6 +70,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--ssim-every" => cfg.ssim_every = next()?.parse()?,
             "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
             "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
+            // The view order, refine sampling and mean noise (default 42).
+            "--seed" => cfg.seed = next()?.parse()?,
+            // brush strategy ablations: mean noise weight (brush: 40) and
+            // the opacity / scale aux-loss weights (brush: 1e-9, 1e-8).
+            "--mean-noise" => mean_noise = Some(next()?.parse::<f32>()?),
+            "--aux-weights" => {
+                let v: Vec<f32> = next()?
+                    .split(',')
+                    .map(|x| x.parse())
+                    .collect::<Result<_, _>>()?;
+                aux_weights = Some((v[0], v[1]));
+            }
             // brush 0.3's refine strategy, mean noise and learning rates.
             "--strategy" => match next()?.as_str() {
                 "brush" => brush_strategy = true,
@@ -120,6 +134,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --no-densify: no refine either (fixed population).
             cfg.brush_refine = None;
         }
+    }
+    if let Some(w) = mean_noise {
+        if let Some(b) = cfg.brush_refine.as_mut() {
+            b.mean_noise_weight = w;
+        }
+    }
+    if let Some((o, sc)) = aux_weights {
+        cfg.opac_loss_weight = o;
+        cfg.scale_loss_weight = sc;
     }
     if let Some(cap) = max_gaussians {
         if let Some(d) = cfg.densify.as_mut() {
