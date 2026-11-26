@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 
 use crate::model::{Model, NCOL, NGEO, NSH};
-use crate::project::{jacobian, project_all, Proj};
+use crate::project::{jacobian, project_all, screen_vjp, Proj};
 use crate::raster::{backward, forward, tri6, Frame, Raster, B_COL, B_GRAD, B_H, B_HC, NB};
 
 /// Upper triangle of an 11x11 symmetric matrix.
@@ -331,13 +331,9 @@ impl Trainer {
                 let p = &r.proj[c as usize];
                 let o = &out[c as usize];
                 if o[B_GRAD..B_GRAD + 6].iter().any(|&x| x != 0.0) {
-                    if let Some(j) = jacobian(model, p.id as usize, view) {
-                        for q in 0..6 {
-                            let gs = o[B_GRAD + q];
-                            for (k, x) in gg.iter_mut().enumerate() {
-                                *x += gs * j[q][k];
-                            }
-                        }
+                    let gs = [o[0], o[1], o[2], o[3], o[4], o[5]];
+                    if let Some(v) = screen_vjp(model, p.id as usize, view, &gs) {
+                        *gg = v;
                     }
                 }
                 for ch in 0..3 {

@@ -433,3 +433,139 @@ pub fn project_all(model: &Model, view: &CameraView) -> Vec<Proj> {
     });
     out
 }
+
+/// `J^T g` for `g = dL / d(u, v, A, B, C, opacity)` of gaussian `id`: the
+/// gradient of its 11 geometry parameters, by a hand-written reverse pass
+/// (what [`jacobian`] gives, at a fraction of the cost); `None` if culled.
+pub fn screen_vjp(model: &Model, id: usize, view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
+    // Forward, keeping what the reverse pass needs; the culls are
+    // `screen`'s, which the caller already passed.
+    let g = &model.geo[id];
+    let cam = &view.camera;
+    let (w, h) = (cam.width as f32, cam.height as f32);
+    let (fx, fy) = (cam.fx, cam.fy);
+    let r = view.rotation;
+    let t = view.translation;
+    let o = 1.0 / (1.0 + (-g[10]).exp());
+    let p: [f32; 3] = std::array::from_fn(|i| r[(i, 0)] * g[0] + r[(i, 1)] * g[1] + r[(i, 2)] * g[2] + t[i]);
+    let qr = [g[6], g[7], g[8], g[9]];
+    let n2 = qr.iter().map(|x| x * x).sum::<f32>();
+    if n2.is_nan() || n2 <= f32::EPSILON * f32::EPSILON || p[2] <= 0.1 {
+        return None;
+    }
+    let n = n2.sqrt();
+    let (qw, qx, qy, qz) = (qr[0] / n, qr[1] / n, qr[2] / n, qr[3] / n);
+    let rg = [
+        [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qw * qz), 2.0 * (qx * qz + qw * qy)],
+        [2.0 * (qx * qy + qw * qz), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qw * qx)],
+        [2.0 * (qx * qz - qw * qy), 2.0 * (qy * qz + qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)],
+    ];
+    let s2 = [(2.0 * g[3]).exp(), (2.0 * g[4]).exp(), (2.0 * g[5]).exp()];
+    let m: [[f32; 3]; 3] =
+        std::array::from_fn(|i| std::array::from_fn(|k| rg[0][k] * r[(i, 0)] + rg[1][k] * r[(i, 1)] + rg[2][k] * r[(i, 2)]));
+    let z = p[2];
+    let iz = 1.0 / z;
+    let iz2 = iz * iz;
+    let lim_x = 1.3 * 0.5 * w / fx;
+    let lim_y = 1.3 * 0.5 * h / fy;
+    let xr = p[0] * iz;
+    let yr = p[1] * iz;
+    let x_free = (-lim_x..=lim_x).contains(&xr);
+    let y_free = (-lim_y..=lim_y).contains(&yr);
+    let tx = xr.clamp(-lim_x, lim_x) * z;
+    let ty = yr.clamp(-lim_y, lim_y) * z;
+    let j00 = fx * iz;
+    let j02 = -fx * tx * iz2;
+    let j11 = fy * iz;
+    let j12 = -fy * ty * iz2;
+    let jm0: [f32; 3] = std::array::from_fn(|k| j00 * m[0][k] + j02 * m[2][k]);
+    let jm1: [f32; 3] = std::array::from_fn(|k| j11 * m[1][k] + j12 * m[2][k]);
+    let mut a = 0.3f32;
+    let mut b = 0.0f32;
+    let mut c = 0.3f32;
+    for k in 0..3 {
+        a += s2[k] * jm0[k] * jm0[k];
+        b += s2[k] * jm0[k] * jm1[k];
+        c += s2[k] * jm1[k] * jm1[k];
+    }
+    let det = a * c - b * b;
+    if det.is_nan() || det <= 0.0 {
+        return None;
+    }
+    let id_ = 1.0 / det;
+
+    // Reverse.
+    let [gu, gv, g_a, g_b, g_c, go] = *gs;
+    let mut out = [0.0f32; NGEO];
+    out[10] = go * o * (1.0 - o);
+    let gi = g_a * c - g_b * b + g_c * a;
+    let gdet = -gi * id_ * id_;
+    let ga = g_c * id_ + gdet * c;
+    let gb = -g_b * id_ - 2.0 * gdet * b;
+    let gc = g_a * id_ + gdet * a;
+    let mut g_jm0 = [0.0f32; 3];
+    let mut g_jm1 = [0.0f32; 3];
+    for k in 0..3 {
+        let gs2 = ga * jm0[k] * jm0[k] + gb * jm0[k] * jm1[k] + gc * jm1[k] * jm1[k];
+        out[3 + k] = gs2 * 2.0 * s2[k];
+        g_jm0[k] = s2[k] * (2.0 * ga * jm0[k] + gb * jm1[k]);
+        g_jm1[k] = s2[k] * (2.0 * gc * jm1[k] + gb * jm0[k]);
+    }
+    let mut g_j00 = 0.0;
+    let mut g_j02 = 0.0;
+    let mut g_j11 = 0.0;
+    let mut g_j12 = 0.0;
+    let mut gm = [[0.0f32; 3]; 3];
+    for k in 0..3 {
+        g_j00 += g_jm0[k] * m[0][k];
+        g_j02 += g_jm0[k] * m[2][k];
+        g_j11 += g_jm1[k] * m[1][k];
+        g_j12 += g_jm1[k] * m[2][k];
+        gm[0][k] = g_jm0[k] * j00;
+        gm[1][k] = g_jm1[k] * j11;
+        gm[2][k] = g_jm0[k] * j02 + g_jm1[k] * j12;
+    }
+    // Camera-space mean.
+    let mut gp = [0.0f32; 3];
+    gp[0] += gu * fx * iz;
+    gp[1] += gv * fy * iz;
+    gp[2] += -(gu * fx * p[0] + gv * fy * p[1]) * iz2;
+    gp[2] += -(g_j00 * fx + g_j11 * fy) * iz2;
+    if x_free {
+        gp[0] += -g_j02 * fx * iz2;
+        gp[2] += g_j02 * 2.0 * fx * p[0] * iz2 * iz;
+    } else {
+        gp[2] += g_j02 * fx * xr.clamp(-lim_x, lim_x) * iz2;
+    }
+    if y_free {
+        gp[1] += -g_j12 * fy * iz2;
+        gp[2] += g_j12 * 2.0 * fy * p[1] * iz2 * iz;
+    } else {
+        gp[2] += g_j12 * fy * yr.clamp(-lim_y, lim_y) * iz2;
+    }
+    for j in 0..3 {
+        out[j] = r[(0, j)] * gp[0] + r[(1, j)] * gp[1] + r[(2, j)] * gp[2];
+    }
+    // Rotation: gRg = R^T gM, then through the normalised quaternion.
+    let grg: [[f32; 3]; 3] =
+        std::array::from_fn(|l| std::array::from_fn(|k| r[(0, l)] * gm[0][k] + r[(1, l)] * gm[1][k] + r[(2, l)] * gm[2][k]));
+    let gq = [
+        2.0 * (-qz * grg[0][1] + qy * grg[0][2] + qz * grg[1][0] - qx * grg[1][2] - qy * grg[2][0] + qx * grg[2][1]),
+        2.0 * (qy * grg[0][1] + qz * grg[0][2] + qy * grg[1][0] - 2.0 * qx * grg[1][1] - qw * grg[1][2] + qz * grg[2][0]
+            + qw * grg[2][1]
+            - 2.0 * qx * grg[2][2]),
+        2.0 * (-2.0 * qy * grg[0][0] + qx * grg[0][1] + qw * grg[0][2] + qx * grg[1][0] + qz * grg[1][2] - qw * grg[2][0]
+            + qz * grg[2][1]
+            - 2.0 * qy * grg[2][2]),
+        2.0 * (-2.0 * qz * grg[0][0] - qw * grg[0][1] + qx * grg[0][2] + qw * grg[1][0] - 2.0 * qz * grg[1][1]
+            + qy * grg[1][2]
+            + qx * grg[2][0]
+            + qy * grg[2][1]),
+    ];
+    let qn = [qw, qx, qy, qz];
+    let dot = gq.iter().zip(&qn).map(|(a, b)| a * b).sum::<f32>();
+    for i in 0..4 {
+        out[6 + i] = (gq[i] - qn[i] * dot) / n;
+    }
+    Some(out)
+}

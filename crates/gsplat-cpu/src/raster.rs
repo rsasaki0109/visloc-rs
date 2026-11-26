@@ -351,9 +351,9 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
         }
         jobs.par_iter_mut().for_each(|(t, s, slots)| {
             if gauss_newton {
-                tile_backward::<true>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
+                tile_backward::<true, NB>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
             } else {
-                tile_backward::<false>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
+                tile_backward::<false, 10>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
             }
         });
         for (k, g) in scratch.iter().enumerate() {
@@ -369,7 +369,9 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tile_backward<const GN: bool>(
+/// `NA` accumulators per splat: all [`NB`] with `GN`, else the gradient,
+/// colour gradient and statistic (10), the statistic at index 9.
+fn tile_backward<const GN: bool, const NA: usize>(
     f: &Frame,
     r: &Raster,
     d_image: &[f32],
@@ -424,7 +426,8 @@ fn tile_backward<const GN: bool>(
         let (mu_x, mu_y, c00, c01, c11, opac) = (p[0], p[1], p[2], p[3], p[4], p[5]);
         let col = [p[6], p[7], p[8]];
         let ju = j as u32;
-        let mut acc = [[0.0f32; W]; NB];
+        let mut acc = [[0.0f32; W]; NA];
+        let stat = if GN { B_STAT } else { 9 };
         let mut any = false;
         for ly in ly0..=ly1 {
             let dy = (y0 as usize + ly) as f32 + 0.5 - mu_y;
@@ -475,7 +478,7 @@ fn tile_backward<const GN: bool>(
                         for q in 0..6 {
                             acc[B_GRAD + q][k] += d_alpha * ds[q];
                         }
-                        acc[B_STAT][k] += (d_alpha * ds[0]).abs() * img_w + (d_alpha * ds[1]).abs() * img_h;
+                        acc[stat][k] += (d_alpha * ds[0]).abs() * img_w + (d_alpha * ds[1]).abs() * img_h;
                         if GN {
                             let ratio = w_tot[ly][k] / at.max(1e-12);
                             let fo = if overlap == 1.0 {
@@ -513,8 +516,15 @@ fn tile_backward<const GN: bool>(
         }
         if any {
             let slot = &mut slots[j - start];
-            for (s, lanes) in slot.iter_mut().zip(&acc) {
-                *s = lanes.iter().sum();
+            if GN {
+                for (s, lanes) in slot.iter_mut().zip(&acc) {
+                    *s = lanes.iter().sum();
+                }
+            } else {
+                for (s, lanes) in slot.iter_mut().zip(&acc[..9]) {
+                    *s = lanes.iter().sum();
+                }
+                slot[B_STAT] = acc[9].iter().sum();
             }
         }
     }

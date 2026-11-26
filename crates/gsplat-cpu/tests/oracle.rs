@@ -181,3 +181,41 @@ fn gauss_newton_matches_finite_differences() {
         assert!((got - fdc).abs() < 2e-2 * fdc.abs() + 1e-9, "colour H {i}: {got} vs {fdc}");
     }
 }
+
+#[test]
+fn screen_vjp_matches_the_dual_jacobian() {
+    use visloc_gsplat_cpu::project::{jacobian, screen_vjp};
+    let s = scene(0);
+    let m = Model::from_scene(&s);
+    // A wide view too, so some splats sit past the 1.3x frustum clamp.
+    let mut views = vec![view()];
+    let mut wide = view();
+    wide.camera = PinholeCamera::new(40, 32, 8.0, 8.0, 20.0, 16.0);
+    views.push(wide);
+    let mut moved = view();
+    moved.translation = Vector3::new(1.6, -0.9, 0.2);
+    views.push(moved);
+    // Narrow and off to the side: centres past the clamp, footprints in view.
+    let mut narrow = view();
+    narrow.camera = PinholeCamera::new(40, 32, 200.0, 200.0, 20.0, 16.0);
+    narrow.translation = Vector3::new(0.9, 0.0, 0.2);
+    views.push(narrow);
+    let mut clamped = 0;
+    for v in &views {
+        for i in 0..s.len() {
+            let Some(j) = jacobian(&m, i, v) else { continue };
+            let g = [0.3, -0.7, 1.1, -0.4, 0.9, 0.5];
+            let got = screen_vjp(&m, i, v, &g).expect("vjp");
+            let pc = v.world_to_camera_point(s.gaussians[i].mean);
+            if (pc.x / pc.z).abs() > 1.3 * 0.5 * 40.0 / v.camera.fx {
+                clamped += 1;
+            }
+            for k in 0..11 {
+                let want: f32 = (0..6).map(|q| g[q] * j[q][k]).sum();
+                let scale = want.abs().max(1e-3);
+                assert!((got[k] - want).abs() / scale < 1e-3, "gaussian {i} param {k}: {} vs {want}", got[k]);
+            }
+        }
+    }
+    assert!(clamped > 0, "no splat past the frustum clamp");
+}
