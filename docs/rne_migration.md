@@ -157,8 +157,9 @@ Each phase ends with a headless test in RNE, and a short docs entry.
 
 - **P0 done.** `rne_bundle.py` (and `real2sim.py --export-rne DIR`) writes the
   bundle, and `rne_bundle_test.py` checks it. The street's road and pavement
-  come from a run's `people.json` (`--people-json`). Moving that analysis
-  into the export itself is still to do.
+  come from a run's `people.json` (`--people-json`), or, without one, from
+  the splat in the export itself (`analyze_street`, written to the bundle's
+  `people.json` for `rne_crowd.py`).
 - **P1 done**, in RNE `examples/163_street_splat_nav` (`docs/STREET_SPLAT_NAV.md`
   there). On the OverMaps360 street, on ground truth:
   - 4/4 goals over 111 m in 284 s, with no contacts.
