@@ -282,3 +282,26 @@ fn screen_vjp_matches_the_dual_jacobian() {
     }
     assert!(clamped > 0, "no splat past the frustum clamp");
 }
+
+#[test]
+fn refine_weight_leaves_gradients_alone() {
+    use visloc_gsplat_cpu::project::project_all;
+    use visloc_gsplat_cpu::raster::{backward_with, forward, Frame, B_STAT};
+    let s = scene(0);
+    let m = Model::from_scene(&s);
+    let v = view();
+    let n = (v.camera.width * v.camera.height) as usize;
+    let gt = target(n);
+    let proj = project_all(&m, &v);
+    let f = Frame::new(&proj, v.camera.width, v.camera.height, [0.0; 3]);
+    let r = forward(&f);
+    let d: Vec<f32> = (0..n * 3).map(|i| r.image[i] - gt[i]).collect();
+    let a = backward_with(&f, &r, &d, 1.0, false, 1.0, false);
+    let b = backward_with(&f, &r, &d, 1.0, false, 1.0, true);
+    for (x, y) in a.iter().zip(&b) {
+        for k in 0..9 {
+            assert_eq!(x[k], y[k], "slot {k}");
+        }
+        assert!(y[B_STAT] >= 0.0);
+    }
+}

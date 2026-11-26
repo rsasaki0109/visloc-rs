@@ -771,8 +771,11 @@ impl Trainer {
                         bc1,
                         bc2,
                     );
-                    *last = t_now;
                 }
+                // Dense steps bring the gaussian up to date too: a stale
+                // `last` made every `sync` (each refine and evaluation)
+                // replay that many phantom momentum steps and zero m.
+                *last = t_now;
                 let mut g = [0.0f32; NGEO];
                 let mut gc = [0.0f32; NCOL];
                 if c != u32::MAX {
