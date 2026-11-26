@@ -296,6 +296,17 @@ The mean rises from 57.8 to 58.3, still sixth.
 as in submission 7). The three score as before (43.4, 63.7, 32.8), the Moving platform track goes from 44.7
 to 46.8 and the mean from 58.3 to 58.7.
 
+**Submission 13** (score pending). All 63 sequences on GitHub Actions at commit `9af669f`
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45785530920); 22 Medium, Long and Low light jobs
+failed while the ETH server refused connections from 12:44 to 14:02 UTC and ran again unchanged in
+[a second run](https://github.com/rsasaki0109/visloc-rs/actions/runs/45852852367)). Against submission 11:
+- **By day** the pass reads 1,500 RootSIFT keypoints of its own matched with the ratio test at 0.78
+  ([SLAM Dunk comparison](lamaria_slam_dunk_comparison.md#the-papers-front-end-in-the-pass-rootsift-and-the-keyframe-spacing)):
+  70.18 against 68.86–69.03 on the thirteen training recordings. Low light is unchanged.
+- **Moving platform** bridged with the GPS as in submission 7, by the same script: sequence_5_3's largest step is
+  now 23.8 m, under the 25 m threshold, so it is no longer bridged; sequence_5_8 and 5_10 have no step.
+- An alternative zip keeps submission 12's sequence_5_1, 5_5 and 5_10.
+
 ## Against GroundedSLAM, sequence by sequence
 
 GroundedSLAM's scores here are those before its upload of 2026-10-29.
