@@ -4,6 +4,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- `visloc_vio_node` with `mono:=true` now matches the offline demo. It reads
+  `config.vio_init_accel_average_s` and starts the stream as the EuRoC
+  reader does, levelled by the mean IMU sample over that span instead of
+  one sample. `max_iterations` now defaults to the config's with `mono`
+  (stereo stays at 3). On OpenLORIS office1-6 with a monocular map,
+  replayed over DDS, the error goes from 57.8 to 7.87 cm, and from 1.88 to
+  1.30 cm with `map_prior` and `wheel_velocity`. See the ROS 2 README.
+
 ### Added
 
 - The wgpu trainer takes a depth prior, as gsplat-cuda's: `gsplat_train

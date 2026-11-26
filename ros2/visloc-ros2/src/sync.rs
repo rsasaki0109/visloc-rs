@@ -224,6 +224,34 @@ impl ImuBuffer {
         out
     }
 
+    /// The mean of the buffered samples in `[from_ns, until_ns]`, stamped
+    /// `until_ns` (the EuRoC reader's `config.vio_init_accel_average_s`
+    /// sample); `None` without samples there.
+    pub fn mean_between(&self, from_ns: i64, until_ns: i64) -> Option<ImuSample> {
+        let span: Vec<_> = self
+            .samples
+            .iter()
+            .filter(|s| s.timestamp_ns >= from_ns && s.timestamp_ns <= until_ns)
+            .collect();
+        if span.is_empty() {
+            return None;
+        }
+        let n = span.len() as f64;
+        Some(ImuSample {
+            timestamp_ns: until_ns,
+            accel_m_s2: span
+                .iter()
+                .map(|s| s.accel_m_s2)
+                .sum::<nalgebra::Vector3<f64>>()
+                / n,
+            gyro_rad_s: span
+                .iter()
+                .map(|s| s.gyro_rad_s)
+                .sum::<nalgebra::Vector3<f64>>()
+                / n,
+        })
+    }
+
     /// First buffered sample at or after `stamp_ns` (Basalt's
     /// initialization sample for the very first frame).
     pub fn first_at_or_after(&self, stamp_ns: i64) -> Option<ImuSample> {
@@ -273,6 +301,15 @@ pub struct VioInputs<T> {
     pairs: u64,
     /// Monocular stream: every left image is a frame, without pairing.
     mono: bool,
+    /// `config.vio_init_accel_average_s` as nanoseconds: the stream starts
+    /// this long after its first frame, levelled by the mean IMU sample
+    /// over that span (as the EuRoC reader does). `None`: one sample.
+    init_average_ns: Option<i64>,
+    /// Stamp (IMU clock) of the first frame offered, the start of that span.
+    first_frame_ns: Option<i64>,
+    /// The averaged start has been released once; later re-initializations
+    /// (after a reset) use one sample.
+    init_averaged: bool,
 }
 
 impl<T> VioInputs<T> {
@@ -293,7 +330,22 @@ impl<T> VioInputs<T> {
             frames_dropped_behind: 0,
             pairs: 0,
             mono: false,
+            init_average_ns: None,
+            first_frame_ns: None,
+            init_averaged: false,
         }
+    }
+
+    /// Start the stream `span_s` seconds after its first frame and level it
+    /// with the mean IMU sample over that span (`config.vio_init_accel_average_s`),
+    /// as the EuRoC reader does, instead of one sample. For a robot that
+    /// starts still. `None` or a non-positive span keeps one sample.
+    #[must_use]
+    pub fn with_init_accel_average(mut self, span_s: Option<f64>) -> Self {
+        self.init_average_ns = span_s
+            .filter(|s| *s > 0.0)
+            .map(|s| (s * 1e9).round() as i64);
+        self
     }
 
     /// A monocular input side: each [`Self::push_left`] image is a frame
@@ -384,9 +436,23 @@ impl<T> VioInputs<T> {
             if !self.front_ready() {
                 return None;
             }
-            let pair = self.frames.pop_front().expect("front exists");
             let first = self.last_released_ns.is_none();
-            let initialization_imu = if first {
+            let averaged_start = first && !self.init_averaged && self.init_average_ns.is_some();
+            if averaged_start {
+                let first_ns = *self.first_frame_ns.get_or_insert(frame_ns);
+                if frame_ns < first_ns + self.init_average_ns.expect("checked") {
+                    // Still inside the averaging span: the frame is skipped and
+                    // its IMU samples stay buffered for the first interval.
+                    self.frames.pop_front();
+                    continue;
+                }
+            }
+            let pair = self.frames.pop_front().expect("front exists");
+            let initialization_imu = if averaged_start {
+                self.init_averaged = true;
+                let first_ns = self.first_frame_ns.expect("set above");
+                self.imu.mean_between(first_ns, frame_ns)
+            } else if first {
                 self.imu.first_at_or_after(frame_ns)
             } else {
                 None
@@ -607,5 +673,53 @@ mod tests {
         assert_eq!(packet.stamp_ns, 17);
         assert_eq!(packet.header_stamp_ns, 10);
         assert_eq!(packet.imu.last().unwrap().timestamp_ns, 17);
+    }
+    #[test]
+    fn averaged_start_skips_the_span_and_levels_with_the_mean() {
+        const MS: i64 = 1_000_000;
+        let mut inputs = VioInputs::new_mono(16, 1000, 0).with_init_accel_average(Some(0.25));
+        // IMU every 10 ms from 0 to 600 ms; accel x alternates +1 / -1.
+        for k in 0..=60 {
+            let x = if k % 2 == 0 { 1.0 } else { -1.0 };
+            inputs.push_imu(ImuSample::new(
+                k * 10 * MS,
+                Vector3::zeros(),
+                Vector3::new(x, 0.0, 9.81),
+            ));
+        }
+        // Frames every 100 ms from 0 ms.
+        for k in 0..6 {
+            inputs.push_left(k * 100 * MS, k);
+        }
+        let first = inputs.pop_ready().unwrap();
+        // 0, 100 and 200 ms fall inside the 250 ms span.
+        assert_eq!(first.left, 3);
+        let init = first.initialization_imu.unwrap();
+        assert_eq!(init.timestamp_ns, 300 * MS);
+        // 31 samples from 0 to 300 ms: 16 of +1, 15 of -1.
+        assert!((init.accel_m_s2.x - 1.0 / 31.0).abs() < 1e-12);
+        assert!((init.accel_m_s2.z - 9.81).abs() < 1e-12);
+        // The first interval keeps every sample up to the frame.
+        assert_eq!(first.imu.len(), 31);
+        let second = inputs.pop_ready().unwrap();
+        assert_eq!(second.left, 4);
+        assert!(second.initialization_imu.is_none());
+        // After a reset the stream re-initializes from one sample.
+        inputs.reset_stream();
+        let again = inputs.pop_ready().unwrap();
+        assert_eq!(again.left, 5);
+        assert_eq!(again.initialization_imu.unwrap().timestamp_ns, 500 * MS);
+    }
+
+    #[test]
+    fn without_averaging_the_first_frame_uses_one_sample() {
+        let mut inputs = VioInputs::new_mono(16, 100, 0).with_init_accel_average(None);
+        for ns in [10, 20, 30] {
+            inputs.push_imu(imu(ns));
+        }
+        inputs.push_left(15, "a");
+        let first = inputs.pop_ready().unwrap();
+        assert_eq!(first.left, "a");
+        assert_eq!(first.initialization_imu.unwrap().timestamp_ns, 20);
     }
 }

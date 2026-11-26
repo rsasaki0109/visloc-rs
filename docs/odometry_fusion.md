@@ -162,8 +162,11 @@ Frames with a map pose: 98.2–99.6%.
   `map_prior_tilt_stddev_deg` default to no tilt for a monocular VIO without
   wheel velocity.
 - **Through the ROS 2 nodes** (`mono:=true`, mono maps, replayed over DDS at
-  0.2x): office1-6 57.8 → 1.88 cm, office1-7 60.3 → 7.89 cm with
-  `map_prior` + `wheel_velocity`.
+  0.2x): office1-6 7.87 → 1.30 cm with `map_prior` + `wheel_velocity`.
+  Before the node took the averaged initial tilt and the config's LM
+  iterations with `mono`, office1-6 was 57.8 → 1.88 cm and office1-7
+  60.3 → 7.89 cm
+  ([ROS 2 README](../ros2/visloc-ros2/README.md#map-fixes-and-wheel-speed-inside-the-vio)).
 
 ## What was adopted
 
@@ -248,6 +251,7 @@ target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
   VIO's marginal prior.
 - B's drift models (`OdometryNoise::VIO`, `WHEEL`, `LEGGED`) were set once
   and not tuned on these runs.
-- The monocular VIO without wheels varies a lot between setups: office1-6
-  on the mono map is 7.7 cm offline and 57.8 cm through the ROS 2 node.
-  The wheel-coupled numbers are the stable ones.
+- The monocular VIO without wheels depends on its start: office1-6 on the
+  mono map is 7.7 cm offline with the averaged initial tilt and diverges
+  (199 m) from one IMU sample. The ROS 2 node now starts the same way
+  (7.87 cm). The wheel-coupled numbers are the stable ones.
