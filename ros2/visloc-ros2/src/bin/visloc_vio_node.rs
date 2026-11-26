@@ -101,7 +101,7 @@ PARAMETERS (--name value  or  -p name:=value):
   urgent_keyframes       demo's urgent-keyframe spacing defaults                 [true]
   imu_seed_klt           seed KLT with the IMU rotation                          [false]
   max_iterations         LM iterations per frame; overrides config.vio_max_iterations
-                         (0: keep the config's)                                  [3]
+                         (0: keep the config's)                   [3; 0 with mono]
   mapper                 run Basalt's online mapper (loop closure + global BA)
                          and publish the map_frame -> odom_frame correction      [false]
   map_frame              frame of the corrected outputs (with mapper)           [map]
@@ -386,7 +386,15 @@ fn run() -> Result<(), String> {
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
-        max_iterations: Some(args.parsed_or("max_iterations", 3u32)?).filter(|&n| n > 0),
+        // Three iterations keep the stereo VIO real time on 4 cores; the
+        // monocular estimator is cheaper, and on a ground robot it needs the
+        // config's iterations (OpenLORIS office1-6: 14.4 cm with 3, 7.9 cm
+        // with 5, the offline demo's 7.7 cm).
+        max_iterations: Some(args.parsed_or(
+            "max_iterations",
+            if mono_camera.is_some() { 0u32 } else { 3 },
+        )?)
+        .filter(|&n| n > 0),
         retain_marg_data: mapper_params.is_some(),
         mono_camera,
     };
