@@ -168,6 +168,43 @@ Frames with a map pose: 98.2–99.6%.
   60.3 → 7.89 cm
   ([ROS 2 README](../ros2/visloc-ros2/README.md#map-fixes-and-wheel-speed-inside-the-vio)).
 
+## Monocular without wheels: a non-holonomic constraint (not adopted)
+
+A robot without wheel odometry still moves like one: its body goes along its
+own x axis. On office1-6, the ground truth taken to the wheel axle
+(`--imu-from-body`) moves forward at 0.21 m/s at the median while moving,
+sideways and vertically at 0.5 and 0.8 cm/s (90th percentile 1.2 and
+1.4 cm/s). So a zero lateral and vertical body velocity was put into the
+monocular VIO's window on every frame, through the same body-velocity factor
+as C but with the forward row weighted 0 (commit `b3ae377`,
+`--vio-nonholonomic SIGMA`, since removed). RMSE in cm, mono maps; the last
+columns are the VIO alone, aligned by a similarity (scale removed), and the
+scale that alignment needs:
+
+| | after map correction | VIO, scale removed | scale |
+|---|---:|---:|---:|
+| office1-6, VIO + correction | 7.66 | 6.00 | 1.109 |
+| — constraint 0.3 m/s | 12.24 | 6.46 | 1.188 |
+| — constraint 0.1 m/s | 13.98 | 5.56 | 1.241 |
+| — constraint 0.03 m/s | 9.42 | 4.35 | 1.144 |
+| office1-6, A | 2.71 | | |
+| — A + constraint 0.1 m/s | 2.65 | | |
+| office1-7, VIO + correction | 49.75 | 11.55 | 1.294 |
+| — constraint 0.1 m/s | 46.50 | 37.81 | 1.095 |
+| — constraint 0.03 m/s | 21.89 | 17.12 | 1.029 |
+| office1-7, A | 30.64 | 4.95 | 1.165 |
+| — A + constraint 0.1 m/s | 82.27 | 65.64 | 1.210 |
+| — A + constraint 0.03 m/s | 138.05 | 87.38 | 1.798 |
+
+- **The constraint holds, but it does not observe the scale**, which is most
+  of a monocular VIO's error on a ground robot. On office1-6 it straightens
+  the shape (6.00 to 4.35 cm with the scale removed) while the scale gets
+  worse, and the map-corrected error grows.
+- **It is not stable.** office1-7 gains at 0.03 m/s and barely at 0.1 m/s,
+  and with the map prior (A) it runs away at both.
+- Without wheels, the scale comes from the map fixes (A). The wheels (C)
+  remain the way to hold a monocular VIO between fixes.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
