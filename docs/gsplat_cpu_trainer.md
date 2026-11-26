@@ -109,22 +109,26 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 | --- | --- | ---: |
 | `gsplat_train --strategy brush` | 25.28 / 28.51 / 29.82 / **31.40** | 1,775 s |
 | `gsplat_train --strategy brush --seed 7` | 25.41 / 28.47 / 29.70 / **31.43** | 1,709 s |
-| `gsplat-cpu --strategy brush` | 25.37 / 28.48 / 29.92 / **31.04** | **1,425 s (1.25x)** |
-| `gsplat-cpu --strategy brush --seed 7` | 25.35 / 28.34 / 29.44 / **31.10** | 1,479 s |
+| `gsplat-cpu --strategy brush` | 24.91 / 28.71 / 30.04 / **31.39** | **1,416 s (1.25x)** |
 
-- **The populations agree** (228,789 against 228,481 at step 1,000; both
-  at the cap by 6,000), and so do the curves up to step 5,000.
-- **0.3-0.4 dB lower at 7,000, and not run-to-run spread**: two seeds of
-  each land at 31.40 / 31.43 dB (`gsplat_train`, `--seed` added for this)
-  and 31.04 / 31.10 dB (`gsplat-cpu`). The gap opens after step 5,000, once
-  the population is at the cap. Every piece above reads the same as
-  `gsplat_train`'s on inspection (and the Inria path, sharing the
-  renderer, loss and Adam, matches to 0.02 dB), so the cause is in the
-  brush-only parts and is not found yet.
+- **The populations agree** (228,751 against 228,481 at step 1,000; both
+  at the cap by 6,000), and so do the curves.
+- **Same quality, within 0.05 dB** of `gsplat_train`'s two seeds (31.40 /
+  31.43 dB, `--seed` added for this).
+- **A 0.35 dB gap was a dense-Adam bug.** Before the fix `gsplat-cpu`
+  landed at 31.04 / 31.10 dB. The dense Adam path never advanced each
+  gaussian's last-updated step, so every `sync` (each refine, every 200
+  steps, and each evaluation) replayed the sparse path's closed-form
+  catch-up over all the steps since the start or the last refine: about
+  ten phantom momentum steps on every gaussian, and m wiped to zero.
+  Found by elimination: turning off the mean noise (31.01 against 31.45 dB)
+  or the aux losses left the gap; a fixed population with no refine
+  matched (29.39 against 29.42 dB); refine at a cap equal to the initial
+  count, so only prune and replace, opened it again (29.29 against 29.54).
 - **A step costs more than with Inria's rule** (204 against 151 ms): Adam
   is dense and carries the aux losses and the noise (54 ms a step).
-- **brush trains 1.1 dB higher than Inria's rule here** (31.04 against
-  29.95 dB at 7,000 steps), at 1.35x its time.
+- **brush trains 1.4 dB higher than Inria's rule here** (31.39 against
+  29.95 dB at 7,000 steps), at 1.34x its time.
 
 ## Speedups from the survey, measured
 
@@ -132,7 +136,7 @@ Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):
 
 | Change | Eval PSNR at 7k | Training time | Adopted |
 | --- | ---: | ---: | --- |
-| None (dense Adam) | 29.87 dB | 1,119 s | |
+| None (dense Adam; measured with the bug above, so its every densify and evaluation added phantom steps) | 29.87 dB | 1,119 s | |
 | Deferred sparse Adam (GS-Scale: only projected gaussians are updated, the others caught up in closed form when next projected, and before evaluating, saving and densifying) | 29.95 dB | 1,054 s (-6%) | yes, the default (`--dense-adam` turns it off) |
 | + 2x2 strided pixels, cycling offset, Turbo-GS's low-pass (`--stride 2`) | 24.52 dB at 2k (28.72 without) | -10% a step | no |
 | + exact ellipse-tile test (AccuTile) | | binning 21 -> 30 ms | no |
