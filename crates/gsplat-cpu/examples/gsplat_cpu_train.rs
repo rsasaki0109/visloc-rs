@@ -7,7 +7,9 @@
 //!     [--max-gaussians N] [--sh-interval N] [--out scene.ply]
 //! ```
 //!
-//! Every 8th view (by name) is held out; eval PSNR is over those. The
+//! `--data` is a COLMAP root (`images/`, `sparse/0`), e.g. what
+//! `gsplat_photos --steps 0 --out <dir>` leaves for undistorted pinhole
+//! cameras. Every 8th view (by name) is held out; eval PSNR is over those. The
 //! defaults are `gsplat_train`'s: L1 + 0.2 D-SSIM, Inria densification
 //! (from step 500, every 100, opacity reset every 3000), SH degree up every
 //! 1000 steps. The Newton step (`--optimizer newton`, an experiment, see
@@ -96,6 +98,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = data.ok_or("--data is required")?;
     let t_setup = Instant::now();
     let ds = load_colmap_dataset(&data, Some(8))?;
+    // The CPU projection is an undistorted pinhole's: refuse lenses it
+    // would silently mis-project (gsplat_train renders those).
+    if let Some(v) = ds.train.iter().chain(&ds.eval).find(|v| !v.camera.camera.lens.is_pinhole()) {
+        return Err(format!(
+            "{}: a distorted or fisheye lens; gsplat_cpu_train handles undistorted pinholes only (use gsplat_train)",
+            v.name
+        )
+        .into());
+    }
     // As gsplat_train: SfM points, isotropic at the mean distance to 3 neighbours.
     let mut scene = seed_scene(&read_points3d(find_model_dir(&data)?)?, 3);
     if let Some(m) = truncate {
