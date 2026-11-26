@@ -296,6 +296,9 @@ struct Args {
     init_fixes: Option<usize>,
     /// `OdomCorrectionConfig::reset_after` (3 unless set).
     reset_after: Option<usize>,
+    /// Until the correction is set, only fixes with this many inliers help
+    /// start it (0: all).
+    init_min_inliers: usize,
 }
 
 impl Args {
@@ -316,7 +319,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N]"
             .into()
     }
 
@@ -385,6 +388,7 @@ impl Args {
             min_inlier_ratio: 0.0,
             init_fixes: None,
             reset_after: None,
+            init_min_inliers: 0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -521,6 +525,7 @@ impl Args {
                 "--min-inlier-ratio" => args.min_inlier_ratio = number(&option, value()?)?,
                 "--init-fixes" => args.init_fixes = Some(number(&option, value()?)?),
                 "--reset-after" => args.reset_after = Some(number(&option, value()?)?),
+                "--init-min-inliers" => args.init_min_inliers = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -1282,6 +1287,8 @@ struct CorrectedRun {
     fresh_s: f64,
     fresh_m: f64,
     stale_min_inliers: usize,
+    /// `--init-min-inliers`: inliers a fix needs to help start the correction.
+    init_min_inliers: usize,
     fixes_tum: String,
     map_tum: String,
     odometry_tum: String,
@@ -1339,6 +1346,7 @@ impl CorrectedRun {
             fresh_s: args.projection_fresh_s,
             fresh_m: args.projection_fresh_m,
             stale_min_inliers: args.stale_projection_min_inliers,
+            init_min_inliers: args.init_min_inliers,
             fixes_tum: header.to_owned(),
             map_tum: header.to_owned(),
             odometry_tum: header.to_owned(),
@@ -1434,7 +1442,19 @@ impl CorrectedRun {
             let attempt = localizer.localize(image, predicted.as_ref(), stale_min_inliers)?;
             self.attempts += 1;
             self.latencies.push(attempt.latency_ms);
+            // --init-min-inliers: until the correction is set, a fix with
+            // fewer inliers neither starts it nor counts toward starting it.
+            let held_back =
+                !self.correction.is_set() && attempt.result.inlier_count < self.init_min_inliers;
             let outcome = match (&attempt.world_from_imu, &attempt.weak_world_from_imu) {
+                (Some(map_from_imu), _) if held_back => {
+                    self.localized += 1;
+                    self.last_localized_ns = Some(timestamp_ns);
+                    self.fixes_tum
+                        .push_str(&tum_line(timestamp_ns, map_from_imu));
+                    "held-back"
+                }
+                (None, Some(_)) if held_back => "weak-held-back",
                 (Some(map_from_imu), _) => {
                     self.localized += 1;
                     self.last_localized_ns = Some(timestamp_ns);

@@ -162,6 +162,8 @@ Two opt-in switches in `basalt_euroc_localize_demo`, both off by default
   (`LocalizationConfig::min_inlier_ratio`, now exposed).
 - `--init-fixes N`, `--reset-after N`: `OdomCorrectionConfig`'s agreeing
   fixes that start the correction (2) and that replace it (3).
+- `--init-min-inliers N`: until the correction is set, only fixes with at
+  least N inliers help start it (the others are logged as `held-back`).
 
 ### Single image: inlier cells are a weaker test than the inlier ratio
 
@@ -225,16 +227,42 @@ agreeing fixes cannot tell a consistent bias from the truth, so neither
 more initial fixes nor a quicker reset fixes it (7.5–7.8 cm at best, and a
 quicker reset hurts the other sequences).
 
-### Where this leaves D1
+`--fusion` (the sliding-window `MapFusion`) does not help either: it is
+fed the fixes the correction used, so it inherits the wrong start (walking_rpy
+12.1 cm).
 
-- No default changes. `--min-inlier-cells 6` is a reasonable opt-in with an
-  odometry (lower error and fewer wrong fixes used on xyz and halfsphere,
-  control unchanged, fewer localized images); without one, the inlier ratio
-  is the better test.
-- The start-up bias needs something other than agreement: an independent
-  check of the first fixes (more inliers than later fixes need, or
-  agreement across views far apart), or a correction that can revise its
-  start once better fixes arrive (a sliding-window fit such as `MapFusion`).
+### Starting the correction only from strong fixes
+
+The biased first fixes have 21–29 inliers; the good ones later mostly 40–70.
+Asking more inliers of the fixes that start the correction than of the fixes
+that keep it going (`--init-min-inliers`) removes the bad start:
+
+| Setting | sitting_static | walking_static | walking_xyz | walking_halfsphere | walking_rpy | walking_rpy max | Frames with a map pose (rpy) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 1.5 | 2.2 | 2.0 (1.7–4.8) | 3.1 (2.8–4.4) | 10.0 | 20.2 | 901 of 906 |
+| `--init-min-inliers 35` | 1.5 | 2.2 | 2.0 (1.7–4.8) | 2.9 (2.7–3.7) | **3.2** (3.1–3.7) | **7.0** | 802 |
+| `--init-min-inliers 45` | 1.5 | 2.2 | 2.0 (1.7–4.8) | 2.8 (2.6–3.4) | 3.5 (3.0–4.6) | 10.6 | 794 |
+| `--init-min-inliers 35 --min-inlier-cells 6` | 1.5 | 2.2 | **1.7** (1.6–1.9) | 2.8 (2.6–3.5) | 3.7 (3.3–4.8) | 8.0 | 802 |
+
+Map pose RMSE in cm, median of three seeds (range). The correction starts
+3.3 s later on walking_rpy (the first 99 frames get no map pose) and 0.5 s
+later on walking_halfsphere; the other sequences start as before. The
+wrong fixes the correction then uses (9–26 per sequence) are mostly 10–15 cm
+off, inside its gate, and are averaged with good ones; they no longer
+move the pose much.
+
+### Where this leaves Phase 1
+
+- **walking_rpy's target (under 5 cm) is met** with `--init-min-inliers 35`,
+  without hurting the others. The other target, no wrong fix used, is not:
+  the gate (15 cm) is wider than the threshold that counts a fix as wrong
+  (10 cm).
+- Best combination measured: `--init-min-inliers 35 --min-inlier-cells 6`,
+  1.5–3.7 cm on all five sequences (worst seed 4.8 cm), control unchanged,
+  at the cost of fewer localized images (walking_xyz 88% → 76%).
+- These were tuned on the sequences they are scored on. No default
+  changes until they hold on another indoor set (Bonn, OpenLORIS cafe).
+- Without an odometry, the inlier ratio is the better single-image test.
 
 ## Not yet measured
 

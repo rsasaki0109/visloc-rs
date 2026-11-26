@@ -35,6 +35,13 @@ All notable changes to `visloc-rs` will be documented here.
   `synth_drift_odometry.py` (a drifting odometry from a ground truth) and
   `eval_dynamic_localization.py` (scores the runs). Results in
   `docs/dynamic_obstacle_localization.md`.
+- `basalt_euroc_localize_demo`: opt-in fix-quality and correction-start
+  switches, all off by default: `--min-inlier-cells K`
+  (`visloc_localization::apply_inlier_spread_gate`), `--min-inlier-ratio R`,
+  `--init-fixes N`, `--reset-after N` and `--init-min-inliers N`. On TUM
+  walking_rpy, starting the correction only from fixes with 35 inliers or
+  more takes the map pose from 10.0 to 3.2 cm RMSE
+  (`docs/dynamic_obstacle_localization.md`).
 
 ## 0.5.0 - 2026-11-24
 
