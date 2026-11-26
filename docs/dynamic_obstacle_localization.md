@@ -513,6 +513,52 @@ llvmpipe): about 10 minutes per 40 s episode.
 robot, and more of them, so that they hide a large share of the view as on
 TUM; masks from the actors (ids or depth) for the share of inliers on them.
 
+## RNE: people walking just ahead of the robot (the hard case)
+
+RNE's `RNE_WALKER_MODE=ahead` (branch `claude/drjohnson-walkers`, commit
+`3f57f7f`) keeps each walker 0.8–2.0 m in front of the robot, crossing
+its view from side to side as it drives: people walking just ahead of a
+robot. Two queries from waypoint 2, with 2 and 4 such walkers (`a2`, `a4`),
+besides the earlier ones (`q0`: nobody, `q4`/`q6`: walkers pacing lines
+across the route). With 4 of them, 69% of the mapped cells are matched (93%
+with walkers across the route, 100% with nobody).
+
+Map pose RMSE / median / max (fixed alignment), and the VIO's own ATE:
+
+| Setting | q0 | q4 | q6 | a2 | a4 |
+| --- | --- | --- | --- | --- | --- |
+| none | 2.1 / 1.6 / 7.9 cm | 4.7 / 1.7 / 20.4 | 2.5 / 1.6 / 10.0 | **60.8** / 2.4 / 288 | **70.2** / 6.8 / 373 |
+| `--min-inlier-cells 6` | 2.1 / 1.6 / 7.8 | 4.7 / 1.7 / 20.4 | 2.5 / 1.6 / 9.9 | 61.2 / 2.4 / 288 | 71.4 / 6.7 / 373 |
+| `--init-warmup-s 3` | 2.1 / 1.6 / 8.7 | 2.1 / 1.6 / 9.5 | 2.4 / 1.6 / 11.0 | 22.8 / 2.3 / 207 | 12.2 / 6.4 / 71 |
+| `--vio-map-prior` | 1.5 / 1.2 / 5.2 | 1.4 / 1.0 / 10.8 | 1.3 / 1.1 / 4.9 | 58.9 / 5.2 / 296 | 62.5 / 4.2 / 326 |
+| **`--vio-map-prior --init-warmup-s 3`** | **1.2 / 1.1 / 3.7** | **1.2 / 1.0 / 8.8** | **1.2 / 1.0 / 5.4** | **20.4** / 2.8 / 207 | **7.1** / 2.8 / 31 |
+| the same with `--min-inlier-cells 6` | 1.2 / 1.1 / 3.7 | 1.2 / 1.0 / 8.8 | 1.2 / 1.0 / 5.4 | 20.8 / 2.8 / 207 | 8.5 / 2.8 / 41 |
+| VIO ATE, no setting | 3.6 cm | 4.6 | 3.4 | **68.2** | **46.6** |
+
+- **The localization holds; the VIO does not.** With walkers ahead, the
+  fixes stay accurate (worst 4.5 cm on `a4`), but the stereo-inertial VIO
+  is dragged off: ATE 47–68 cm, up to 2.7 m, against 3–5 cm otherwise.
+  People who keep pace with the robot look static to its camera and take a
+  large share of the tracked points, so the VIO reads its own motion
+  wrongly: failure F4 of the plan, not F1–F3.
+- **The correction cannot follow a runaway VIO.** It is a yaw and a
+  translation averaged over 5 s of fixes; when the VIO moves metres between
+  fixes, its gate rejects even fixes 1 cm off and it resets over and over
+  (`a2`, 3–5 s: map pose up to 2 m off with every fix within 2 cm).
+- **`--vio-map-prior`, which puts each accepted fix into the VIO's window,
+  together with the 3 s warm-up**, is the best setting on every query:
+  1.2 cm on the three earlier ones (1.2–4.7 cm without), 7.1 cm on `a4`
+  (70.2 without), 20.4 cm on `a2` (60.8). Neither alone does it: without
+  the warm-up the map prior is fed from a correction started on the
+  unsettled VIO; without the map prior the correction still chases the
+  VIO. The cell gate adds nothing here.
+- **What is left is the start of `a2`:** 2–5 s, before the map prior has
+  pulled the VIO in, at up to 2 m. Holding the VIO itself steady needs the
+  movers left out of it: the VIO's moving-object filter
+  (`visloc_basalt::dynamic_objects`, Phase 2 of the plan, fed by detector
+  boxes) is the next lever; the simulation can supply the walkers' true
+  boxes to measure its ceiling before any detector.
+
 ## On ROS 2
 
 `visloc_map_localize_node` takes the two measured switches as parameters,
