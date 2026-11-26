@@ -221,6 +221,70 @@ the other eight come out bit for bit as in run 35; 4_4, 4_7 and 4_9 differ by
 at most 0.3 m from one runner to another, without the gate. The resubmission
 is run 35 with sequence_4_3 replaced.
 
+## Slow drift: bending toward the recording's GPS
+
+sequence_1_2 (test) stays 11.4 m from its own GPS at the median after the
+whole chain (VIO 15.8 m, online 12.5 m). No stage of the chain breaks it. The
+walk drifts slowly in heading and scale: aligned on its first 200 s, it is
+27 m off by the end. Its route is open, with only short revisits, so no loop
+can take the drift out. The fixes are good: 89 % within 10 m, and the device
+is the one of sequence_1_19.
+
+`scripts/lamaria_gps_bend.py` bends such a trajectory toward its recording's
+GPS fixes, and only such a trajectory. It works in 2D on nodes every 5 s.
+Between two nodes the trajectory keeps its own step, turned by a heading
+offset and stretched by a scale offset; each offset follows a random walk of
+1° and 1 % per square-root minute. A Cauchy loss of 5 m pulls each node
+toward the fixes near it. Only x, y and the yaw move; z and the timestamps
+stay. Nothing but the recording's own fixes is used.
+
+On a trajectory that does not drift, the bend only adds the GPS's own errors.
+Ungated, it costs sequence_1_19 13 CP points (75.50 → 62.27) and
+sequence_3_17 5 (56.30 → 51.16). The training monos stay 1.8 to 2.9 m from
+their fixes at the median. So the bend is gated: it runs only when the median
+residual after a robust 2D similarity is 4 m or more. How far the bend moves
+the trajectory is no gate: on the clean sequence_3_17 it moves a node by
+18 m.
+
+To check the gate and the stiffness, drift was injected into the six training
+monos: heading and scale offsets growing linearly in time (degrees and per
+cent per minute). Each was then bent and scored against the ground truth (CP
+Score):
+
+| injected drift (heading, scale per minute) | median residual | drifted | bent (1°, 1 %) |
+|---|---|---:|---:|
+| 1_19: 0.5°, −0.5 % | 2.1 m | 37.20 | 46.24 |
+| 1_19: 1.0°, −1.0 % | 2.6 m | 21.89 | 32.96 |
+| 2_11: 0.5°, −0.5 % | 4.5 m | 27.22 | 49.28 |
+| 2_11: 1.0°, −1.0 % | 6.1 m | 10.49 | 50.84 |
+| 2_11: 0.5°, +1.0 % | 4.3 m | 24.86 | 46.56 |
+| 3_17: 0.5°, −0.5 % | 5.2 m | 25.50 | 34.44 |
+| 3_17: 1.0°, −1.0 % | 6.9 m | 9.81 | 26.61 |
+| 3_17: 0.5°, +1.0 % | 5.5 m | 12.86 | 34.46 |
+| 4_10: 0.5°, −0.5 % | 4.5 m | 15.84 | 62.21 |
+| 4_10: 1.0°, −1.0 % | 7.8 m | 3.50 | 49.45 |
+| 4_10: 0.5°, +1.0 % | 6.5 m | 16.64 | 62.70 |
+| 4_11: 1.0°, −1.0 % | 5.9 m | 13.49 | 59.78 |
+| 5_11: 1.0°, −1.0 % | 2.6 m | 23.55 | 35.12 |
+
+Every one of the 18 drifted cases gains. Above the 4 m gate (10 cases) the
+gain averages +31.6 points with the default stiffness. A stiffer walk
+(0.3°, 0.3 %) gains +29.2, a looser one (3°, 3 %) +24.5, and the mixed ones
++28.6 and +25.3. A drift that stays under the gate is left alone, along with
+its gain, which is smaller there.
+
+On the test set (run 35, with run 36's sequence_4_3), each recording's GPS
+was fetched, and the Moving platform track was first bridged at its rides
+(`lamaria_gps_steps.py`, 25 m). That found rides in 5_2, 5_3, 5_5, 5_6,
+5_7, 5_8 and 5_9, and brought 5_6 from 47.6 m to 4.6 m and 5_9 from
+76.6 m to 3.2 m. The bend then ran on all 63 sequences. 15 of them reach the
+gate: 1_2 (11.4 m), 1_12 (6.6), 3_3 (6.3), 2_2 (5.5), 4_2 (5.0),
+3_16 (4.9), 4_8, 5_4 (4.8), 5_3, 5_5 (4.7), 5_1, 5_6 (4.6), 2_5 (4.5),
+2_1 (4.2) and 2_3 (4.1). The other 48 stay as they are. The test residuals
+run higher than the training ones (median 3.3 m against 2.5 m), so some of
+the sequences just above the gate may only have poorer fixes; the
+leaderboard will tell.
+
 ## Reproduce
 
 ```bash
