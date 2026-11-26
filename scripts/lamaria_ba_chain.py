@@ -170,6 +170,8 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
               pass_match="vio", pass_args=(), low_light_pass=True, match_args=(), flow=False, final=False,
               temperature=None, keep_matches=False, pass_feature_args=(), pass_match_args=()):
     work = Path(work)
+    if (track == LOW_LIGHT if low_light is None else low_light):
+        pass_features = None  # in low light the pass reads the low-light keypoints, as steps() plans it
     pw = pass_work(work, pass_features)
     pw.mkdir(parents=True, exist_ok=True)
     if rematch:  # the second matching reads the same keypoints

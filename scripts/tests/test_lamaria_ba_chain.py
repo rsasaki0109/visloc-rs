@@ -289,6 +289,17 @@ class ResumeTest(unittest.TestCase):
             self.assertEqual(out.read_text(), "solve")
             self.assertTrue((work / "ba3.tum").exists())
 
+    def test_in_low_light_the_rematch_reads_the_low_light_keypoints_despite_pass_features(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fake_ba.py"
+            fake.write_text(FAKE_BA)
+            work, out = Path(d) / "work", Path(d) / "out.tum"
+            chain.run_chain("mav0", "vio.tum", "imu.csv", "calib.json", 4, work, out, ba=fake, log=lambda m: None,
+                            rematch=True, pass_features="sift", pass_feature_args=["--kf-step", "20"])
+            self.assertFalse((work / "sift").exists())
+            self.assertEqual((work / "rematch" / "features.npz").read_text(), "features")
+            self.assertEqual((work / "rematch" / "calls.txt").read_text().split(), ["match", "loops", "solve"])
+
 
 if __name__ == "__main__":
     unittest.main()
