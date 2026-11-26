@@ -108,14 +108,19 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 | Trainer | Eval PSNR at 1k / 3k / 5k / 7k | Training time |
 | --- | --- | ---: |
 | `gsplat_train --strategy brush` | 25.28 / 28.51 / 29.82 / **31.40** | 1,775 s |
+| `gsplat_train --strategy brush --seed 7` | 25.41 / 28.47 / 29.70 / **31.43** | 1,709 s |
 | `gsplat-cpu --strategy brush` | 25.37 / 28.48 / 29.92 / **31.04** | **1,425 s (1.25x)** |
 | `gsplat-cpu --strategy brush --seed 7` | 25.35 / 28.34 / 29.44 / **31.10** | 1,479 s |
 
 - **The populations agree** (228,789 against 228,481 at step 1,000; both
   at the cap by 6,000), and so do the curves up to step 5,000.
-- **0.3 dB lower at 7,000, in both seeds.** `gsplat_train` has no seed
-  flag, so its spread is unknown. Every piece above reads the same as
-  `gsplat_train`'s on inspection, and the cause is not found yet.
+- **0.3-0.4 dB lower at 7,000, and not run-to-run spread**: two seeds of
+  each land at 31.40 / 31.43 dB (`gsplat_train`, `--seed` added for this)
+  and 31.04 / 31.10 dB (`gsplat-cpu`). The gap opens after step 5,000, once
+  the population is at the cap. Every piece above reads the same as
+  `gsplat_train`'s on inspection (and the Inria path, sharing the
+  renderer, loss and Adam, matches to 0.02 dB), so the cause is in the
+  brush-only parts and is not found yet.
 - **A step costs more than with Inria's rule** (204 against 151 ms): Adam
   is dense and carries the aux losses and the noise (54 ms a step).
 - **brush trains 1.1 dB higher than Inria's rule here** (31.04 against

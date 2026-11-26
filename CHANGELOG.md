@@ -9,8 +9,9 @@ All notable changes to `visloc-rs` will be documented here.
 - `gsplat_cpu_train --strategy brush`: brush's refine strategy, rates, aux
   losses and mean noise on the CPU trainer, as `gsplat_train --strategy
   brush` (`docs/gsplat_cpu_trainer.md`). bonsai `images_8`, 7,000 steps:
-  31.04 / 31.10 dB in 1,425 / 1,479 s against `gsplat_train`'s 31.40 dB in
-  1,775 s.
+  31.04 / 31.10 dB in 1,425 / 1,479 s against `gsplat_train`'s 31.40 /
+  31.43 dB in 1,775 / 1,709 s (two seeds each; the 0.35 dB gap is open).
+- `gsplat_train --seed`.
 - `visloc-gsplat-cpu`, a pure-CPU 3DGS trainer: no GPU, wgpu or lavapipe
   (`docs/gsplat_cpu_trainer.md`).
   - Projection, binning, both rasterizer passes, L1 + D-SSIM, Inria
