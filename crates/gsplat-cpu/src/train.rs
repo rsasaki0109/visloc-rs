@@ -818,7 +818,10 @@ impl Trainer {
                         let key = seed ^ (gi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         let z = normals3(key);
                         let s3 = [p[3].exp(), p[4].exp(), p[5].exp()];
-                        let d = rotate([p[6], p[7], p[8], p[9]], [z[0] * s3[0], z[1] * s3[1], z[2] * s3[2]]);
+                        let d = rotate(
+                            [p[6], p[7], p[8], p[9]],
+                            [z[0] * s3[0], z[1] * s3[1], z[2] * s3[2]],
+                        );
                         for k in 0..3 {
                             p[k] += (d[k] * w).clamp(-max_noise, max_noise);
                         }
@@ -887,7 +890,12 @@ impl Trainer {
         }
         let means: Vec<[f32; 3]> = self.model.geo.iter().map(|g| [g[0], g[1], g[2]]).collect();
         let (center, size) = central_bounds(&means, 0.75).unwrap_or(([0.0; 3], self.bound_size));
-        let opacity: Vec<f32> = self.model.geo.iter().map(|g| 1.0 / (1.0 + (-g[10]).exp())).collect();
+        let opacity: Vec<f32> = self
+            .model
+            .geo
+            .iter()
+            .map(|g| 1.0 / (1.0 + (-g[10]).exp()))
+            .collect();
         let pruned: Vec<bool> = (0..n)
             .map(|i| {
                 let g = &self.model.geo[i];
@@ -921,13 +929,19 @@ impl Trainer {
             }
         };
         if pruned_count > 0 {
-            let w: Vec<f32> = (0..n).map(|i| if pruned[i] { 0.0 } else { opacity[i] }).collect();
+            let w: Vec<f32> = (0..n)
+                .map(|i| if pruned[i] { 0.0 } else { opacity[i] })
+                .collect();
             sample(&w, pruned_count, &mut add);
         }
         let mut grown = 0;
         if step < b.growth_stop {
             let above: Vec<bool> = (0..n)
-                .map(|i| !pruned[i] && self.grad_accum[i] / self.grad_count[i].max(1.0) > b.growth_grad_threshold)
+                .map(|i| {
+                    !pruned[i]
+                        && self.grad_accum[i] / self.grad_count[i].max(1.0)
+                            > b.growth_grad_threshold
+                })
                 .collect();
             let threshold_count = above.iter().filter(|a| **a).count();
             let grow = ((threshold_count as f32 * b.growth_select_fraction).round() as usize)
@@ -935,7 +949,9 @@ impl Trainer {
             let current = n - pruned_count + add.iter().filter(|a| **a).count();
             let grow = grow.min(b.max_gaussians.saturating_sub(current));
             if grow > 0 {
-                let w: Vec<f32> = (0..n).map(|i| if above[i] { self.grad_accum[i] } else { 0.0 }).collect();
+                let w: Vec<f32> = (0..n)
+                    .map(|i| if above[i] { self.grad_accum[i] } else { 0.0 })
+                    .collect();
                 let before = add.iter().filter(|a| **a).count();
                 sample(&w, grow, &mut add);
                 grown = add.iter().filter(|a| **a).count() - before;
@@ -957,7 +973,10 @@ impl Trainer {
             let rows: Vec<[f32; NGEO]> = if add[i] {
                 let z = normals3(seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
                 let s3 = [g[3].exp(), g[4].exp(), g[5].exp()];
-                let o = rotate([g[6], g[7], g[8], g[9]], [0.5 * z[0] * s3[0], 0.5 * z[1] * s3[1], 0.5 * z[2] * s3[2]]);
+                let o = rotate(
+                    [g[6], g[7], g[8], g[9]],
+                    [0.5 * z[0] * s3[0], 0.5 * z[1] * s3[1], 0.5 * z[2] * s3[2]],
+                );
                 let a = opacity[i];
                 let na = (1.0 - (1.0 - a).max(0.0).sqrt()).clamp(1e-7, 1.0 - 1e-7);
                 let logit = (na / (1.0 - na)).ln();
@@ -984,8 +1003,16 @@ impl Trainer {
                     mg.push(if fresh { [0.0; NGEO] } else { a.m_geo[i] });
                     vg.push(if fresh { [0.0; NGEO] } else { a.v_geo[i] });
                     let z = [0.0f32; NCOL];
-                    mc.extend_from_slice(if fresh { &z } else { &a.m_col[i * NCOL..(i + 1) * NCOL] });
-                    vc.extend_from_slice(if fresh { &z } else { &a.v_col[i * NCOL..(i + 1) * NCOL] });
+                    mc.extend_from_slice(if fresh {
+                        &z
+                    } else {
+                        &a.m_col[i * NCOL..(i + 1) * NCOL]
+                    });
+                    vc.extend_from_slice(if fresh {
+                        &z
+                    } else {
+                        &a.v_col[i * NCOL..(i + 1) * NCOL]
+                    });
                 }
             }
         }

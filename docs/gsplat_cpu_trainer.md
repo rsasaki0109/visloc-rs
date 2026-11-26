@@ -81,6 +81,46 @@ What it took besides the host pipeline:
   into subnormals within ~650 steps, and x86 computes those on a slow path
   (the Adam stage went from 44 to 120 ms a step; lavapipe flushes them).
 
+## brush's refine strategy (`--strategy brush`)
+
+`gsplat_train --strategy brush` (and `gsplat_photos`'s training) refine
+with brush 0.3's strategy instead of Inria's rule. `--strategy brush` ports
+it, after `Trainer::brush_refine_now` and the `mean_noise`, `adam` (aux
+losses) and `densify_scatter` (action 4) shaders:
+
+- **The statistic**: per view, each splat's refine weight
+  `sum_px |dL/du| w + |dL/dv| h` (the backward walk's tenth accumulator, on
+  in this mode only), the largest over the views that blended it.
+- **Every 200 steps**: prune the transparent (< 2/255), tiny (a log-scale
+  below -15) and far-off (10x the central 75% box) gaussians; replace them
+  with live ones sampled by opacity; grow by 10% of those whose weight per
+  view passes 4e-5, sampled by weight (both without replacement). A sampled
+  gaussian becomes two at `mean -+ R (N(0, 1) s / 2)`, scales / sqrt 2,
+  opacity `1 - sqrt(1 - a)`; the first keeps its Adam moments.
+- **brush's rates** (mean 2e-5 -> 1e-6 times the bound size, log-scale
+  1e-2 -> 6e-3, opacity 1e-2, SH DC 2e-3), **aux losses** (opacity 1e-9,
+  scale 1e-8, faded out by 90% of the run; they reach unseen gaussians, so
+  Adam is dense in this mode) and **mean noise** on nearly transparent
+  gaussians (`(1 - a)^100` times the mean rate times 40).
+
+bonsai `images_8`, 7,000 steps, cap 400k:
+
+| Trainer | Eval PSNR at 1k / 3k / 5k / 7k | Training time |
+| --- | --- | ---: |
+| `gsplat_train --strategy brush` | 25.28 / 28.51 / 29.82 / **31.40** | 1,775 s |
+| `gsplat-cpu --strategy brush` | 25.37 / 28.48 / 29.92 / **31.04** | **1,425 s (1.25x)** |
+| `gsplat-cpu --strategy brush --seed 7` | 25.35 / 28.34 / 29.44 / **31.10** | 1,479 s |
+
+- **The populations agree** (228,789 against 228,481 at step 1,000; both
+  at the cap by 6,000), and so do the curves up to step 5,000.
+- **0.3 dB lower at 7,000, in both seeds.** `gsplat_train` has no seed
+  flag, so its spread is unknown. Every piece above reads the same as
+  `gsplat_train`'s on inspection, and the cause is not found yet.
+- **A step costs more than with Inria's rule** (204 against 151 ms): Adam
+  is dense and carries the aux losses and the noise (54 ms a step).
+- **brush trains 1.1 dB higher than Inria's rule here** (31.04 against
+  29.95 dB at 7,000 steps), at 1.35x its time.
+
 ## Speedups from the survey, measured
 
 Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):

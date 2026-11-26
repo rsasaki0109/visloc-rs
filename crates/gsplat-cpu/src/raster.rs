@@ -568,8 +568,8 @@ fn tile_backward<const GN: bool, const NA: usize>(
                             acc[B_GRAD + q][k] += d_alpha * ds[q];
                         }
                         if !GN && NA == 10 {
-                            acc[NA - 1][k] += (d_alpha * ds[0]).abs() * img_w
-                                + (d_alpha * ds[1]).abs() * img_h;
+                            acc[NA - 1][k] +=
+                                (d_alpha * ds[0]).abs() * img_w + (d_alpha * ds[1]).abs() * img_h;
                         }
                         if GN {
                             let ratio = w_tot[ly][k] / at.max(1e-12);
