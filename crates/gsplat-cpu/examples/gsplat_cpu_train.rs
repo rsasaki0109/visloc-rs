@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut densify_cfg = Some(visloc_gsplat_train::densify::DensifyConfig::default());
     let mut truncate: Option<usize> = None;
     let mut sparse_adam = false;
+    let mut stride = 1usize;
     let mut adam = AdamConfig::default();
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
@@ -70,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--ssim-weight" => ssim_weight = next()?.parse()?,
             "--no-densify" => densify_cfg = None,
             "--sparse-adam" => sparse_adam = true,
+            "--stride" => stride = next()?.parse()?,
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
             "--step" => newton.step = next()?.parse()?,
@@ -112,6 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tr.loss = loss;
     tr.overlap = overlap;
     tr.sparse_adam = sparse_adam;
+    tr.stride = stride;
     tr.ssim_weight = if loss == Loss::L1 { ssim_weight } else { 0.0 };
     if optimizer == "newton" && loss != Loss::L2 {
         return Err("the Newton step needs --loss l2".into());

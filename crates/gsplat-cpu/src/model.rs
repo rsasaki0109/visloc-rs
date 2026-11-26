@@ -19,6 +19,9 @@ pub struct Model {
     /// SH degree the colour is evaluated at (coefficients past it are zero
     /// in the basis and get no gradient).
     pub active_degree: u32,
+    /// Screen-space blur added to every 2D covariance, px² (0.3, as the
+    /// Inria rasterizer; strided training widens it, see `train`).
+    pub blur: f32,
 }
 
 impl Model {
@@ -63,6 +66,7 @@ impl Model {
             geo,
             col,
             active_degree: 0,
+            blur: 0.3,
         }
     }
 

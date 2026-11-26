@@ -39,6 +39,34 @@ pub struct TrainView {
 }
 
 impl TrainView {
+    /// The pixels `(2 i + ox, 2 j + oy)` as an image of their own, and a
+    /// camera whose pixel centres are those pixels' centres.
+    pub fn strided(&self, ox: usize, oy: usize) -> (CameraView, Vec<f32>, Vec<u32>) {
+        let c = self.view.camera;
+        let (w, h) = (c.width as usize, c.height as usize);
+        let (w2, h2) = (w / 2, h / 2);
+        let mut gt = vec![0.0f32; w2 * h2 * 3];
+        let mut packed = vec![0u32; w2 * h2];
+        for j in 0..h2 {
+            for i in 0..w2 {
+                let src = (2 * j + oy) * w + 2 * i + ox;
+                gt[(j * w2 + i) * 3..(j * w2 + i) * 3 + 3].copy_from_slice(&self.gt[src * 3..src * 3 + 3]);
+                packed[j * w2 + i] = self.gt_packed[src];
+            }
+        }
+        // Pixel i's centre i + 0.5 is the full image's 2 i + ox + 0.5.
+        let cam = PinholeCamera {
+            width: w2 as u32,
+            height: h2 as u32,
+            fx: 0.5 * c.fx,
+            fy: 0.5 * c.fy,
+            cx: 0.5 * c.cx - 0.5 * ox as f32 + 0.25,
+            cy: 0.5 * c.cy - 0.5 * oy as f32 + 0.25,
+            ..c
+        };
+        (CameraView { camera: cam, ..self.view }, gt, packed)
+    }
+
     pub fn new(view: CameraView, rgb: &[[f32; 3]]) -> Self {
         let (w, h) = (view.camera.width as usize, view.camera.height as usize);
         let gt: Vec<f32> = rgb.iter().flatten().copied().collect();
@@ -296,6 +324,9 @@ pub struct Trainer {
     /// `1 - ssim_weight`.
     pub ssim_weight: f32,
     ssim: Option<SsimHost>,
+    ssim_size: (usize, usize),
+    /// 1: every pixel every step; 2: one pixel of every 2x2 block a step.
+    pub stride: usize,
     /// Inria's densification statistic: per gaussian, the summed NDC norm
     /// of its screen-mean gradient, and the views it was projected in.
     grad_accum: Vec<f32>,
@@ -337,6 +368,8 @@ impl Trainer {
             ssim_weight: 0.0,
             sparse_adam: false,
             ssim: None,
+            ssim_size: (0, 0),
+            stride: 1,
             grad_accum: Vec::new(),
             grad_count: Vec::new(),
             timing: [0.0; 6],
@@ -363,7 +396,11 @@ impl Trainer {
             let lam = self.ssim_weight;
             d.par_iter_mut().for_each(|x| *x *= 1.0 - lam);
             let (w, h) = (view.camera.width as usize, view.camera.height as usize);
-            let ssim = self.ssim.get_or_insert_with(|| SsimHost::new(w, h));
+            if self.ssim_size != (w, h) {
+                self.ssim = Some(SsimHost::new(w, h));
+                self.ssim_size = (w, h);
+            }
+            let ssim = self.ssim.as_mut().expect("just made");
             ssim.add_grad(&raster.image, packed, lam, &mut d);
         }
         if weight != 1.0 {
@@ -385,12 +422,26 @@ impl Trainer {
     pub fn adam_step(&mut self, vi: usize, step: usize, total: usize, cfg: &AdamConfig) -> f64 {
         let n = self.model.len();
         self.model.active_degree = ((step / cfg.sh_interval) as u32).min(3);
-        let view = self.views[vi].view;
-        let gt = std::mem::take(&mut self.views[vi].gt);
-        let packed = std::mem::take(&mut self.views[vi].gt_packed);
-        let (loss, r, out) = self.view_grads(&view, &gt, Some(&packed), 1.0, false);
-        self.views[vi].gt = gt;
-        self.views[vi].gt_packed = packed;
+        let (loss, r, out, view) = if self.stride == 2 {
+            // One pixel of every 2x2 block, the offset cycling through the
+            // four (Turbo-GS / PennyGS), with Turbo-GS's wider low-pass:
+            // 0.3 + 0.5 (p - 1) = 0.8 px² of the full image, 0.2 of this one.
+            let (ox, oy) = [(0, 0), (1, 1), (1, 0), (0, 1)][step % 4];
+            let (view, gt, packed) = self.views[vi].strided(ox, oy);
+            let full_blur = self.model.blur;
+            self.model.blur = 0.2;
+            let (loss, r, out) = self.view_grads(&view, &gt, Some(&packed), 1.0, false);
+            self.model.blur = full_blur;
+            (loss, r, out, view)
+        } else {
+            let view = self.views[vi].view;
+            let gt = std::mem::take(&mut self.views[vi].gt);
+            let packed = std::mem::take(&mut self.views[vi].gt_packed);
+            let (loss, r, out) = self.view_grads(&view, &gt, Some(&packed), 1.0, false);
+            self.views[vi].gt = gt;
+            self.views[vi].gt_packed = packed;
+            (loss, r, out, view)
+        };
         // Densification statistics (every projected splat counts a view).
         if self.grad_accum.len() != n {
             self.grad_accum = vec![0.0; n];
@@ -436,6 +487,7 @@ impl Trainer {
         st.lr_rest = lr_rest;
         let t_now = st.t;
         let sparse = self.sparse_adam;
+        let blur = if self.stride == 2 { 0.2 } else { self.model.blur };
         let view = &view;
         // One pass per gaussian: its gradient (zero if it was not
         // projected) and the dense Adam update, without per-step gradient
@@ -468,7 +520,7 @@ impl Trainer {
                     let o = &out[c as usize];
                     if o[B_GRAD..B_GRAD + 6].iter().any(|&x| x != 0.0) {
                         let gs = [o[0], o[1], o[2], o[3], o[4], o[5]];
-                        if let Some(vj) = screen_vjp_geo(p, view, &gs) {
+                        if let Some(vj) = screen_vjp_geo(p, view, blur, &gs) {
                             g = vj;
                         }
                     }

@@ -347,9 +347,9 @@ fn screen<T: S>(model: &Model, id: usize, view: &CameraView) -> Option<([T; 6], 
     // Rows of J M: the 2D covariance is sum_k s2_k (JM)_ak (JM)_bk.
     let jm0: [T; 3] = std::array::from_fn(|k| j00 * m[0][k] + j02 * m[2][k]);
     let jm1: [T; 3] = std::array::from_fn(|k| j11 * m[1][k] + j12 * m[2][k]);
-    let mut a = T::c(0.3);
+    let mut a = T::c(model.blur);
     let mut b = T::c(0.0);
-    let mut c = T::c(0.3);
+    let mut c = T::c(model.blur);
     for k in 0..3 {
         a = a + jm0[k] * jm0[k] * s2[k];
         b = b + jm0[k] * jm1[k] * s2[k];
@@ -438,11 +438,12 @@ pub fn project_all(model: &Model, view: &CameraView) -> Vec<Proj> {
 /// gradient of its 11 geometry parameters, by a hand-written reverse pass
 /// (what [`jacobian`] gives, at a fraction of the cost); `None` if culled.
 pub fn screen_vjp(model: &Model, id: usize, view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
-    screen_vjp_geo(&model.geo[id], view, gs)
+    screen_vjp_geo(&model.geo[id], view, model.blur, gs)
 }
 
-/// [`screen_vjp`] of the geometry parameters `g` themselves.
-pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
+/// [`screen_vjp`] of the geometry parameters `g` themselves, with the
+/// screen-space blur `blur` (px², [`Model::blur`]).
+pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, blur: f32, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
     // Forward, keeping what the reverse pass needs; the culls are
     // `screen`'s, which the caller already passed.
     let cam = &view.camera;
@@ -484,9 +485,9 @@ pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, gs: &[f32; 6]) -> Opti
     let j12 = -fy * ty * iz2;
     let jm0: [f32; 3] = std::array::from_fn(|k| j00 * m[0][k] + j02 * m[2][k]);
     let jm1: [f32; 3] = std::array::from_fn(|k| j11 * m[1][k] + j12 * m[2][k]);
-    let mut a = 0.3f32;
+    let mut a = blur;
     let mut b = 0.0f32;
-    let mut c = 0.3f32;
+    let mut c = blur;
     for k in 0..3 {
         a += s2[k] * jm0[k] * jm0[k];
         b += s2[k] * jm0[k] * jm1[k];
