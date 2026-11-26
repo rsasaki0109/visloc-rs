@@ -459,15 +459,16 @@ impl Trainer {
             sh: Group { stride: NCOL, values: self.model.col.clone(), m1: m_col.clone(), m2: v_col.clone() },
         };
         let mut report = None;
+        // At the cap gsplat_train neither grows nor prunes (its classify
+        // pass prunes only when it may grow); so here.
+        let grow = grow && n < cfg.max_gaussians;
         if grow {
             if self.grad_accum.len() != n {
                 self.grad_accum = vec![0.0; n];
                 self.grad_count = vec![0.0; n];
             }
             let prune_large = step > cfg.opacity_reset_interval;
-            let grow = grow && n < cfg.max_gaussians;
-            let c = DensifyConfig { max_gaussians: if grow { cfg.max_gaussians } else { 0 }, ..cfg.clone() };
-            let (p, rep) = densify::densify(&pop, &self.grad_accum, &self.grad_count, self.extent, &c, prune_large, seed);
+            let (p, rep) = densify::densify(&pop, &self.grad_accum, &self.grad_count, self.extent, cfg, prune_large, seed);
             pop = p;
             report = Some(rep);
         }
