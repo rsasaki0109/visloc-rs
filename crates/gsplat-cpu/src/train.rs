@@ -17,7 +17,7 @@ use visloc_gsplat_train::densify::{self, DensifyConfig, DensifyReport, Group, Po
 use visloc_gsplat_train::loss::SsimHost;
 
 use crate::model::{Model, NCOL, NGEO, NSH};
-use crate::project::{jacobian, project_all, screen_vjp, Proj};
+use crate::project::{jacobian, project_all, screen_vjp_geo, Proj};
 use crate::raster::{backward, forward, tri6, Frame, Raster, B_COL, B_GRAD, B_H, B_HC, NB};
 
 /// Upper triangle of an 11x11 symmetric matrix.
@@ -354,41 +354,10 @@ impl Trainer {
             self.grad_count[p.id as usize] += 1.0;
         }
         let t0 = Instant::now();
-        // Per-gaussian gradients.
-        let mut g_geo = vec![[0.0f32; NGEO]; n];
-        let mut g_col = vec![0.0f32; n * NCOL];
         let mut idx = vec![u32::MAX; n];
         for (c, p) in r.proj.iter().enumerate() {
             idx[p.id as usize] = c as u32;
         }
-        let model = &self.model;
-        let view = &view;
-        g_geo
-            .par_iter_mut()
-            .zip(g_col.par_chunks_mut(NCOL))
-            .zip(idx.par_iter())
-            .for_each(|((gg, gc), &c)| {
-                if c == u32::MAX {
-                    return;
-                }
-                let p = &r.proj[c as usize];
-                let o = &out[c as usize];
-                if o[B_GRAD..B_GRAD + 6].iter().any(|&x| x != 0.0) {
-                    let gs = [o[0], o[1], o[2], o[3], o[4], o[5]];
-                    if let Some(v) = screen_vjp(model, p.id as usize, view, &gs) {
-                        *gg = v;
-                    }
-                }
-                for ch in 0..3 {
-                    if p.clamped[ch] {
-                        continue;
-                    }
-                    let g = o[B_COL + ch];
-                    for k in 0..NSH {
-                        gc[ch * NSH + k] = g * p.basis[k];
-                    }
-                }
-            });
         let t1 = Instant::now();
         let st = self.adam.get_or_insert_with(|| AdamState {
             m_geo: vec![[0.0; NGEO]; n],
@@ -408,30 +377,54 @@ impl Trainer {
         lr_geo[3..6].fill(cfg.lr_scale);
         lr_geo[6..10].fill(cfg.lr_quat);
         lr_geo[10] = cfg.lr_opacity;
+        let (lr_dc, lr_rest) = (cfg.lr_dc, cfg.lr_rest);
+        let view = &view;
+        // One pass per gaussian: its gradient (zero if it was not
+        // projected) and the dense Adam update, without per-step gradient
+        // arrays.
         self.model
             .geo
             .par_iter_mut()
             .zip(st.m_geo.par_iter_mut().zip(st.v_geo.par_iter_mut()))
-            .zip(g_geo.par_iter())
-            .for_each(|((p, (m, v)), g)| {
+            .zip(
+                self.model
+                    .col
+                    .par_chunks_mut(NCOL)
+                    .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL))),
+            )
+            .zip(idx.par_iter())
+            .for_each(|(((p, (m, v)), (pc, (mc, vc))), &c)| {
+                let mut g = [0.0f32; NGEO];
+                let mut gc = [0.0f32; NCOL];
+                if c != u32::MAX {
+                    let pr = &r.proj[c as usize];
+                    let o = &out[c as usize];
+                    if o[B_GRAD..B_GRAD + 6].iter().any(|&x| x != 0.0) {
+                        let gs = [o[0], o[1], o[2], o[3], o[4], o[5]];
+                        if let Some(vj) = screen_vjp_geo(p, view, &gs) {
+                            g = vj;
+                        }
+                    }
+                    for ch in 0..3 {
+                        if pr.clamped[ch] {
+                            continue;
+                        }
+                        let gv = o[B_COL + ch];
+                        for k in 0..NSH {
+                            gc[ch * NSH + k] = gv * pr.basis[k];
+                        }
+                    }
+                }
                 for k in 0..NGEO {
                     m[k] = b1 * m[k] + (1.0 - b1) * g[k];
                     v[k] = b2 * v[k] + (1.0 - b2) * g[k] * g[k];
                     p[k] -= lr_geo[k] * (m[k] / bc1) / ((v[k] / bc2).sqrt() + eps);
                 }
-            });
-        let (lr_dc, lr_rest) = (cfg.lr_dc, cfg.lr_rest);
-        self.model
-            .col
-            .par_chunks_mut(NCOL)
-            .zip(st.m_col.par_chunks_mut(NCOL).zip(st.v_col.par_chunks_mut(NCOL)))
-            .zip(g_col.par_chunks(NCOL))
-            .for_each(|((p, (m, v)), g)| {
                 for i in 0..NCOL {
                     let lr = if i % NSH == 0 { lr_dc } else { lr_rest };
-                    m[i] = b1 * m[i] + (1.0 - b1) * g[i];
-                    v[i] = b2 * v[i] + (1.0 - b2) * g[i] * g[i];
-                    p[i] -= lr * (m[i] / bc1) / ((v[i] / bc2).sqrt() + eps);
+                    mc[i] = b1 * mc[i] + (1.0 - b1) * gc[i];
+                    vc[i] = b2 * vc[i] + (1.0 - b2) * gc[i] * gc[i];
+                    pc[i] -= lr * (mc[i] / bc1) / ((vc[i] / bc2).sqrt() + eps);
                 }
             });
         let t2 = Instant::now();

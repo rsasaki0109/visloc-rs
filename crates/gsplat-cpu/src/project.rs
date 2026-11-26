@@ -438,9 +438,13 @@ pub fn project_all(model: &Model, view: &CameraView) -> Vec<Proj> {
 /// gradient of its 11 geometry parameters, by a hand-written reverse pass
 /// (what [`jacobian`] gives, at a fraction of the cost); `None` if culled.
 pub fn screen_vjp(model: &Model, id: usize, view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
+    screen_vjp_geo(&model.geo[id], view, gs)
+}
+
+/// [`screen_vjp`] of the geometry parameters `g` themselves.
+pub fn screen_vjp_geo(g: &[f32; NGEO], view: &CameraView, gs: &[f32; 6]) -> Option<[f32; NGEO]> {
     // Forward, keeping what the reverse pass needs; the culls are
     // `screen`'s, which the caller already passed.
-    let g = &model.geo[id];
     let cam = &view.camera;
     let (w, h) = (cam.width as f32, cam.height as f32);
     let (fx, fy) = (cam.fx, cam.fy);

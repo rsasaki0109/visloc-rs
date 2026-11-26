@@ -312,11 +312,27 @@ const MAX_BATCH: usize = 1 << 20;
 /// the quadratic model still descends; at 0 it is plain Gauss-Newton, whose
 /// simultaneous steps overshoot by about the number of splats that overlap.
 pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton: bool, overlap: f32) -> Vec<[f32; NB]> {
+    if gauss_newton {
+        backward_impl::<true, NB>(f, r, d_image, h_px, overlap)
+    } else {
+        backward_impl::<false, 10>(f, r, d_image, h_px, overlap)
+    }
+}
+
+/// [`backward`] with `NA` floats per intersection slot (see
+/// [`tile_backward`]), so the gradient-only walk moves a third of the bytes.
+fn backward_impl<const GN: bool, const NA: usize>(
+    f: &Frame,
+    r: &Raster,
+    d_image: &[f32],
+    h_px: f32,
+    overlap: f32,
+) -> Vec<[f32; NB]> {
     let nv = f.num_splats();
     let tile_bw = f.img_w.div_ceil(TILE);
     let tile_bh = f.img_h.div_ceil(TILE);
     let mut out = vec![[0.0f32; NB]; nv];
-    let mut scratch: Vec<[f32; NB]> = Vec::new();
+    let mut scratch: Vec<[f32; NA]> = Vec::new();
     let mut row = 0;
     while row < tile_bh {
         let first = (row * tile_bw..tile_bh * tile_bw).find_map(|t| f.range(t));
@@ -336,9 +352,9 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
             row_end += 1;
         }
         scratch.clear();
-        scratch.resize(hi - lo, [0.0; NB]);
-        let mut jobs: Vec<(u32, usize, &mut [[f32; NB]])> = Vec::new();
-        let mut rest: &mut [[f32; NB]] = &mut scratch;
+        scratch.resize(hi - lo, [0.0; NA]);
+        let mut jobs: Vec<(u32, usize, &mut [[f32; NA]])> = Vec::new();
+        let mut rest: &mut [[f32; NA]] = &mut scratch;
         let mut at = lo;
         for t in row * tile_bw..row_end * tile_bw {
             if let Some((s, e)) = f.range(t) {
@@ -349,18 +365,20 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
                 at = e;
             }
         }
-        jobs.par_iter_mut().for_each(|(t, s, slots)| {
-            if gauss_newton {
-                tile_backward::<true, NB>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
-            } else {
-                tile_backward::<false, 10>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots)
-            }
-        });
+        jobs.par_iter_mut()
+            .for_each(|(t, s, slots)| tile_backward::<GN, NA>(f, r, d_image, h_px, overlap, tile_bw, *t, *s, slots));
         for (k, g) in scratch.iter().enumerate() {
             let c = f.sorted[lo + k] as usize;
             let dst = &mut out[c];
-            for (d, v) in dst.iter_mut().zip(g) {
-                *d += v;
+            if GN {
+                for (d, v) in dst.iter_mut().zip(g) {
+                    *d += v;
+                }
+            } else {
+                for (d, v) in dst.iter_mut().zip(&g[..9]) {
+                    *d += v;
+                }
+                dst[B_STAT] += g[9];
             }
         }
         row = row_end;
@@ -369,8 +387,8 @@ pub fn backward(f: &Frame, r: &Raster, d_image: &[f32], h_px: f32, gauss_newton:
 }
 
 #[allow(clippy::too_many_arguments)]
-/// `NA` accumulators per splat: all [`NB`] with `GN`, else the gradient,
-/// colour gradient and statistic (10), the statistic at index 9.
+/// `NA` accumulators per splat and slot: all [`NB`] with `GN`, else the
+/// gradient, colour gradient and statistic (10), the statistic at index 9.
 fn tile_backward<const GN: bool, const NA: usize>(
     f: &Frame,
     r: &Raster,
@@ -380,7 +398,7 @@ fn tile_backward<const GN: bool, const NA: usize>(
     tile_bw: u32,
     tile: u32,
     start: usize,
-    slots: &mut [[f32; NB]],
+    slots: &mut [[f32; NA]],
 ) {
     const W: usize = TILE as usize;
     let end = start + slots.len();
@@ -516,15 +534,8 @@ fn tile_backward<const GN: bool, const NA: usize>(
         }
         if any {
             let slot = &mut slots[j - start];
-            if GN {
-                for (s, lanes) in slot.iter_mut().zip(&acc) {
-                    *s = lanes.iter().sum();
-                }
-            } else {
-                for (s, lanes) in slot.iter_mut().zip(&acc[..9]) {
-                    *s = lanes.iter().sum();
-                }
-                slot[B_STAT] = acc[9].iter().sum();
+            for (s, lanes) in slot.iter_mut().zip(&acc) {
+                *s = lanes.iter().sum();
             }
         }
     }
