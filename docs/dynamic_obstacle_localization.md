@@ -464,9 +464,8 @@ converted with `scripts/openloris_to_euroc.py`. CC BY-ND 4.0.
 [Robot Native Engine](https://github.com/rsasaki0109/RobotNativeEngine)'s
 example 113 drives a diff-drive robot with a stereo camera (20 Hz, 0.35 m
 up) and an IMU (60 Hz) round a loop in the photo-real Dr Johnson 3DGS
-interior and exports EuRoC. Locally patched
-([`scripts/rne/example113_walkers.patch`](../scripts/rne/example113_walkers.patch),
-against RNE `1c39c50`; not pushed to RNE), it adds walkers as splat actors
+interior and exports EuRoC. With `RNE_WALKERS` (RNE branch
+`claude/drjohnson-walkers`, commit `d9ac5cd`), it adds walkers as splat actors
 that pace lines across the loop, sorted and rendered with the scene, so they
 occlude it and are occluded correctly; their gait phases come from
 `ros2/visloc-ros2/gs/walker_splat_plys.py`. Rendered on the CPU (Mesa
