@@ -15,7 +15,13 @@
 //! The correction is causal: it only uses fixes already added. Per fix it
 //!
 //! - **initializes** once `init_fixes` consecutive fixes agree on one offset,
-//!   so a single wrong fix cannot place the trajectory;
+//!   so a single wrong fix cannot place the trajectory; with
+//!   `init_min_travel_m` or `init_min_turn_deg` set, once that many fixes of
+//!   the last `init_window_s` agree *and* the odometry moved that far or
+//!   turned that much between them. Fixes from one viewpoint can be wrong
+//!   together (a view mostly hidden by people leaves one patch, and every
+//!   image of it gives the same wrong pose); a bias that depends on the view
+//!   does not survive a change of view, the truth does;
 //! - **accepts** a fix whose map pose lies within a gate of where the current
 //!   offset puts the odometry pose; the gate widens with the odometry
 //!   distance travelled since the last accepted fix, to absorb drift;
@@ -83,6 +89,16 @@ pub struct OdomCorrectionConfig {
     pub weak_gate_m: f64,
     /// Yaw gate, in degrees, for accepting a weak fix (`weak_gate_m`).
     pub weak_gate_yaw_deg: f64,
+    /// When either is positive, the fixes that set the first offset must
+    /// span this much odometry travel (m) or turn (deg), between any two of
+    /// them; they are then drawn from the fixes of the last `init_window_s`,
+    /// not only consecutive ones. 0 and 0, the default: consecutive fixes,
+    /// no span.
+    pub init_min_travel_m: f64,
+    pub init_min_turn_deg: f64,
+    /// How far back the fixes that may set the first offset reach, with a
+    /// span required.
+    pub init_window_s: f64,
 }
 
 impl Default for OdomCorrectionConfig {
@@ -99,6 +115,9 @@ impl Default for OdomCorrectionConfig {
             window_s: 5.0,
             weak_gate_m: 0.0,
             weak_gate_yaw_deg: 2.0,
+            init_min_travel_m: 0.0,
+            init_min_turn_deg: 0.0,
+            init_window_s: 10.0,
         }
     }
 }
@@ -143,6 +162,8 @@ struct Fix {
     timestamp_ns: i64,
     map_position: Vector3<f64>,
     odom_position: Vector3<f64>,
+    /// The body's odometry orientation (for the initial span).
+    odom_rotation: UnitQuaternion<f64>,
     /// Yaw of `map_from_body * odom_from_body^-1`, the offset this fix alone
     /// implies.
     yaw: f64,
@@ -331,6 +352,7 @@ impl OdomCorrection {
             timestamp_ns,
             map_position: map_from_body.translation,
             odom_position: odom_from_body.translation,
+            odom_rotation: odom_from_body.rotation,
             yaw: yaw_of(&(map_from_body.rotation * odom_from_body.rotation.inverse())),
             weak,
         };
@@ -405,11 +427,86 @@ impl OdomCorrection {
         self.candidates.len() == needed && self.agree(&self.candidates)
     }
 
+    /// Whether the initial span is required.
+    fn spans_required(&self) -> bool {
+        self.config.init_min_travel_m > 0.0 || self.config.init_min_turn_deg > 0.0
+    }
+
+    /// Whether `fixes` span the required odometry travel or turn.
+    fn spans(&self, fixes: &[Fix]) -> bool {
+        let travel = self.config.init_min_travel_m;
+        let turn = self.config.init_min_turn_deg.to_radians();
+        fixes.iter().enumerate().any(|(i, a)| {
+            fixes[i + 1..].iter().any(|b| {
+                (travel > 0.0 && (a.odom_position - b.odom_position).norm() >= travel)
+                    || (turn > 0.0 && a.odom_rotation.angle_to(&b.odom_rotation) >= turn)
+            })
+        })
+    }
+
+    /// With a span required: among the fixes of the last `init_window_s`,
+    /// those that agree with the newest; the one that agrees least with
+    /// their joint offset is dropped until all agree. They set the offset if
+    /// there are enough (`init_fixes`, or `init_fixes_weak` with a weak one)
+    /// and they span the required travel or turn; the candidates then keep
+    /// only them.
+    fn push_initial_spread(&mut self, fix: Fix) -> bool {
+        let window_ns = (self.config.init_window_s * 1e9) as i64;
+        let newest_ns = fix.timestamp_ns;
+        self.candidates.push(fix);
+        self.candidates
+            .retain(|candidate| newest_ns - candidate.timestamp_ns <= window_ns);
+        let newest = self.candidates.last().expect("just pushed").clone();
+        let mut group: Vec<Fix> = self
+            .candidates
+            .iter()
+            .filter(|candidate| self.agree(&[(*candidate).clone(), newest.clone()]))
+            .cloned()
+            .collect();
+        let strong = self.config.init_fixes.max(1);
+        let weak = self.config.init_fixes_weak.max(strong);
+        loop {
+            let needed = if group.iter().any(|fix| fix.weak) {
+                weak
+            } else {
+                strong
+            };
+            if group.len() < needed {
+                return false;
+            }
+            if self.agree(&group) {
+                if !self.spans(&group) {
+                    return false;
+                }
+                self.candidates = group;
+                return true;
+            }
+            let offset = fit(&group.iter().collect::<Vec<_>>());
+            let worst = group
+                .iter()
+                .enumerate()
+                .filter(|(_, fix)| fix.timestamp_ns != newest_ns)
+                .max_by(|(_, a), (_, b)| {
+                    residuals(&offset, a).0.total_cmp(&residuals(&offset, b).0)
+                })
+                .map(|(index, _)| index);
+            match worst {
+                Some(index) => {
+                    group.remove(index);
+                }
+                None => return false,
+            }
+        }
+    }
+
     /// Appends to the candidate run before the first offset and reports
     /// whether its newest fixes now set it: `init_fixes` of them agreeing, or
     /// `init_fixes_weak` when any of those is weak. On success the run keeps
     /// only those.
     fn push_initial(&mut self, fix: Fix) -> bool {
+        if self.spans_required() {
+            return self.push_initial_spread(fix);
+        }
         let strong = self.config.init_fixes.max(1);
         let weak = self.config.init_fixes_weak.max(strong);
         self.candidates.push(fix);
@@ -510,6 +607,96 @@ mod tests {
         assert!(
             lhs.rotation.angle_to(&rhs.rotation) < tolerance,
             "{lhs:?} vs {rhs:?}"
+        );
+    }
+
+    /// Ten fixes from one viewpoint, all off by the same 20 cm, then the
+    /// body moves 10 cm per fix with exact fixes.
+    fn biased_start(correction: &mut OdomCorrection) -> Vec<FixOutcome> {
+        let map_from_odom = truth();
+        let mut outcomes = Vec::new();
+        for index in 0..30_i64 {
+            let moved = (index - 9).max(0) as f64 * 0.1;
+            let odom_from_body = SE3::new(
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.2),
+                Vector3::new(moved, 0.0, 0.0),
+            );
+            let mut map_from_body = map_from_odom.compose(&odom_from_body);
+            if index < 10 {
+                map_from_body.translation += Vector3::new(0.2, 0.0, 0.0);
+            }
+            outcomes.push(correction.add_fix(index * SECOND / 10, &map_from_body, &odom_from_body));
+        }
+        outcomes
+    }
+
+    #[test]
+    fn agreeing_fixes_from_one_viewpoint_set_a_biased_offset_by_default() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
+        let outcomes = biased_start(&mut correction);
+        assert_eq!(outcomes[1], FixOutcome::Initialized);
+        // The exact fixes then disagree with the biased offset, until three
+        // in a row reset it.
+        assert!(outcomes[10..].contains(&FixOutcome::Reset));
+    }
+
+    #[test]
+    fn a_required_span_waits_for_fixes_that_agree_across_motion() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            init_min_travel_m: 0.3,
+            ..OdomCorrectionConfig::default()
+        });
+        let outcomes = biased_start(&mut correction);
+        // The biased fixes never span 0.3 m; the exact ones (from 0.1 m on)
+        // do at the fourth.
+        assert!(
+            outcomes[..10].iter().all(|o| *o == FixOutcome::Pending),
+            "{outcomes:?}"
+        );
+        let initialized = outcomes
+            .iter()
+            .position(|o| *o == FixOutcome::Initialized)
+            .expect("initialized");
+        assert_eq!(initialized, 13, "{outcomes:?}");
+        assert!(!outcomes.contains(&FixOutcome::Reset));
+        assert!(!outcomes.contains(&FixOutcome::Rejected));
+        let odom_from_body = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0, 1.0, 0.0));
+        assert_pose_close(
+            &correction.map_from_body(&odom_from_body).expect("set"),
+            &truth().compose(&odom_from_body),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn a_required_turn_counts_rotation_too() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            init_min_turn_deg: 10.0,
+            ..OdomCorrectionConfig::default()
+        });
+        let map_from_odom = truth();
+        let mut outcomes = Vec::new();
+        // Turning in place by 4 degrees per fix, exact fixes.
+        for index in 0..5 {
+            let odom_from_body = SE3::new(
+                UnitQuaternion::from_euler_angles(0.0, 0.0, (4.0 * index as f64).to_radians()),
+                Vector3::new(1.0, 2.0, 0.0),
+            );
+            outcomes.push(correction.add_fix(
+                index as i64 * SECOND / 10,
+                &map_from_odom.compose(&odom_from_body),
+                &odom_from_body,
+            ));
+        }
+        assert_eq!(
+            outcomes,
+            vec![
+                FixOutcome::Pending,
+                FixOutcome::Pending,
+                FixOutcome::Pending,
+                FixOutcome::Initialized,
+                FixOutcome::Accepted
+            ]
         );
     }
 

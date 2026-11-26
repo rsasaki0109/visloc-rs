@@ -299,6 +299,11 @@ struct Args {
     /// Until the correction is set, only fixes with this many inliers help
     /// start it (0: all).
     init_min_inliers: usize,
+    /// `OdomCorrectionConfig::init_min_travel_m` / `init_min_turn_deg`: the
+    /// fixes that start the correction must agree across this much odometry
+    /// travel or turn (0: no span).
+    init_min_travel_m: f64,
+    init_min_turn_deg: f64,
 }
 
 impl Args {
@@ -319,7 +324,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG]"
             .into()
     }
 
@@ -389,6 +394,8 @@ impl Args {
             init_fixes: None,
             reset_after: None,
             init_min_inliers: 0,
+            init_min_travel_m: 0.0,
+            init_min_turn_deg: 0.0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -526,6 +533,10 @@ impl Args {
                 "--init-fixes" => args.init_fixes = Some(number(&option, value()?)?),
                 "--reset-after" => args.reset_after = Some(number(&option, value()?)?),
                 "--init-min-inliers" => args.init_min_inliers = number(&option, value()?)?,
+                "--init-min-travel-cm" => {
+                    args.init_min_travel_m = number::<f64>(&option, value()?)? / 100.0;
+                }
+                "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -1320,6 +1331,8 @@ impl CorrectedRun {
                         n.max(defaults.init_fixes_weak)
                     }),
                     reset_after: args.reset_after.unwrap_or(defaults.reset_after),
+                    init_min_travel_m: args.init_min_travel_m,
+                    init_min_turn_deg: args.init_min_turn_deg,
                     ..defaults
                 }
             }),
