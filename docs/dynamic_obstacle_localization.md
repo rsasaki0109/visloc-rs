@@ -346,6 +346,40 @@ absolute inlier count does not transfer between maps and cameras; the start
 needs a rule relative to what the map gives (for example the inliers of
 the fixes seen so far, or agreement over a stretch of motion).
 
+## Starting the correction only from fixes that agree across motion (negative)
+
+`OdomCorrectionConfig::init_min_travel_m` / `init_min_turn_deg`
+(`--init-min-travel-cm`, `--init-min-turn-deg`; off by default): the fixes
+that set the first offset are drawn from the last 10 s and must agree *and*
+span that much odometry travel or turn. The hypothesis was that walking_rpy's
+biased first fixes, all from one view, would stop agreeing once the view
+changed. **It does not hold**, and the rule has a fatal side effect.
+
+Map pose RMSE, median of three seeds (range); frames with a map pose.
+
+| Setting | TUM sitting_static | TUM walking_static | TUM walking_xyz | TUM walking_rpy | Bonn person_tracking | Bonn moving_obstructing_box | Bonn removing_obstructing_box |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 1.5 cm, 701 | 2.2 cm, 737 | 2.0 cm, 855 | 10.0 cm, 901 | 9.5 cm, 569 | 5.1 cm, 587 | 9.6 cm, 959 |
+| `--init-min-inliers 35 --min-inlier-cells 6` | 1.5 cm, 701 | 2.2 cm, 737 | 1.7 cm, 855 | 3.7 cm, 802 | 7.8 cm, 54 | none, 0 | 5.1 cm, 223 |
+| 20 cm or 10° | 1.7 cm, 502 | **none, 0** | 2.5 cm, 823 | 9.8 cm, 885 | 8.3 (5.7–10.9) cm, 254 | 5.1 cm, 543 | 7.9 cm, 916 |
+| 40 cm or 20° | **none, 0** | **none, 0** | 2.7 cm, 736 | 7.3 cm, 872 | 5.6 (4.8–8.5) cm, 250 | 7.4 cm, 506 | 9.5 cm, 825 |
+| 20 cm or 10°, `--min-inlier-cells 6` | 1.7 cm, 502 | **none, 0** | 2.0 cm, 823 | 9.9 cm, 885 | 5.7 (4.9–6.4) cm, 254 | 5.1 cm, 543 | 7.9 cm, 916 |
+
+- **walking_rpy is not fixed** (7.3–9.9 cm against 10.0): its camera turns
+  quickly from the start, so the biased fixes span 10–20° and still agree.
+  The bias is not tied to a single view.
+- **A camera that does not move never gets a map pose** (walking_static,
+  and sitting_static at 40 cm / 20°). For a robot that starts standing
+  still this is disqualifying.
+- On Bonn it trades frames with a map pose for accuracy, as the inlier
+  threshold did, less sharply.
+
+The switch stays in the code, off by default, with this result recorded;
+it is not recommended. What starts walking_rpy right is the strength of the
+first fixes (`--init-min-inliers`), which does not transfer to Bonn as an
+absolute number. A threshold relative to the map's own fixes is the next
+thing to try, not more agreement.
+
 ## Not yet measured
 
 - **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.
