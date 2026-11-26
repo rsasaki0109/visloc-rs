@@ -97,8 +97,18 @@ pub struct OdomCorrectionConfig {
     pub init_min_travel_m: f64,
     pub init_min_turn_deg: f64,
     /// How far back the fixes that may set the first offset reach, with a
-    /// span required.
+    /// span required or a warm-up.
     pub init_window_s: f64,
+    /// When positive, the first offset waits until fixes have come in for
+    /// this long, then grows from the strongest fix of the last
+    /// `init_window_s` (by the score given with
+    /// [`OdomCorrection::add_scored_fix`], e.g. its inlier count): the fixes
+    /// that agree with it set the offset once there are `init_fixes` of
+    /// them; failing that, the next strongest is tried. Fixes from a view
+    /// mostly hidden by people can agree on a wrong pose, and they are
+    /// weaker than the fixes of a clear view. 0, the default: the first
+    /// agreeing consecutive fixes.
+    pub init_warmup_s: f64,
 }
 
 impl Default for OdomCorrectionConfig {
@@ -118,6 +128,7 @@ impl Default for OdomCorrectionConfig {
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_window_s: 10.0,
+            init_warmup_s: 0.0,
         }
     }
 }
@@ -168,6 +179,8 @@ struct Fix {
     /// implies.
     yaw: f64,
     weak: bool,
+    /// Strength (e.g. inliers) for `init_warmup_s`; 0 when not given.
+    score: f64,
 }
 
 pub(crate) fn yaw_of(rotation: &UnitQuaternion<f64>) -> f64 {
@@ -222,6 +235,8 @@ pub struct OdomCorrection {
     path_end: Option<Vector3<f64>>,
     /// Path length at the last accepted fix, when the path covered it.
     path_at_accept_m: Option<f64>,
+    /// Stamp of the first fix before the first offset (`init_warmup_s`).
+    init_first_ns: Option<i64>,
 }
 
 impl OdomCorrection {
@@ -236,6 +251,7 @@ impl OdomCorrection {
             path: VecDeque::new(),
             path_end: None,
             path_at_accept_m: None,
+            init_first_ns: None,
         }
     }
 
@@ -325,7 +341,30 @@ impl OdomCorrection {
         map_from_body: &SE3,
         odom_from_body: &SE3,
     ) -> FixOutcome {
-        self.add(timestamp_ns, map_from_body, odom_from_body, false)
+        self.add(timestamp_ns, map_from_body, odom_from_body, false, 0.0)
+    }
+
+    /// [`Self::add_fix`] with a strength, e.g. the localization's inlier
+    /// count, which `init_warmup_s` ranks the first fixes by.
+    pub fn add_scored_fix(
+        &mut self,
+        timestamp_ns: i64,
+        map_from_body: &SE3,
+        odom_from_body: &SE3,
+        score: f64,
+    ) -> FixOutcome {
+        self.add(timestamp_ns, map_from_body, odom_from_body, false, score)
+    }
+
+    /// [`Self::add_weak_fix`] with a strength (see [`Self::add_scored_fix`]).
+    pub fn add_scored_weak_fix(
+        &mut self,
+        timestamp_ns: i64,
+        map_from_body: &SE3,
+        odom_from_body: &SE3,
+        score: f64,
+    ) -> FixOutcome {
+        self.add(timestamp_ns, map_from_body, odom_from_body, true, score)
     }
 
     /// Adds a weak fix: a localization with fewer inliers than a fix needs.
@@ -338,7 +377,7 @@ impl OdomCorrection {
         map_from_body: &SE3,
         odom_from_body: &SE3,
     ) -> FixOutcome {
-        self.add(timestamp_ns, map_from_body, odom_from_body, true)
+        self.add(timestamp_ns, map_from_body, odom_from_body, true, 0.0)
     }
 
     fn add(
@@ -347,6 +386,7 @@ impl OdomCorrection {
         map_from_body: &SE3,
         odom_from_body: &SE3,
         weak: bool,
+        score: f64,
     ) -> FixOutcome {
         let fix = Fix {
             timestamp_ns,
@@ -355,6 +395,7 @@ impl OdomCorrection {
             odom_rotation: odom_from_body.rotation,
             yaw: yaw_of(&(map_from_body.rotation * odom_from_body.rotation.inverse())),
             weak,
+            score,
         };
         if let Some(previous) = self.previous_odom_position {
             self.travel_since_accept_m += (fix.odom_position - previous).norm();
@@ -444,6 +485,73 @@ impl OdomCorrection {
         })
     }
 
+    /// With a warm-up: once the first fix is `init_warmup_s` old, the fixes
+    /// of the last `init_window_s` (at least the warm-up) are tried as seeds,
+    /// strongest first (newest among equals). A seed's group is the fixes
+    /// that agree with it, the one agreeing least with their joint offset
+    /// dropped until all agree; the first group with enough fixes
+    /// (`init_fixes`, or `init_fixes_weak` with a weak one) sets the offset.
+    fn push_initial_strongest(&mut self, fix: Fix) -> bool {
+        let warmup_ns = (self.config.init_warmup_s * 1e9) as i64;
+        let window_ns = ((self.config.init_window_s * 1e9) as i64).max(warmup_ns);
+        let newest_ns = fix.timestamp_ns;
+        let first_ns = *self.init_first_ns.get_or_insert(newest_ns);
+        self.candidates.push(fix);
+        self.candidates
+            .retain(|candidate| newest_ns - candidate.timestamp_ns <= window_ns);
+        if newest_ns - first_ns < warmup_ns {
+            return false;
+        }
+        let strong = self.config.init_fixes.max(1);
+        let weak = self.config.init_fixes_weak.max(strong);
+        let mut seeds: Vec<usize> = (0..self.candidates.len()).collect();
+        seeds.sort_by(|&a, &b| {
+            self.candidates[b]
+                .score
+                .total_cmp(&self.candidates[a].score)
+                .then(b.cmp(&a))
+        });
+        for seed in seeds {
+            let seed_fix = self.candidates[seed].clone();
+            let mut group: Vec<Fix> = self
+                .candidates
+                .iter()
+                .filter(|candidate| self.agree(&[(*candidate).clone(), seed_fix.clone()]))
+                .cloned()
+                .collect();
+            loop {
+                let needed = if group.iter().any(|fix| fix.weak) {
+                    weak
+                } else {
+                    strong
+                };
+                if group.len() < needed {
+                    break;
+                }
+                if self.agree(&group) {
+                    self.candidates = group;
+                    return true;
+                }
+                let offset = fit(&group.iter().collect::<Vec<_>>());
+                let worst = group
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, fix)| fix.timestamp_ns != seed_fix.timestamp_ns)
+                    .max_by(|(_, a), (_, b)| {
+                        residuals(&offset, a).0.total_cmp(&residuals(&offset, b).0)
+                    })
+                    .map(|(index, _)| index);
+                match worst {
+                    Some(index) => {
+                        group.remove(index);
+                    }
+                    None => break,
+                }
+            }
+        }
+        false
+    }
+
     /// With a span required: among the fixes of the last `init_window_s`,
     /// those that agree with the newest; the one that agrees least with
     /// their joint offset is dropped until all agree. They set the offset if
@@ -504,6 +612,9 @@ impl OdomCorrection {
     /// `init_fixes_weak` when any of those is weak. On success the run keeps
     /// only those.
     fn push_initial(&mut self, fix: Fix) -> bool {
+        if self.config.init_warmup_s > 0.0 {
+            return self.push_initial_strongest(fix);
+        }
         if self.spans_required() {
             return self.push_initial_spread(fix);
         }
@@ -697,6 +808,87 @@ mod tests {
                 FixOutcome::Initialized,
                 FixOutcome::Accepted
             ]
+        );
+    }
+
+    /// A still camera: every third fix exact and strong (50), the others
+    /// off by the same 20 cm and weaker (25).
+    fn mixed_still_start(correction: &mut OdomCorrection) -> Vec<FixOutcome> {
+        let map_from_odom = truth();
+        let odom_from_body = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.2),
+            Vector3::new(0.5, 0.0, 0.0),
+        );
+        (0..20_i64)
+            .map(|index| {
+                let exact = index % 3 == 0;
+                let mut map_from_body = map_from_odom.compose(&odom_from_body);
+                if !exact {
+                    map_from_body.translation += Vector3::new(0.2, 0.0, 0.0);
+                }
+                correction.add_scored_fix(
+                    index * SECOND / 10,
+                    &map_from_body,
+                    &odom_from_body,
+                    if exact { 50.0 } else { 25.0 },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_warm_up_starts_from_the_strongest_fixes() {
+        let at = SE3::new(UnitQuaternion::identity(), Vector3::new(2.0, 1.0, 0.0));
+        // By default the first two (biased) fixes that agree set it.
+        let mut plain = OdomCorrection::new(OdomCorrectionConfig::default());
+        let outcomes = mixed_still_start(&mut plain);
+        assert_eq!(outcomes[2], FixOutcome::Initialized);
+        // With a 1 s warm-up, it waits, then grows from the strongest fixes,
+        // which are the exact ones; a still camera is no obstacle.
+        let mut warm = OdomCorrection::new(OdomCorrectionConfig {
+            init_warmup_s: 1.0,
+            ..OdomCorrectionConfig::default()
+        });
+        let outcomes = mixed_still_start(&mut warm);
+        assert!(outcomes[..10].iter().all(|o| *o == FixOutcome::Pending));
+        assert_eq!(outcomes[10], FixOutcome::Initialized, "{outcomes:?}");
+        assert_pose_close(
+            &warm.map_from_body(&at).expect("set"),
+            &truth().compose(&at),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn a_strong_lone_fix_does_not_block_the_start() {
+        // One strong fix far off, then agreeing weaker exact ones.
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            init_warmup_s: 0.5,
+            ..OdomCorrectionConfig::default()
+        });
+        let map_from_odom = truth();
+        let odom_from_body = odom(0);
+        let mut outcomes = Vec::new();
+        for index in 0..8_i64 {
+            let mut map_from_body = map_from_odom.compose(&odom_from_body);
+            let score = if index == 0 {
+                map_from_body.translation += Vector3::new(1.0, 0.0, 0.0);
+                90.0
+            } else {
+                30.0
+            };
+            outcomes.push(correction.add_scored_fix(
+                index * SECOND / 10,
+                &map_from_body,
+                &odom_from_body,
+                score,
+            ));
+        }
+        assert_eq!(outcomes[5], FixOutcome::Initialized, "{outcomes:?}");
+        assert_pose_close(
+            &correction.map_from_body(&odom_from_body).expect("set"),
+            &truth().compose(&odom_from_body),
+            1e-9,
         );
     }
 

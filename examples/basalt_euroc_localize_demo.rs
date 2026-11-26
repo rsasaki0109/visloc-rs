@@ -304,6 +304,9 @@ struct Args {
     /// travel or turn (0: no span).
     init_min_travel_m: f64,
     init_min_turn_deg: f64,
+    /// `OdomCorrectionConfig::init_warmup_s`: wait this long, then start the
+    /// correction from the strongest fixes (by inliers) that agree (0: off).
+    init_warmup_s: f64,
 }
 
 impl Args {
@@ -324,7 +327,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S]"
             .into()
     }
 
@@ -396,6 +399,7 @@ impl Args {
             init_min_inliers: 0,
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
+            init_warmup_s: 0.0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -537,6 +541,7 @@ impl Args {
                     args.init_min_travel_m = number::<f64>(&option, value()?)? / 100.0;
                 }
                 "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
+                "--init-warmup-s" => args.init_warmup_s = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -1333,6 +1338,7 @@ impl CorrectedRun {
                     reset_after: args.reset_after.unwrap_or(defaults.reset_after),
                     init_min_travel_m: args.init_min_travel_m,
                     init_min_turn_deg: args.init_min_turn_deg,
+                    init_warmup_s: args.init_warmup_s,
                     ..defaults
                 }
             }),
@@ -1473,17 +1479,23 @@ impl CorrectedRun {
                     self.last_localized_ns = Some(timestamp_ns);
                     self.fixes_tum
                         .push_str(&tum_line(timestamp_ns, map_from_imu));
-                    let outcome =
-                        self.correction
-                            .add_fix(timestamp_ns, map_from_imu, odom_from_imu);
+                    let outcome = self.correction.add_scored_fix(
+                        timestamp_ns,
+                        map_from_imu,
+                        odom_from_imu,
+                        attempt.result.inlier_count as f64,
+                    );
                     self.fuse(timestamp_ns, map_from_imu, sources, outcome);
                     outcome_name(outcome)
                 }
                 (None, Some(map_from_imu)) => {
                     self.last_localized_ns = Some(timestamp_ns);
-                    let outcome =
-                        self.correction
-                            .add_weak_fix(timestamp_ns, map_from_imu, odom_from_imu);
+                    let outcome = self.correction.add_scored_weak_fix(
+                        timestamp_ns,
+                        map_from_imu,
+                        odom_from_imu,
+                        attempt.result.inlier_count as f64,
+                    );
                     self.fuse(timestamp_ns, map_from_imu, sources, outcome);
                     match outcome {
                         FixOutcome::Pending => "weak-pending",
