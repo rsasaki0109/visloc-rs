@@ -38,6 +38,9 @@ from pathlib import Path
 LOW_LIGHT, MOVING = 4, 5
 BA = Path(__file__).resolve().parent / "lamaria_batch_ba.py"
 WARMUP = ["--gyro-rw-warmup", "10", "--gyro-rw-warmup-s", "300"]
+# monocular, in low light: a window whose new keyframes disagree with it five times as much as the window before
+# (sequence_4_3, a walk the online windows shortened by 10 m) gates at 3 px from its first iteration
+JUMP_GATE = ["--jump-gate", "3"]
 LEARNED_KEYPOINTS = 1024
 
 
@@ -91,7 +94,8 @@ def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=Fals
     feats += [] if cameras == 2 else ["--cameras", str(cameras)]
     out = keypoints(mav0, vio, calib, work, jobs, [*feats, *feature_options(features, num_features)])
     out.append(("online", ["online", "--work", work, "--vio", vio, "--out", work / "online.tum", "--loops", *solve,
-                           *([] if low else WARMUP)], work / "online.done", True))
+                           *([] if low else WARMUP), *(JUMP_GATE if low and cameras == 1 else [])],
+                work / "online.done", True))
     if not low:  # the batch pass after the recording, its random walk ten times looser
         pw = pass_work(work, pass_features)
         if pass_features:
