@@ -415,16 +415,31 @@ impl Trainer {
                         }
                     }
                 }
+                // Moments below 1e-30 are flushed to zero: a gaussian that
+                // gets no gradient for a few hundred steps (e.g. culled after
+                // an opacity reset) would otherwise decay into subnormals,
+                // which x86 computes on a slow path (the GPU flushes them).
+                #[inline(always)]
+                fn ftz(x: f32) -> f32 {
+                    if x.abs() < 1e-30 {
+                        0.0
+                    } else {
+                        x
+                    }
+                }
                 for k in 0..NGEO {
-                    m[k] = b1 * m[k] + (1.0 - b1) * g[k];
-                    v[k] = b2 * v[k] + (1.0 - b2) * g[k] * g[k];
+                    m[k] = ftz(b1 * m[k] + (1.0 - b1) * g[k]);
+                    v[k] = ftz(b2 * v[k] + (1.0 - b2) * g[k] * g[k]);
                     p[k] -= lr_geo[k] * (m[k] / bc1) / ((v[k] / bc2).sqrt() + eps);
                 }
-                for i in 0..NCOL {
-                    let lr = if i % NSH == 0 { lr_dc } else { lr_rest };
-                    mc[i] = b1 * mc[i] + (1.0 - b1) * gc[i];
-                    vc[i] = b2 * vc[i] + (1.0 - b2) * gc[i] * gc[i];
-                    pc[i] -= lr * (mc[i] / bc1) / ((vc[i] / bc2).sqrt() + eps);
+                for ch in 0..3 {
+                    for k in 0..NSH {
+                        let i = ch * NSH + k;
+                        let lr = if k == 0 { lr_dc } else { lr_rest };
+                        mc[i] = ftz(b1 * mc[i] + (1.0 - b1) * gc[i]);
+                        vc[i] = ftz(b2 * vc[i] + (1.0 - b2) * gc[i] * gc[i]);
+                        pc[i] -= lr * (mc[i] / bc1) / ((vc[i] / bc2).sqrt() + eps);
+                    }
                 }
             });
         let t2 = Instant::now();
