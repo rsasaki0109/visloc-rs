@@ -1,6 +1,6 @@
 # Moving the street simulator to Robot Native Engine
 
-Status: P0 to P3 done (below); P4 (media, docs, retiring the ROS 2 path) next. This plan moves the 3DGS street simulator
+Status: done (P0 to P4, below). The ROS 2 simulator is frozen as the Nav2 reference. This plan moves the 3DGS street simulator
 (`ros2/visloc-ros2/gs/`: `gs_sim.py`, `people.py`, `kerbs.py`,
 `chase_video.py`, and Nav2) into Robot Native Engine (RNE). visloc-rs keeps the
 reconstruction and the localization.
@@ -198,3 +198,14 @@ Each phase ends with a headless test in RNE, and a short docs entry.
   - Runs take 470 to 536 s, against 284 s without the crowd. The robot
     waits by a sign post when a cyclist and a stroller come the other way:
     it has no recoveries (backing up, turning round) as Nav2 has.
+- **P4 done.**
+  - Media: example 163's chase GIF and video, with the crowd, the delivery
+    robot drawn from the bundle's `robot.ply`, and the credit in every
+    frame (RNE `docs/media/street-splat-nav.gif`, `.mp4`).
+  - Docs: RNE `docs/STREET_SPLAT_NAV.md`. Here, `docs/navigation.md`
+    points to it, and this plan records the results.
+  - The ROS 2 simulator (`gs_sim.py`, `people.py`, `chase_video.py`, with
+    Nav2) is frozen, not deleted. It stays as the Nav2 reference, and its
+    runs are the numbers RNE's are compared with.
+  - Still open: the crowd with camera-only localization, and recoveries for
+    the robot when people hold it up.
