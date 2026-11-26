@@ -264,13 +264,90 @@ move the pose much.
   changes until they hold on another indoor set (Bonn, OpenLORIS cafe).
 - Without an odometry, the inlier ratio is the better single-image test.
 
+## Bonn RGB-D Dynamic: a second indoor set
+
+**Result.** On Bonn, today's localization finds few fixes (0–33% of the
+images of the dynamic sequences, 0.3% of a static one from another day),
+and the setting that fixed TUM walking_rpy (`--init-min-inliers 35`) does
+not carry over: fixes reach 35 inliers so rarely that the correction
+starts late or never. **No default changes**, and the TUM thresholds stay
+tuned to TUM.
+
+### Ground truth of the camera
+
+Bonn's `groundtruth.txt` is the pose of the motion-capture markers, and the
+published marker-to-camera matrix is not a rotation. `scripts/rgbd_hand_eye.py`
+calibrates `T_body_cam` from the data: ORB matches between frame pairs with
+the registered depth give the camera's relative motion (RANSAC rigid fit),
+the ground truth gives the markers', and AX = XB is solved (Park–Martin
+rotation, least-squares translation), with the time offset searched on a
+grid.
+
+- Pooling `static` (2019-01-23) and `static_close_far` (2019-01-24), 221
+  pairs: `T_body_cam` = `-0.00933,0.10053,-0.02389,-0.125559,0.882537,-0.450645,0.047777`
+  (tx,ty,tz,qx,qy,qz,qw), time offset 0–10 ms, residual 0.56° / 1.6 cm per
+  pair (median).
+- Each sequence alone gives the same rotation (within 1°) but translations
+  8 cm apart: walking with a handheld camera turns it mostly about the
+  vertical, which leaves part of the translation weakly observed. Pooled
+  with pairs 8 or 20 frames apart, the translation moves by under 1 cm.
+- The accepted fixes on the dynamic sequences are off by a consistent 4–5
+  cm (mean error vector), which is the level of this calibration: errors
+  under about 5 cm cannot be told apart on Bonn, so fixes count as wrong
+  from 15 cm here.
+
+### Map and setup
+
+- `static` has depth images for its first 337 s only (the archive holds
+  10,000 of the 10,908 listed in `depth.txt`; it unzipped without error),
+  so the map uses that
+  stretch, plus `static_close_far`: `tum_rgbd_save_map --keep-world
+  --match-radius-px 8 --track-keyframes 10 --keyframe-m 0.05 --keyframe-deg 5`
+  with the published intrinsics and distortion, 1,987 keyframe images,
+  108,963 landmarks.
+- With the defaults (4 px, 5 keyframes) the map kept 23 landmarks per
+  keyframe and localized only 52% of its own images; tracking over more
+  keyframes with a wider radius brings that to 82% (1.7 cm median).
+- Queries: `crowd`, `crowd2` (three people walking around), `person_tracking`
+  (the camera follows a walking person), `moving_obstructing_box`,
+  `removing_obstructing_box` (a person carries a box through the view or
+  takes it away), with the TUM query settings.
+
+### Single image
+
+| Query | Localized | Fix error RMSE / median / max | Fixes > 15 cm | Inlier cells (median) |
+| --- | --- | --- | ---: | ---: |
+| crowd | 0/928 | — | — | — |
+| crowd2 | 0/895 | — | — | — |
+| person_tracking | 90/580 (15.5%) | 10.5 / 8.9 / 20.7 cm | 9 | 9 |
+| moving_obstructing_box | 108/590 (18.3%) | 8.7 / 6.9 / 18.9 cm | 3 | 9 |
+| removing_obstructing_box | 284/963 (29.5%) | 9.0 / 7.2 / 25.3 cm | 14 | 10 |
+
+Most images match the map in many places (150–180 matches) but few
+matches agree (median 4–12 inliers). The map's nearest views are 0.4–1 m
+from the queries' and look at the white-walled room from other angles; the
+`crowd` sequences stand where the mapping walk never stood. That is map
+coverage, not the people.
+
+### With an odometry (three seeds; fixes > 15 cm count as wrong)
+
+| Query | Setting | Images localized | Frames with a map pose | Map pose RMSE | Wrong fixes used |
+| --- | --- | --- | --- | --- | ---: |
+| person_tracking | none | 22.9% | 569 of 580 | 9.5 (9.4–9.6) cm | 0 |
+| person_tracking | `--init-min-inliers 35 --min-inlier-cells 6` | 9.9% | **54** | 7.8 cm | 0 |
+| moving_obstructing_box | none | 56.6% | 587 of 590 | 5.1 (5.0–5.3) cm | 1 |
+| moving_obstructing_box | `--init-min-inliers 35 --min-inlier-cells 6` | 18.3% | **0** | — | 0 |
+| removing_obstructing_box | none | 45.0% | 959 of 963 | 9.6 (9.1–10.1) cm | 6 |
+| removing_obstructing_box | `--init-min-inliers 35 --min-inlier-cells 6` | 21.4% | **223** | 5.1 (4.7–5.1) cm | 0 |
+
+Where it starts, the TUM setting is as accurate or better; but on these
+sequences few fixes have 35 inliers, so it starts late or never. An
+absolute inlier count does not transfer between maps and cameras; the start
+needs a rule relative to what the map gives (for example the inliers of
+the fixes seen so far, or agreement over a stretch of motion).
+
 ## Not yet measured
 
-- **Bonn RGB-D Dynamic.** Downloaded (crowd, crowd2, person_tracking,
-  moving/removing_obstructing_box, static_close_far). Its `groundtruth.txt`
-  is the motion-capture markers' pose, and the published marker-to-camera
-  transform is not a rotation, so a map cannot be built along it as is. It
-  needs its own marker-to-camera calibration first.
 - **OpenLORIS-Scene cafe**, the Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware.
 
@@ -317,4 +394,40 @@ for s in sitting_static walking_static walking_xyz walking_halfsphere walking_rp
       --gt $D/rgbd_dataset_freiburg3_$s/groundtruth.txt --label "$s s$seed" $W/q/od${seed}_$s
   done
 done
+```
+
+### Bonn
+
+Data from `www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/` (intrinsics
+from that page: fx 542.822841, fy 542.576870, cx 315.593520, cy 237.756098,
+distortion 0.039903, −0.099343, −0.000730, −0.000144, 0).
+
+| Archive | SHA-256 |
+| --- | --- |
+| `rgbd_bonn_static.zip` | `6920c6ef01593446915c82189eb0e0eb8e62a3fdb3b3d8ae46e1966fab9a5bb2` |
+| `rgbd_bonn_static_close_far.zip` | `a9fa11127385728c167df64eae8dd36609f61c1cff4a3d9f2b9af79579677ce2` |
+| `rgbd_bonn_crowd.zip` | `76b30c86e4ccb78ab668dd427dab696faef4885633dba436bc391b3a8142df70` |
+| `rgbd_bonn_crowd2.zip` | `e751ca1b64165f3789d1c396d5c5c3d25e7ceb49cab01fad9ec87993f6244840` |
+| `rgbd_bonn_person_tracking.zip` | `a4810fd91ef2ea1d630b53fe0df5d76144c1b18d86ca91fb3a035debd0c9c5f5` |
+| `rgbd_bonn_moving_obstructing_box.zip` | `d0fc8c33d896b6a4c4a506508f44ddec63bf7dc37c8f58524826cbca1bbba689` |
+| `rgbd_bonn_removing_obstructing_box.zip` | `1dfedd7516b4ce25a7598dcc67f27178377d6ef48353d597750890d671a2a132` |
+
+```bash
+B=/data/bonn   # rgbd_bonn_*
+K="--fx 542.822841 --fy 542.576870 --cx 315.593520 --cy 237.756098"
+# Camera in the marker frame, from the two static sequences (needs numpy, OpenCV)
+python3 scripts/rgbd_hand_eye.py --seq-dir $B/rgbd_bonn_static_close_far $B/rgbd_bonn_static \
+  $K --dist 0.039903,-0.099343,-0.000730,-0.000144,0 --gap 8 --offsets-ms=0:10:10 --max-pairs 200
+X=-0.00933,0.10053,-0.02389,-0.125559,0.882537,-0.450645,0.047777
+for s in static static_close_far crowd crowd2 person_tracking moving_obstructing_box \
+    removing_obstructing_box; do
+  python3 scripts/rgbd_hand_eye.py --seq-dir $B/rgbd_bonn_$s $K --apply=$X --out-trajectory $W/bonn/$s.cam.tum
+done
+# Map: static (first 337 s, where depth exists) + static_close_far, concatenated
+# as for TUM, along the camera ground truth
+target/release/examples/tum_rgbd_save_map --seq-dir $W/bonn_seq/static_both \
+  --trajectory $W/bonn/static_both.cam.tum --out $W/maps/bonn_both --keep-world \
+  --match-radius-px 8 --track-keyframes 10 --keyframe-m 0.05 --keyframe-deg 5 \
+  $K --k1 0.039903 --k2 -0.099343 --p1 -0.000730 --p2 -0.000144 --k3 0
+# Queries as for TUM, scored with --gt $W/bonn/$s.cam.tum --wrong-cm 15
 ```
