@@ -368,10 +368,24 @@ pub fn backward(
     gauss_newton: bool,
     overlap: f32,
 ) -> Vec<[f32; NB]> {
-    if gauss_newton {
-        backward_impl::<true, NB>(f, r, d_image, h_px, overlap)
-    } else {
-        backward_impl::<false, 9>(f, r, d_image, h_px, overlap)
+    backward_with(f, r, d_image, h_px, gauss_newton, overlap, false)
+}
+
+/// [`backward`], and with `refine_weight` brush's refine weight of each
+/// splat in [`B_STAT`]: the sum over its pixels of `|dL/du| w + |dL/dv| h`.
+pub fn backward_with(
+    f: &Frame,
+    r: &Raster,
+    d_image: &[f32],
+    h_px: f32,
+    gauss_newton: bool,
+    overlap: f32,
+    refine_weight: bool,
+) -> Vec<[f32; NB]> {
+    match (gauss_newton, refine_weight) {
+        (true, _) => backward_impl::<true, NB>(f, r, d_image, h_px, overlap),
+        (false, false) => backward_impl::<false, 9>(f, r, d_image, h_px, overlap),
+        (false, true) => backward_impl::<false, 10>(f, r, d_image, h_px, overlap),
     }
 }
 
@@ -426,9 +440,17 @@ fn backward_impl<const GN: bool, const NA: usize>(
         });
         for (k, g) in scratch.iter().enumerate() {
             let c = f.sorted[lo + k] as usize;
-            // The first NA of the NB floats (all of them with GN).
-            for (d, v) in out[c].iter_mut().zip(g) {
-                *d += v;
+            // The first 9 floats (all NB with GN); a tenth is the refine
+            // weight.
+            if !GN && NA == 10 {
+                for (d, v) in out[c].iter_mut().zip(&g[..9]) {
+                    *d += v;
+                }
+                out[c][B_STAT] += g[9];
+            } else {
+                for (d, v) in out[c].iter_mut().zip(g) {
+                    *d += v;
+                }
             }
         }
         row = row_end;
@@ -482,6 +504,7 @@ fn tile_backward<const GN: bool, const NA: usize>(
         *x = (x0 as usize + lx) as f32 + 0.5;
     }
     let stop = (tile_last as usize).min(end);
+    let (img_w, img_h) = (f.img_w as f32, f.img_h as f32);
     let mut j = stop;
     while j > start {
         j -= 1;
@@ -543,6 +566,10 @@ fn tile_backward<const GN: bool, const NA: usize>(
                         ];
                         for q in 0..6 {
                             acc[B_GRAD + q][k] += d_alpha * ds[q];
+                        }
+                        if !GN && NA == 10 {
+                            acc[NA - 1][k] += (d_alpha * ds[0]).abs() * img_w
+                                + (d_alpha * ds[1]).abs() * img_h;
                         }
                         if GN {
                             let ratio = w_tot[ly][k] / at.max(1e-12);

@@ -12,13 +12,17 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
-use visloc_gsplat_train::config::pack_rgba8;
-use visloc_gsplat_train::densify::{self, DensifyConfig, DensifyReport, Group, Population};
+use visloc_gsplat_train::config::{central_bound_size, central_bounds, pack_rgba8};
+use visloc_gsplat_train::densify::{
+    self, BrushRefineConfig, DensifyConfig, DensifyReport, Group, Population,
+};
 use visloc_gsplat_train::loss::SsimHost;
 
 use crate::model::{Model, NCOL, NGEO, NSH};
 use crate::project::{jacobian, project_all, screen_vjp_geo, Proj};
-use crate::raster::{backward, forward, tri6, Frame, Raster, B_COL, B_GRAD, B_H, B_HC, NB};
+use crate::raster::{
+    backward, backward_with, forward, tri6, Frame, Raster, B_COL, B_GRAD, B_H, B_HC, B_STAT, NB,
+};
 
 /// Upper triangle of an 11x11 symmetric matrix.
 pub const NTRI: usize = NGEO * (NGEO + 1) / 2;
@@ -274,6 +278,48 @@ fn ftz(x: f32) -> f32 {
     }
 }
 
+fn splitmix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A uniform in (0, 1) from a hash.
+fn unit(key: u64) -> f32 {
+    ((splitmix(key) >> 40) as f32 + 0.5) / (1u64 << 24) as f32
+}
+
+/// Three standard normals (Box-Muller) from a key.
+fn normals3(key: u64) -> [f32; 3] {
+    let n = |k: u64| {
+        let (u1, u2) = (unit(k * 2 + 1), unit(k * 2 + 2));
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    };
+    [n(key), n(key ^ 0x51), n(key ^ 0xA3)]
+}
+
+/// `v` rotated by the quaternion `q = (w, x, y, z)` (normalised here).
+fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    let (w, x, y, z) = if n > 1e-12 {
+        (q[0] / n, q[1] / n, q[2] / n, q[3] / n)
+    } else {
+        (1.0, 0.0, 0.0, 0.0)
+    };
+    // v + w t + u x t, t = 2 u x v.
+    let t = [
+        2.0 * (y * v[2] - z * v[1]),
+        2.0 * (z * v[0] - x * v[2]),
+        2.0 * (x * v[1] - y * v[0]),
+    ];
+    [
+        v[0] + w * t[0] + (y * t[2] - z * t[1]),
+        v[1] + w * t[1] + (z * t[0] - x * t[2]),
+        v[2] + w * t[2] + (x * t[1] - y * t[0]),
+    ]
+}
+
 /// `d` Adam steps with a zero gradient, in closed form (GS-Scale's deferred
 /// update, Lee et al. 2025): the moments decay by `B1^d` and `B2^d`, and the
 /// parameter moves by `lr m / sqrt(v) * sum_k (B1 / sqrt(B2))^k` with the
@@ -314,8 +360,28 @@ pub struct AdamConfig {
     pub lr_opacity: f32,
     pub lr_dc: f32,
     pub lr_rest: f32,
+    /// With `Some`, the log-scale rate decays log-linearly to this.
+    pub lr_scale_final: Option<f32>,
     /// Steps per SH degree increase.
     pub sh_interval: usize,
+}
+
+impl AdamConfig {
+    /// brush 0.3's rates (`visloc_gsplat_train::config::TrainConfig::brush_preset`):
+    /// mean 2e-5 -> 1e-6 times the bound size, log-scale 1e-2 -> 6e-3,
+    /// opacity 1e-2, SH DC 2e-3 and the rest / 20.
+    pub fn brush_preset() -> Self {
+        Self {
+            lr_mean: 2e-5,
+            lr_mean_final: 1e-6,
+            lr_scale: 1e-2,
+            lr_scale_final: Some(6e-3),
+            lr_opacity: 1e-2,
+            lr_dc: 2e-3,
+            lr_rest: 2e-3 / 20.0,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for AdamConfig {
@@ -328,6 +394,7 @@ impl Default for AdamConfig {
             lr_opacity: 5e-2,
             lr_dc: 2.5e-3,
             lr_rest: 2.5e-3 / 20.0,
+            lr_scale_final: None,
             sh_interval: 1000,
         }
     }
@@ -403,8 +470,24 @@ pub struct Trainer {
     /// Train on the images box-averaged by this factor (a resolution
     /// schedule sets it per step; 1 = full resolution).
     pub res_factor: usize,
-    /// Inria's densification statistic: per gaussian, the summed NDC norm
-    /// of its screen-mean gradient, and the views it was projected in.
+    /// brush's refine strategy (`gsplat_train --strategy brush`): with
+    /// `Some`, the statistic is brush's, Adam is dense with its aux losses,
+    /// nearly transparent means get noise, and [`Trainer::brush_refine`]
+    /// replaces the Inria rule.
+    pub brush: Option<BrushRefineConfig>,
+    /// brush's bound size: the central 75% box of the means (the mean
+    /// learning rate and the noise scale with it).
+    pub bound_size: f32,
+    /// brush's aux losses: L1 on opacity and on scale, faded out by
+    /// `aux_loss_time` of the run.
+    pub opac_loss_weight: f32,
+    pub scale_loss_weight: f32,
+    pub aux_loss_time: f32,
+    rng: u64,
+    /// The densification statistic per gaussian and the views it counts:
+    /// Inria's summed NDC norm of the screen-mean gradient over the views
+    /// that projected it, or brush's largest refine weight over the views
+    /// that blended it.
     grad_accum: Vec<f32>,
     grad_count: Vec<f32>,
     /// Tile intersections and projected splats summed over the rendered views.
@@ -416,6 +499,7 @@ pub struct Trainer {
 
 impl Trainer {
     pub fn new(model: Model, views: Vec<TrainView>, bg: [f32; 3]) -> Self {
+        let means: Vec<[f32; 3]> = model.geo.iter().map(|g| [g[0], g[1], g[2]]).collect();
         let centres: Vec<_> = views.iter().map(|v| v.view.camera_center()).collect();
         let mean = centres
             .iter()
@@ -426,6 +510,7 @@ impl Trainer {
                 .iter()
                 .map(|c| (c - mean).norm())
                 .fold(0.0f32, f32::max);
+        let bound_size = central_bound_size(&means, 0.75).unwrap_or(extent);
         let dirs: Vec<_> = views
             .iter()
             .map(|v| v.view.rotation.row(2).transpose())
@@ -460,6 +545,12 @@ impl Trainer {
             ssim_size: (0, 0),
             stride: 1,
             res_factor: 1,
+            brush: None,
+            bound_size,
+            opac_loss_weight: 0.0,
+            scale_loss_weight: 0.0,
+            aux_loss_time: 0.9,
+            rng: 0x9E37_79B9_7F4A_7C15,
             grad_accum: Vec::new(),
             grad_count: Vec::new(),
             timing: [0.0; 6],
@@ -503,7 +594,15 @@ impl Trainer {
         // Gauss-Newton weight of a mean squared error: 2 / (3 N) per pixel.
         let h_px = weight * 2.0 / (gt.len() as f32);
         let t3 = Instant::now();
-        let out = backward(&frame, &raster, &d, h_px, gauss_newton, self.overlap);
+        let out = backward_with(
+            &frame,
+            &raster,
+            &d,
+            h_px,
+            gauss_newton,
+            self.overlap,
+            self.brush.is_some() && !gauss_newton,
+        );
         let t4 = Instant::now();
         self.timing[0] += (t1 - t0).as_secs_f64();
         self.timing[1] += (t2 - t1).as_secs_f64();
@@ -557,10 +656,22 @@ impl Trainer {
             0.5 * view.camera.width as f32,
             0.5 * view.camera.height as f32,
         );
+        let brush = self.brush.is_some();
         for (p, o) in r.proj.iter().zip(&out) {
-            let (du, dv) = (o[B_GRAD] * hw, o[B_GRAD + 1] * hh);
-            self.grad_accum[p.id as usize] += (du * du + dv * dv).sqrt();
-            self.grad_count[p.id as usize] += 1.0;
+            let id = p.id as usize;
+            if brush {
+                // brush counts a view only if it blended the splat into a
+                // pixel, and keeps the largest refine weight.
+                let blended = o[B_COL..B_COL + 3].iter().any(|&x| x != 0.0) || o[B_GRAD + 5] != 0.0;
+                if blended {
+                    self.grad_accum[id] = self.grad_accum[id].max(o[B_STAT]);
+                    self.grad_count[id] += 1.0;
+                }
+            } else {
+                let (du, dv) = (o[B_GRAD] * hw, o[B_GRAD + 1] * hh);
+                self.grad_accum[id] += (du * du + dv * dv).sqrt();
+                self.grad_count[id] += 1.0;
+            }
         }
         let t0 = Instant::now();
         let mut idx = vec![u32::MAX; n];
@@ -584,10 +695,15 @@ impl Trainer {
         let bc1 = 1.0 - b1.powi(st.t);
         let bc2 = 1.0 - b2.powi(st.t);
         let frac = step as f32 / total.max(1) as f32;
-        let lr_mean = self.extent * cfg.lr_mean * (cfg.lr_mean_final / cfg.lr_mean).powf(frac);
+        let mean_scale = if brush { self.bound_size } else { self.extent };
+        let lr_mean = mean_scale * cfg.lr_mean * (cfg.lr_mean_final / cfg.lr_mean).powf(frac);
+        let lr_scale = match cfg.lr_scale_final {
+            Some(end) => cfg.lr_scale * (end / cfg.lr_scale).powf(frac),
+            None => cfg.lr_scale,
+        };
         let mut lr_geo = [0.0f32; NGEO];
         lr_geo[0..3].fill(lr_mean);
-        lr_geo[3..6].fill(cfg.lr_scale);
+        lr_geo[3..6].fill(lr_scale);
         lr_geo[6..10].fill(cfg.lr_quat);
         lr_geo[10] = cfg.lr_opacity;
         let (lr_dc, lr_rest) = (cfg.lr_dc, cfg.lr_rest);
@@ -595,7 +711,24 @@ impl Trainer {
         st.lr_dc = lr_dc;
         st.lr_rest = lr_rest;
         let t_now = st.t;
-        let sparse = self.sparse_adam;
+        // brush's aux losses reach every gaussian, so its Adam is dense.
+        let sparse = self.sparse_adam && !brush;
+        let aux_w = (self.aux_loss_time - frac).clamp(0.0, 1.0);
+        let (scale_coef, opac_coef) = if brush {
+            (
+                self.scale_loss_weight * aux_w / self.bound_size.max(1e-6),
+                self.opac_loss_weight * aux_w,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        // Mean noise on nearly transparent gaussians (brush / 3DGS-MCMC).
+        let noise = self
+            .brush
+            .as_ref()
+            .map(|b| (lr_mean * b.mean_noise_weight, 0.25 * self.bound_size));
+        self.rng = splitmix(self.rng);
+        let seed = self.rng;
         let blur = if self.stride == 2 {
             0.2
         } else {
@@ -617,7 +750,8 @@ impl Trainer {
                 ),
             )
             .zip(idx.par_iter().zip(st.last.par_iter_mut()))
-            .for_each(|(((p, (m, v)), (pc, (mc, vc))), (&c, last))| {
+            .enumerate()
+            .for_each(|(gi, (((p, (m, v)), (pc, (mc, vc))), (&c, last)))| {
                 if sparse {
                     if c == u32::MAX {
                         return;
@@ -656,6 +790,13 @@ impl Trainer {
                         }
                     }
                 }
+                if scale_coef > 0.0 || opac_coef > 0.0 {
+                    let vis = 1e-3 + if c != u32::MAX { 1.0 } else { 0.0 };
+                    for k in 3..6 {
+                        g[k] += scale_coef * vis * p[k].exp();
+                    }
+                    g[10] += opac_coef * vis;
+                }
                 for k in 0..NGEO {
                     m[k] = ftz(b1 * m[k] + (1.0 - b1) * g[k]);
                     v[k] = ftz(b2 * v[k] + (1.0 - b2) * g[k] * g[k]);
@@ -668,6 +809,19 @@ impl Trainer {
                         mc[i] = ftz(b1 * mc[i] + (1.0 - b1) * gc[i]);
                         vc[i] = ftz(b2 * vc[i] + (1.0 - b2) * gc[i] * gc[i]);
                         pc[i] -= lr * (mc[i] / bc1) / ((vc[i] / bc2).sqrt() + eps);
+                    }
+                }
+                if let Some((scale, max_noise)) = noise {
+                    let a = 1.0 / (1.0 + (-p[10]).exp());
+                    let w = (1.0 - a).powi(100).clamp(0.0, 1.0) * scale;
+                    if w > 0.0 {
+                        let key = seed ^ (gi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        let z = normals3(key);
+                        let s3 = [p[3].exp(), p[4].exp(), p[5].exp()];
+                        let d = rotate([p[6], p[7], p[8], p[9]], [z[0] * s3[0], z[1] * s3[1], z[2] * s3[2]]);
+                        for k in 0..3 {
+                            p[k] += (d[k] * w).clamp(-max_noise, max_noise);
+                        }
                     }
                 }
             });
@@ -711,6 +865,153 @@ impl Trainer {
                 );
                 *last = t;
             });
+    }
+
+    /// brush's refine (`gsplat_train --strategy brush`'s `brush_refine_now`):
+    /// prune the transparent, tiny and far-off gaussians, replace them with
+    /// copies of live ones sampled by opacity, and grow by `growth_select_fraction`
+    /// of those whose refine weight passes `growth_grad_threshold`, sampled by
+    /// that weight (both without replacement). A sampled gaussian becomes two
+    /// at `mean -+ R (N(0, 1) s / 2)`, scales / sqrt 2, opacity
+    /// `1 - sqrt(1 - a)`; the first keeps its Adam moments.
+    pub fn brush_refine(&mut self, step: usize) -> Option<DensifyReport> {
+        let b = self.brush.clone()?;
+        self.sync();
+        let n = self.model.len();
+        if n == 0 {
+            return None;
+        }
+        if self.grad_accum.len() != n {
+            self.grad_accum = vec![0.0; n];
+            self.grad_count = vec![0.0; n];
+        }
+        let means: Vec<[f32; 3]> = self.model.geo.iter().map(|g| [g[0], g[1], g[2]]).collect();
+        let (center, size) = central_bounds(&means, 0.75).unwrap_or(([0.0; 3], self.bound_size));
+        let opacity: Vec<f32> = self.model.geo.iter().map(|g| 1.0 / (1.0 + (-g[10]).exp())).collect();
+        let pruned: Vec<bool> = (0..n)
+            .map(|i| {
+                let g = &self.model.geo[i];
+                opacity[i] < b.min_opacity
+                    || g[3..6].iter().any(|&ls| ls < -15.0)
+                    || (0..3).any(|k| (g[k] - center[k]).abs() > size * 10.0)
+            })
+            .collect();
+        let pruned_count = pruned.iter().filter(|p| **p).count();
+        let mut add = vec![false; n];
+        let mut rng = self.rng;
+        // Weighted sampling without replacement (Efraimidis-Spirakis).
+        let mut sample = |weights: &[f32], count: usize, add: &mut Vec<bool>| {
+            let mut keys: Vec<(f64, usize)> = Vec::with_capacity(weights.len());
+            for (j, &w) in weights.iter().enumerate() {
+                if w > 0.0 && w.is_finite() {
+                    rng = splitmix(rng);
+                    let u = ((rng >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+                    keys.push((-u.ln() / w as f64, j));
+                }
+            }
+            let count = count.min(keys.len());
+            if count == 0 {
+                return;
+            }
+            if count < keys.len() {
+                keys.select_nth_unstable_by(count - 1, |a, b| a.0.total_cmp(&b.0));
+            }
+            for &(_, j) in &keys[..count] {
+                add[j] = true;
+            }
+        };
+        if pruned_count > 0 {
+            let w: Vec<f32> = (0..n).map(|i| if pruned[i] { 0.0 } else { opacity[i] }).collect();
+            sample(&w, pruned_count, &mut add);
+        }
+        let mut grown = 0;
+        if step < b.growth_stop {
+            let above: Vec<bool> = (0..n)
+                .map(|i| !pruned[i] && self.grad_accum[i] / self.grad_count[i].max(1.0) > b.growth_grad_threshold)
+                .collect();
+            let threshold_count = above.iter().filter(|a| **a).count();
+            let grow = ((threshold_count as f32 * b.growth_select_fraction).round() as usize)
+                .saturating_sub(pruned_count);
+            let current = n - pruned_count + add.iter().filter(|a| **a).count();
+            let grow = grow.min(b.max_gaussians.saturating_sub(current));
+            if grow > 0 {
+                let w: Vec<f32> = (0..n).map(|i| if above[i] { self.grad_accum[i] } else { 0.0 }).collect();
+                let before = add.iter().filter(|a| **a).count();
+                sample(&w, grow, &mut add);
+                grown = add.iter().filter(|a| **a).count() - before;
+            }
+        }
+        self.rng = splitmix(rng);
+        let seed = self.rng;
+        let st = self.adam.take();
+        let mut geo = Vec::with_capacity(n);
+        let mut col = Vec::with_capacity(n * NCOL);
+        let (mut mg, mut vg, mut mc, mut vc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let shrink = std::f32::consts::SQRT_2.ln();
+        for i in 0..n {
+            if pruned[i] {
+                continue;
+            }
+            let g = self.model.geo[i];
+            let c = &self.model.col[i * NCOL..(i + 1) * NCOL];
+            let rows: Vec<[f32; NGEO]> = if add[i] {
+                let z = normals3(seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                let s3 = [g[3].exp(), g[4].exp(), g[5].exp()];
+                let o = rotate([g[6], g[7], g[8], g[9]], [0.5 * z[0] * s3[0], 0.5 * z[1] * s3[1], 0.5 * z[2] * s3[2]]);
+                let a = opacity[i];
+                let na = (1.0 - (1.0 - a).max(0.0).sqrt()).clamp(1e-7, 1.0 - 1e-7);
+                let logit = (na / (1.0 - na)).ln();
+                [-1.0f32, 1.0]
+                    .iter()
+                    .map(|&sg| {
+                        let mut r = g;
+                        for k in 0..3 {
+                            r[k] = g[k] + sg * o[k];
+                            r[3 + k] = g[3 + k] - shrink;
+                        }
+                        r[10] = logit;
+                        r
+                    })
+                    .collect()
+            } else {
+                vec![g]
+            };
+            for (k, r) in rows.iter().enumerate() {
+                geo.push(*r);
+                col.extend_from_slice(c);
+                if let Some(a) = &st {
+                    let fresh = k == 1;
+                    mg.push(if fresh { [0.0; NGEO] } else { a.m_geo[i] });
+                    vg.push(if fresh { [0.0; NGEO] } else { a.v_geo[i] });
+                    let z = [0.0f32; NCOL];
+                    mc.extend_from_slice(if fresh { &z } else { &a.m_col[i * NCOL..(i + 1) * NCOL] });
+                    vc.extend_from_slice(if fresh { &z } else { &a.v_col[i * NCOL..(i + 1) * NCOL] });
+                }
+            }
+        }
+        let n2 = geo.len();
+        self.model.geo = geo;
+        self.model.col = col;
+        if let Some(mut a) = st {
+            a.m_geo = mg;
+            a.v_geo = vg;
+            a.m_col = mc;
+            a.v_col = vc;
+            a.last = vec![a.t; n2];
+            self.adam = Some(a);
+        }
+        self.grad_accum = vec![0.0; n2];
+        self.grad_count = vec![0.0; n2];
+        self.bound_size = size;
+        self.acc = None;
+        let split = add.iter().filter(|a| **a).count();
+        Some(DensifyReport {
+            cloned: grown,
+            split: split - grown,
+            pruned: pruned_count,
+            before: n,
+            after: n2,
+        })
     }
 
     /// Inria's adaptive density control (`visloc_gsplat_train::densify`, the

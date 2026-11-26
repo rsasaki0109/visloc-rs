@@ -12,7 +12,9 @@
 //! cameras. Every 8th view (by name) is held out; eval PSNR is over those. The
 //! defaults are `gsplat_train`'s: L1 + 0.2 D-SSIM, Inria densification
 //! (from step 500, every 100, opacity reset every 3000), SH degree up every
-//! 1000 steps. The Newton step (`--optimizer newton`, an experiment, see
+//! 1000 steps. `--strategy brush` trains with brush's refine instead
+//! (`gsplat_train --strategy brush`, `gsplat_photos`'s default), its rates,
+//! aux losses and mean noise. The Newton step (`--optimizer newton`, an experiment, see
 //! `docs/gsplat_cpu_trainer.md`) needs `--loss l2 --no-densify`.
 
 use std::path::PathBuf;
@@ -41,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stride = 1usize;
     let mut res_schedule: Vec<f64> = Vec::new();
     let mut adam = AdamConfig::default();
+    let mut brush = false;
     let mut newton = NewtonConfig::default();
     let mut sh_interval: Option<usize> = None;
     let mut max_gaussians: Option<usize> = None;
@@ -73,6 +76,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--truncate" => truncate = Some(next()?.parse()?),
             "--ssim-weight" => ssim_weight = next()?.parse()?,
             "--no-densify" => densify_cfg = None,
+            "--strategy" => match next()?.as_str() {
+                "inria" => brush = false,
+                "brush" => brush = true,
+                o => return Err(format!("unknown strategy {o} (inria | brush)").into()),
+            },
             "--dense-adam" => sparse_adam = false,
             "--stride" => stride = next()?.parse()?,
             // e.g. "0.2,0.5": a quarter of the resolution for the first 20%
@@ -140,6 +148,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tr.loss = loss;
     tr.overlap = overlap;
     tr.sparse_adam = sparse_adam;
+    // brush's strategy (gsplat_train --strategy brush, gsplat_photos'
+    // default): its refine replaces the Inria rule, with its rates and aux
+    // losses.
+    let brush_cfg = brush.then(|| visloc_gsplat_train::densify::BrushRefineConfig {
+        max_gaussians: max_gaussians.unwrap_or(10_000_000),
+        ..Default::default()
+    });
+    if brush {
+        densify_cfg = None;
+        let sh = adam.sh_interval;
+        adam = AdamConfig {
+            sh_interval: sh,
+            ..AdamConfig::brush_preset()
+        };
+        tr.opac_loss_weight = 1e-9;
+        tr.scale_loss_weight = 1e-8;
+        tr.brush = brush_cfg.clone();
+    }
     tr.stride = stride;
     tr.ssim_weight = if loss == Loss::L1 { ssim_weight } else { 0.0 };
     if optimizer == "newton" && loss != Loss::L2 {
@@ -206,6 +232,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "newton" => tr.newton_step(vi, step - 1, &newton),
             o => return Err(format!("unknown optimizer {o}").into()),
         };
+        if let Some(b) = brush_cfg.as_ref() {
+            if step != steps && step % b.refine_every.max(1) == 0 {
+                if let Some(rep) = tr.brush_refine(step) {
+                    if step % 1000 == 0 {
+                        println!(
+                            "  refine @{step}: {} -> {} (+{} grown, +{} replaced, -{} pruned)",
+                            rep.before, rep.after, rep.cloned, rep.split, rep.pruned
+                        );
+                    }
+                }
+            }
+        }
         // Densify after the step, as gsplat_train does (not on the last).
         if let Some(d) = densify_cfg.as_ref() {
             let at_densify = step >= d.start && step <= d.stop && step % d.interval == 0;
