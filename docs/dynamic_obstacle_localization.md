@@ -596,7 +596,9 @@ RNE's example 113 now also exports the base's wheel odometry
 true planar motion per step with a 2 % distance and 3 % turn error plus
 noise, as the visloc-rs simulator's wheels. For the episodes rendered
 before that, `scripts/rne/rne_wheel_odom_from_gt.py` computes the same from
-their `gt.tum`. The body is the IMU turned −90° about x
+their `gt.tum`: an `a2` episode rendered again with RNE `main` (`71bfc94`)
+gives a byte-identical `gt.tum`, and its exported `wheel_odom.tum` is
+byte-identical to the script's. The body is the IMU turned −90° about x
 (`--imu-from-body 0,0,0,-0.7071068,0,0,0.7071068`).
 
 Map pose RMSE (max), with the map fixes at 10 Hz:
