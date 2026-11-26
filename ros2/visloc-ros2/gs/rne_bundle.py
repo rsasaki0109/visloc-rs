@@ -12,10 +12,12 @@ colours. All coordinates stay in the visloc-rs map frame (z up, metres).
 - `street.rne.splat.toml`: RNE's splat manifest. `rotation_xyzw` turns the
   z-up splat into RNE's y-up world: RNE (x, y, z) = map (x, z, -y).
 - `street.json`: start, goals, robot radius, camera, the walk, the kerbs,
-  and, from a run's `people.json` (`--people-json`), the road beside the
-  route, the road's centre lines, the pavement edges, the walk's offsets
-  and the kerb spans (see people.py). The crowd's route is start then
-  goals.
+  and the road beside the route, the road's centre lines, the pavement
+  edges, the walk's offsets and the kerb spans (see people.py). These come
+  from a gs_sim.py run's `people.json` with `--people-json`. Without it,
+  this script works them out from the splat's colours (`analyze_street`;
+  gs_sim.py's render check of the road, `check_road`, is left out). The
+  crowd's route is start then goals.
 - `solid.rne.map`: the sim's solid cells (scene.json's grid: walls, posts,
   trunks), as an `rne_nav` occupancy map (`rne.map` JSON, log-odds x 1000,
   row 0 at the bottom).
@@ -69,6 +71,30 @@ def read_pgm_map(yaml_path):
     return prob[::-1], origin[0], origin[1], float(meta['resolution'])
 
 
+def analyze_street(scene, sp, ground_z):
+    """The road, its centre lines, the pavement edges, the walk's offsets and the kerb spans,
+    from the splat (as gs_sim.py does at start-up, without its render check of the road)."""
+    from make_gs_scene import read_ply  # noqa: PLC0415
+    from people import (estimate_road, fit_road_lines, kerb_spans, pavement_edges,  # noqa: PLC0415
+                        walk_offsets)
+    ply = read_ply(sp(scene['splat']))
+    xyz = np.stack([ply['x'], ply['y'], ply['z']], 1)
+    opacity = 1 / (1 + np.exp(-ply['opacity']))
+    rgb = np.clip(np.stack([ply['f_dc_0'], ply['f_dc_1'], ply['f_dc_2']], 1) * 0.28209479 + 0.5, 0, 1)
+    route = scene.get('route') or [scene['start']] + scene.get('goals', [])
+    walk = walk_offsets(route, scene['walk']) if scene.get('walk') else None
+    road = estimate_road(xyz, rgb, opacity, route, ground_z)
+    out = {'road_offset': [list(r) for r in road], 'walk': walk,
+           'narrow': kerb_spans(route, scene.get('kerbs')), 'crossing': True,
+           'road_lines': None, 'pavement': None}
+    if any(o is not None for _, _, o in road):
+        out['road_lines'] = fit_road_lines(xyz, opacity, route, ground_z, road)
+        out['pavement'] = pavement_edges(xyz, rgb, opacity, route, ground_z, road, walk=walk)
+    else:
+        out['crossing'] = False
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--scene', required=True, help="gs_sim.py's scene.json")
@@ -112,8 +138,22 @@ def main():
         ground.tofile(os.path.join(args.out, 'ground.f32'))
         street['ground'] = {'file': 'ground.f32', 'x0': g['x0'], 'y0': g['y0'], 'resolution_m': g['resolution'],
                             'width': int(ground.shape[1]), 'height': int(ground.shape[0])}
+    meta = None
     if args.people_json:
         meta = json.load(open(args.people_json))
+    elif scene.get('ground'):
+        gz_grid = np.load(sp(scene['ground']))
+
+        def ground_z(x, y):
+            r = min(max(int((y - g['y0']) / g['resolution']), 0), gz_grid.shape[0] - 1)
+            c = min(max(int((x - g['x0']) / g['resolution']), 0), gz_grid.shape[1] - 1)
+            return float(gz_grid[r, c])
+        meta = analyze_street(scene, sp, ground_z)
+        json.dump(meta, open(os.path.join(args.out, 'people.json'), 'w'), indent=1)
+        found = [r for r in meta['road_offset'] if r[2] is not None]
+        print(f'road beside the route on {len(found)} of {len(meta["road_offset"])} stretches '
+              f'(from the splat; written to people.json for rne_crowd.py)')
+    if meta:
         street.update({'road_offset': meta.get('road_offset'), 'road_lines': meta.get('road_lines'),
                        'pavement': meta.get('pavement'), 'walk_offsets': meta.get('walk'),
                        'kerb_spans': meta.get('narrow'), 'crossing': bool(meta.get('crossing'))})
@@ -135,7 +175,7 @@ def main():
         f.write(CREDIT + '\nThe splat, the maps and the street data come from that footage.\n')
     print(f'street bundle -> {args.out}: {solid.shape[1]}x{solid.shape[0]} solid cells, '
           f'lane map {prob.shape[1]}x{prob.shape[0]}, {len(street["goals"])} goals'
-          + (', with the road and pavement' if args.people_json else ''))
+          + (', with the road and pavement' if meta else ''))
 
 
 if __name__ == '__main__':
