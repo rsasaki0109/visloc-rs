@@ -307,6 +307,10 @@ struct Args {
     /// `OdomCorrectionConfig::init_warmup_s`: wait this long, then start the
     /// correction from the strongest fixes (by inliers) that agree (0: off).
     init_warmup_s: f64,
+    /// With `--vio`: camera-0 boxes of possibly moving objects per frame
+    /// (`visloc_basalt::dynamic_objects::read_object_boxes_csv`), for the
+    /// VIO's moving-object filter. Off by default.
+    object_boxes: Option<PathBuf>,
 }
 
 impl Args {
@@ -327,7 +331,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE]"
             .into()
     }
 
@@ -400,6 +404,7 @@ impl Args {
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_warmup_s: 0.0,
+            object_boxes: None,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -542,6 +547,7 @@ impl Args {
                 }
                 "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
                 "--init-warmup-s" => args.init_warmup_s = number(&option, value()?)?,
+                "--object-boxes" => args.object_boxes = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -586,6 +592,9 @@ impl Args {
         }
         if args.imu_from_body.is_some() && args.odometry.is_none() {
             return Err("--imu-from-body needs --odometry".into());
+        }
+        if args.object_boxes.is_some() && !args.vio {
+            return Err("--object-boxes needs --vio".into());
         }
         if args.diagnostics.is_none() && args.eval_mask_dir.is_some() {
             return Err("--eval-mask-dir needs --diagnostics".into());
@@ -1665,6 +1674,17 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let mut adapter =
         BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
     adapter.estimator.set_lean_marg_data(true);
+    if let Some(path) = &args.object_boxes {
+        let boxes = visloc_basalt::dynamic_objects::read_object_boxes_csv(path)?;
+        eprintln!(
+            "object boxes: {} frames from {}",
+            boxes.len(),
+            path.display()
+        );
+        adapter
+            .estimator
+            .set_object_boxes(boxes, Default::default());
+    }
     let frames = args
         .max_frames
         .unwrap_or(usize::MAX)
@@ -1779,6 +1799,17 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
                 });
             }
         }
+    }
+    if let Some(stats) = adapter.estimator.dynamic_object_stats() {
+        eprintln!(
+            "object boxes: {} frames with boxes, {} boxes, {} moving, {} undecided, \
+             {} observations dropped",
+            stats.frames_with_boxes,
+            stats.boxes,
+            stats.moving_boxes,
+            stats.undecided_boxes,
+            stats.dropped_observations
+        );
     }
     run.finish(args, "trajectory_vio.tum")
 }

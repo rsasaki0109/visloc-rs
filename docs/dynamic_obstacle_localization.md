@@ -553,11 +553,41 @@ Map pose RMSE / median / max (fixed alignment), and the VIO's own ATE:
   unsettled VIO; without the map prior the correction still chases the
   VIO. The cell gate adds nothing here.
 - **What is left is the start of `a2`:** 2–5 s, before the map prior has
-  pulled the VIO in, at up to 2 m. Holding the VIO itself steady needs the
-  movers left out of it: the VIO's moving-object filter
-  (`visloc_basalt::dynamic_objects`, Phase 2 of the plan, fed by detector
-  boxes) is the next lever; the simulation can supply the walkers' true
-  boxes to measure its ceiling before any detector.
+  pulled the VIO in, at up to 2 m.
+
+### The VIO's moving-object filter with the walkers' true boxes (negative)
+
+`basalt_euroc_localize_demo --vio --object-boxes FILE` (new) passes
+camera-0 boxes to the VIO's moving-object filter
+(`visloc_basalt::dynamic_objects`, Phase 2 of the plan).
+`scripts/rne/rne_walker_boxes.py` writes the walkers' true boxes (each a
+0.3 m × 1.8 m cylinder projected into cam0, scene occlusion ignored): the
+filter's best case, before any detector.
+
+| Query | Setting | Boxes judged moving / undecided / all | Map pose RMSE / max | VIO ATE |
+| --- | --- | --- | --- | --- |
+| a2 | none | — | 60.8 / 288 cm | 68.2 cm |
+| a2 | boxes | 180 / 609 / 1,600 | 67.5 / 288 cm | 73.4 cm |
+| a2 | `--vio-map-prior --init-warmup-s 3` | — | 20.4 / 207 cm | 52.2 cm |
+| a2 | the same with boxes | 215 / 615 / 1,600 | 21.1 / 227 cm | 82.0 cm |
+| a4 | none | — | 70.2 / 373 cm | 46.6 cm |
+| a4 | boxes | 656 / 2,012 / 3,200 | **diverges** (hundreds of m) | diverges |
+| a4 | `--vio-map-prior --init-warmup-s 3` with boxes | 588 / 2,009 / 3,200 | **diverges** | diverges |
+| q4 | `--vio-map-prior --init-warmup-s 3` with boxes | 33 / 210 / 583 | 1.2 / 8.8 cm (unchanged) | 2.2 cm |
+
+**It makes things worse.** The filter decides "moving" by comparing the
+points in a box with the points outside every box. With walkers just ahead,
+the boxes cover most of the image: too few background points remain for the
+comparison (most boxes undecided), and where boxes are judged moving,
+dropping their tracks leaves the VIO too few points, and with 4 walkers it
+diverges. The filter was built for movers that take a small share of the
+view (it was neutral on LaMAria for that reason); it is no answer when
+people fill the view. `--object-boxes` stays, off by default.
+
+What a robot has that these runs do not is an odometry that people cannot
+fool: its wheels. Fusing the wheel odometry with the VIO and the fixes
+(`--fusion --odometry`, `MapFusion`) is the next thing to measure here; RNE
+knows the wheels' motion but example 113 does not export it yet.
 
 ## On ROS 2
 
