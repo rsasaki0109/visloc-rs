@@ -515,10 +515,26 @@ impl Trainer {
             .geo
             .par_iter_mut()
             .zip(self.model.col.par_chunks_mut(NCOL))
-            .zip(acc.h.par_iter().zip(acc.g.par_iter()))
-            .zip(acc.hcol.par_iter().zip(acc.gcol.par_chunks(NCOL)))
+            .zip(acc.h.par_iter().zip(acc.g.par_iter_mut()))
+            .zip(acc.hcol.par_iter().zip(acc.gcol.par_chunks_mut(NCOL)))
             .for_each(|(((p, col), (h, g)), (hc, gc))| {
+                let before = *p;
                 solve_geometry(p, h, g, lambda, cfg);
+                if cfg.decay > 0.0 {
+                    // Keep the summed model's gradient at the new point:
+                    // g += H dx (the quaternion renormalisation aside).
+                    let mut dx = [0.0f32; NGEO];
+                    for i in 0..NGEO {
+                        dx[i] = p[i] - before[i];
+                    }
+                    for i in 0..NGEO {
+                        let mut s = 0.0f32;
+                        for j in 0..NGEO {
+                            s += h[tri11(i.min(j), i.max(j))] * dx[j];
+                        }
+                        g[i] += s;
+                    }
+                }
                 if !cfg.groups[3] {
                     return;
                 }
@@ -529,7 +545,11 @@ impl Trainer {
                             continue;
                         }
                         let step = -(gc[ch * NSH + k] as f64) / (hh * (1.0 + lambda) + 1e-12);
-                        col[ch * NSH + k] += cfg.step * (step as f32).clamp(-cfg.max_dcol, cfg.max_dcol);
+                        let d = cfg.step * (step as f32).clamp(-cfg.max_dcol, cfg.max_dcol);
+                        col[ch * NSH + k] += d;
+                        if cfg.decay > 0.0 {
+                            gc[ch * NSH + k] += hc[k] * d;
+                        }
                     }
                 }
             });
