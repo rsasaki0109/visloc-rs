@@ -413,3 +413,37 @@ the pass on the online windows' SIFT). Against SLAM Dunk's baseline: R_12_10cp 7
 
 The new default chain on its own (run 45785508883, commit 9af669f): mean of the thirteen **70.18** (the default
 before it: 68.86–69.03), within 0.6 of the paired run on every recording (R_12_10cp 76.28, sequence_3_17 82.35).
+
+## Where visloc-rs's trajectory differs from SLAM Dunk's
+
+The RootSIFT default chain (run 45785508883) against SLAM Dunk's baseline on the same recordings, both at 20 Hz on
+the same timestamps. Per control point, horizontal error after the evaluator's alignment (m):
+
+| | sequence_1_20 | R_12_10cp |
+|---|---|---|
+| visloc-rs (CP 87.20 / 76.28) | 0.03–0.42, median 0.27 | 0.25–1.29, median 0.51 |
+| SLAM Dunk baseline (95.12 / 81.09) | 0.03–0.21, median 0.14 | 0.09–0.70, median 0.46 |
+
+Which part of the trajectory carries the gap, by swapping parts of one trajectory into the other (SLAM Dunk's
+baseline aligned to visloc-rs's by a similarity) and scoring:
+
+| Trajectory scored | sequence_1_20 | R_12_10cp |
+|---|---:|---:|
+| SLAM Dunk baseline | 95.12 | 81.09 |
+| SLAM Dunk's positions, visloc-rs's rotations | 95.08 | 81.07 |
+| visloc-rs's positions, SLAM Dunk's rotations | 87.18 | 76.28 |
+| SLAM Dunk's positions plus visloc-rs's position difference faster than 10 s | 95.12 | 81.14 |
+| SLAM Dunk's positions plus visloc-rs's position difference slower than 10 s | 87.19 | 76.27 |
+| visloc-rs | 87.20 | 76.28 |
+
+The whole gap is in the positions over more than 10 s: the rotations (0.3° apart on average, a near-constant
+offset of the body frame that removed changes nothing) and the motion within 10 s score as SLAM Dunk's. Local
+similarities over eighths of each walk show what kind of drift it is: on sequence_1_20 visloc-rs's scale runs
+1.3 % above SLAM Dunk's over the first eighth and 0.1–0.2 % below over the last four; on R_12_10cp its heading
+turns from −0.85° to +0.86° over the walk, with ±1 % scale.
+
+Long-range shape comes from long tracks and distant points. visloc-rs's pass on R_12_10cp keeps 249,145
+landmarks with 918,299 observations (3.7 per landmark) from 5.5 M keypoints; 438,052 tracks go into the
+triangulation and 41 % of them leave it there, most at the 1° triangulation angle gate (`--min-angle`) that
+drops distant, low-parallax points. The paper triangulates from the initial poses and leaves outliers to its
+robust passes. Next: the pass with the gate at 0.5° and 0.25° on the thirteen (runs 45912780873, 45912773073).
