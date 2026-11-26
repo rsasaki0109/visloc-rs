@@ -205,6 +205,21 @@ scale that alignment needs:
 - Without wheels, the scale comes from the map fixes (A). The wheels (C)
   remain the way to hold a monocular VIO between fixes.
 
+A scale in the map correction does not help either. The correction keeps a
+yaw and a translation, averaged over the fixes of the last 5 s. A causal
+re-run of it from the saved VIO trajectory and accepted fixes (scripted, not
+in the repository) reproduces office1-6's 7.66 cm. Adding a scale fitted
+over the fixes of the last 10, 20 or 30 s gives 8.99, 9.66 and 9.20 cm: the
+scale (about 1.15) is real, but where fixes keep coming, the 5 s window
+re-anchors the trajectory before the scale error builds up. office1-7 is
+where a scale would matter, and there it has nothing to fit: every run
+against office1-2's map gets its fixes in the first 2 s of 37 s (stereo map
+and VIO included; one monocular run got 26 fixes up to 10.5 s). The rest of
+the walk leaves what the map covers. Its 13 to 50 cm come from that, and
+more of the map, or images that still localize there
+([openloris_map_localization.md](openloris_map_localization.md)), is what
+would help.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
