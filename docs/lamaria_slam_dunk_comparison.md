@@ -383,3 +383,30 @@ follow.
 max(0.6 s, T/1500); run 45714886254): R_11_5cp −11.46, R_12_10cp −5.55, R_13_15cp −1.32, sequence_1_19 −8.59,
 sequence_1_20 −13.31, sequence_2_11 −16.37, sequence_2_12 −10.40, sequence_3_17 −12.49, sequence_3_18 +2.92,
 sequence_5_11 −11.67, sequence_5_12 −0.10; mean over the thirteen −6.80. The 0.5 s keyframes stay.
+
+**The repeat and 1,500 keypoints.** The 900-keypoint run repeats within 0.4 on every recording (run 45751972024:
++1.10 over the thirteen, 6 gain; the low-light pair now runs, at 0). With 1,500 RootSIFT keypoints at ratio 0.78
+(run 45751990291):
+
+| Recording | Default CP | RootSIFT 1,500 | Change | Recall at 1 m, default → RootSIFT (%) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 87.90 | 87.75 | −0.15 | 100.0 → 100.0 |
+| R_12_10cp | 64.07 | 75.81 | +11.74 | 60.0 → 90.0 |
+| R_13_15cp | 77.72 | 76.19 | −1.53 | 93.3 → 100.0 |
+| sequence_1_19 | 85.34 | 87.28 | +1.93 | 100.0 → 100.0 |
+| sequence_1_20 | 86.70 | 87.27 | +0.57 | 100.0 → 100.0 |
+| sequence_2_11 | 88.47 | 85.29 | −3.18 | 100.0 → 100.0 |
+| sequence_2_12 | 51.02 | 45.49 | −5.53 | 25.0 → 20.0 |
+| sequence_3_17 | 80.33 | 82.36 | +2.02 | 100.0 → 96.3 |
+| sequence_3_18 | 57.76 | 64.57 | +6.80 | 41.7 → 50.0 |
+| sequence_4_10 | 68.18 | 68.18 | 0 | 81.2 → 81.2 |
+| sequence_4_11 | 76.05 | 76.05 | 0 | 100.0 → 100.0 |
+| sequence_5_11 | 66.08 | 69.50 | +3.42 | 71.4 → 85.7 |
+| sequence_5_12 | 6.06 | 6.68 | +0.63 | 0.0 → 0.0 |
+
+Mean 68.90 → 70.19 (**+1.29**), 7 of 13 gain: kept. The ratio test and RootSIFT carry R_12_10cp (+11 with
+either count); fewer keypoints help sequence_1_19 more (+6.0 against +1.9), more keypoints sequence_3_17 (−2.6
+against +2.0) and R_11_5cp. Both counts lose on track 2 (sequence_2_11, 2_12). The driver's default is now the
+pass on 1,500 RootSIFT keypoints of its own matched at ratio 0.78 (`--ba-pass-keypoints rootsift`; `sift` restores
+the pass on the online windows' SIFT). Against SLAM Dunk's baseline: R_12_10cp 75.81 against 81.09 (the gap from
+17 to 5 points), sequence_1_20 87.27 against 95.12 (still 8).

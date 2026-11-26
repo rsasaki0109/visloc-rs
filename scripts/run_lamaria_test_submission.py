@@ -130,6 +130,9 @@ and 9.3, where sequence_1_19 and 1_20 (the other device), 2_11 and 3_18 lose
 `--ba-pass-match online` matches those keypoints within the online result's
 epipolar band instead of the VIO's (lamaria_ba_chain.py --pass-match): the two
 R sequences then reach 97.02 and 79.31 instead of 92.20 and 73.96 (submission 6).
+By day, without learned keypoints, the pass reads 1,500 RootSIFT keypoints of its own matched with the ratio
+test at 0.78 (`--ba-pass-keypoints rootsift`, the default; `sift` keeps the online windows' SIFT): +1.29 over
+the thirteen training recordings, 7 gain (docs/lamaria_slam_dunk_comparison.md).
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
@@ -332,6 +335,11 @@ def pass_features(args, track: int, serial: str | None) -> str | None:
             and serial in args.ba_pass_features_serials:
         return args.ba_pass_features
     return None
+
+
+def words(option: str) -> list[str]:
+    """A driver option holding another script's options, commas standing for spaces where needed."""
+    return option.replace(",", " ").split()
 
 
 def share_ba_inputs(source, target, features):
@@ -614,6 +622,15 @@ def main() -> int:
                         help="--ba-pass-features: the tracks it applies to (default 1)")
     parser.add_argument("--ba-pass-features-serials", nargs="*", default=list(DEFAULT_PASS_FEATURES_SERIALS),
                         help="--ba-pass-features: the device serials it applies to (default 1WM093701G1276)")
+    parser.add_argument("--ba-pass-keypoints", choices=("sift", "rootsift"), default="rootsift",
+                        help="--ba-chain: by day, the pass on RootSIFT keypoints of its own (default; with "
+                             "--ba-pass-keypoint-args and --ba-pass-keypoint-match-args), or on the online windows' "
+                             "SIFT ('sift'); learned --ba-pass-features take precedence")
+    parser.add_argument("--ba-pass-keypoint-args", default="",
+                        help="--ba-pass-keypoints rootsift: options of their features step (default: 1,500 keypoints)")
+    parser.add_argument("--ba-pass-keypoint-match-args", default="--ratio,0.78",
+                        help="--ba-pass-keypoints rootsift: options of their match steps (default the ratio test at "
+                             "0.78; commas may stand for the spaces)")
     parser.add_argument("--ba-experiment-pass-features", choices=("sift", "rootsift"), default=None,
                         help="--ba-chain: SIFT or RootSIFT keypoints of their own for the pass by day, in the "
                              "submitted chain only (with --ba-compare: the experiment, not the default chain)")
@@ -889,6 +906,11 @@ def main() -> int:
                                                    args.repo / "scripts", python, args.split)
                     sequence_pass_args += ["--imu", fused]
                 learned = pass_features(args, track, device_serial(calib_dir, seq))
+                own_keypoints = {}
+                if not learned and args.ba_pass_keypoints == "rootsift":  # the pass's own RootSIFT by day
+                    learned = "rootsift"
+                    own_keypoints = dict(pass_feature_args=words(args.ba_pass_keypoint_args),
+                                         pass_match_args=words(args.ba_pass_keypoint_match_args))
                 temperature = None
                 if args.ba_temperature and track in args.ba_temperature_tracks and not low_light:
                     try:
@@ -905,7 +927,7 @@ def main() -> int:
                 chain_options = dict(jobs=args.ba_jobs, threads=args.ba_threads, python=python,
                                      log=lambda m, seq=seq: log(f"{seq}: {m}"), low_light=low_light,
                                      rematch=args.ba_rematch, pass_features=learned,
-                                     pass_match=args.ba_pass_match, temperature=temperature)
+                                     pass_match=args.ba_pass_match, temperature=temperature, **own_keypoints)
                 try:
                     if args.ba_compare:
                         baseline_work = work / "ba_baseline"
@@ -917,12 +939,13 @@ def main() -> int:
                                              (baseline_work / "ba2.tum", "baseline_ba2_estimate.txt")):
                             run([python, estimate_converter, "--in-tum", source,
                                  "--out-estimate", log_dir / name], check=True)
-                        share_ba_inputs(baseline_work, ba_work, None if low_light else learned)
+                        # an experiment's own pass keypoints are made afresh, not the default chain's reused
+                        share_ba_inputs(baseline_work, ba_work,
+                                        None if low_light or args.ba_experiment_pass_features else learned)
                     main_options = chain_options
                     if args.ba_experiment_pass_features:  # keypoints of their own for this chain's pass
                         log(f"{seq}: {args.ba_experiment_pass_features} keypoints of their own in the pass "
                             f"({args.ba_experiment_pass_feature_args or 'default options'})")
-                        words = lambda option: option.replace(",", " ").split()  # noqa: E731
                         main_options = dict(chain_options, pass_features=args.ba_experiment_pass_features,
                                             pass_feature_args=words(args.ba_experiment_pass_feature_args),
                                             pass_match_args=words(args.ba_experiment_pass_match_args))
