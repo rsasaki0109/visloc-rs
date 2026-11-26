@@ -182,6 +182,39 @@ not run. Windowed scale against GPS is no measure here: on training
 sequences whose scale the pseudo-GT shows within 1 %, 120 s windows of GPS
 swing it by 10–27 %.
 
+## Low light: a window that jumps gates early
+
+sequence_4_3 (test, 4.7 on the leaderboard, pose recall at 5 m 0.2 %; bino
+37.0) is a 23-minute night walk of 1.3 km. The VIO alone keeps it within
+7.6 m of the recording's GPS at the median (diagnosis only); the online
+windows leave the first six minutes 25 m off (90th percentile 25.7 m). One
+window does it: keyframes 300:780, whose new keyframes (360–390 s) bring an
+initial cost per observation five times the window before's. Its first step,
+taken before the 3 px outlier gate (from iteration 8), shortens the walk of
+360–380 s from the 26 m GPS shows (the VIO has 18 m) to 8 m. The revisits of
+the sequence are all short (about 40 s apart) and agree with the VIO; none is
+false.
+
+The online windows' `--jump-gate 3` (on for a monocular run in low light):
+a window whose initial cost per observation exceeds three times the window
+before's gates at 3 px from its first iteration. It fires once on
+sequence_4_3 and never on the two Low light training sequences, whose largest
+jumps are 1.5× and 2.4×:
+
+| | sequence_4_3, distance to GPS (median / 90 %) | sequence_4_10, CP Score | sequence_4_11, CP Score |
+|---|---|---:|---:|
+| Online windows | 6.3 m / 25.7 m | 37.92 | 50.76 |
+| **+ `--jump-gate 3`** | **3.1 m / 7.4 m** | 37.92 | 50.78 |
+| Every window gated from iteration 0, 3 px | 3.7 m / 7.4 m | 3.58 | |
+| — 5 px | 3.0 m / 6.8 m | 36.31 | 44.45 |
+| — 6 px | 3.1 m / 7.6 m | 41.52 | 43.10 |
+| — 7 px | 8.3 m / 13.3 m | 39.88 | 49.10 |
+
+Gating every window early is no rule: in the first windows of sequence_4_10
+the VIO is still far off, a 3 px gate drops a fifth to a third of the
+observations, and the solve comes apart; the thresholds that help one
+training sequence cost the other.
+
 ## Reproduce
 
 ```bash
