@@ -589,6 +589,41 @@ fool: its wheels. Fusing the wheel odometry with the VIO and the fixes
 (`--fusion --odometry`, `MapFusion`) is the next thing to measure here; RNE
 knows the wheels' motion but example 113 does not export it yet.
 
+## RNE: wheel odometry, which the walkers cannot fool
+
+RNE's example 113 now also exports the base's wheel odometry
+(`wheel_odom.tum`, branch `claude/drjohnson-walkers` commit `20b84e0`): the
+true planar motion per step with a 2 % distance and 3 % turn error plus
+noise, as the visloc-rs simulator's wheels. For the episodes rendered
+before that, `scripts/rne/rne_wheel_odom_from_gt.py` computes the same from
+their `gt.tum`. The body is the IMU turned −90° about x
+(`--imu-from-body 0,0,0,-0.7071068,0,0,0.7071068`).
+
+Map pose RMSE (max), with the map fixes at 10 Hz:
+
+| Odometry | q0 (nobody) | q4 | q6 | a2 (2 ahead) | a4 (4 ahead) |
+| --- | --- | --- | --- | --- | --- |
+| VIO (none of the switches) | 2.1 (7.9) cm | 4.7 (20.4) | 2.5 (10.0) | 60.8 (288) | 70.2 (373) |
+| VIO, `--vio-map-prior --init-warmup-s 3` | 1.2 (3.7) | 1.2 (8.8) | 1.2 (5.4) | 20.4 (207) | 7.1 (31) |
+| **wheels** (`--odometry`) | 2.4 (3.7) | 2.4 (3.7) | 2.4 (4.8) | **2.5 (4.2)** | **2.6 (4.1)** |
+| VIO + wheels (`--vio --fusion --odometry`) | 1.5 (5.0) | 2.8 (14.3) | 2.0 (8.4) | 11.5 (90) | 11.8 (105) |
+| VIO + wheels, `--vio-map-prior --init-warmup-s 3` | **1.1 (1.9)** | **1.0 (3.1)** | **1.1 (2.2)** | 5.2 (60) | 3.7 (24) |
+
+- **The wheels + map hold everywhere**: 2.4–2.6 cm and never more than
+  4.8 cm, with or without people in front. The walkers cannot move the
+  wheels, and the fixes stay accurate.
+- **Where the VIO is sound, adding it is better** (1.0–1.1 cm with the map
+  prior and the warm-up, against 2.4 cm on the wheels alone).
+- **Where it is not, it drags the fusion off** (a2/a4: 3.7–11.8 cm, up to
+  1 m): `MapFusion` weighs the VIO by its fixed noise model, and nothing
+  tells it that the VIO has run away while the wheels and the fixes
+  agree.
+- For a wheeled robot among people, then: **wheel odometry + map is the
+  robust choice; VIO + wheels + map prior + warm-up the accurate one where
+  the camera is not crowded.** Telling the two apart online (the VIO
+  disagreeing with both the wheels and the fixes) and dropping the VIO from
+  the fusion while it does is the next lever.
+
 ## On ROS 2
 
 `visloc_map_localize_node` takes the two measured switches as parameters,
