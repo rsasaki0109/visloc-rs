@@ -98,6 +98,22 @@ Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):
   the splats are small, so their boxes waste little, and the test costs
   more than it saves.
 
+## At 780x520 (bonsai `images_4`)
+
+3,000 steps, the same settings otherwise (cap 400k), one run each:
+
+| Trainer | Eval PSNR at 1k / 2k / 3k | Training time | ms/step |
+| --- | --- | ---: | ---: |
+| `gsplat_train` | 24.62 / 28.14 / **28.86** | 972 s | 324 |
+| `gsplat-cpu` | 24.47 / 28.10 / **28.93** | **706 s (1.38x)** | 236 |
+| `gsplat-cpu --stride 2` | 24.13 / 26.37 / 26.69 | 509 s | 170 |
+
+- **Four times the pixels cost 1.6x the time** (236 against 150 ms a step at
+  390x260): intersections went from 293k to 564k a view. Backward 95 ms,
+  forward 50, Adam 34, projection and binning 31, loss 18.
+- **Strided pixels still lose at equal time**: 26.69 dB at 509 s, where the
+  full-pixel run had 28.10 dB at 458 s (step 2,000).
+
 ## The local Newton step
 
 Each iteration renders the primary view at full resolution and its 3
