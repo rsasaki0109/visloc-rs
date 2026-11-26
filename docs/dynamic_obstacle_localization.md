@@ -459,6 +459,61 @@ mirror (revision `cbc03108723d08322b23d0338680bffa9404cce9`), SHA-256
 `6f42810f87f21b3c720f517f0c514c6ba37ccf789c596f96e75df60226f43899`,
 converted with `scripts/openloris_to_euroc.py`. CC BY-ND 4.0.
 
+## RNE: the Dr Johnson interior with people walking through
+
+[Robot Native Engine](https://github.com/rsasaki0109/RobotNativeEngine)'s
+example 113 drives a diff-drive robot with a stereo camera (20 Hz, 0.35 m
+up) and an IMU (60 Hz) round a loop in the photo-real Dr Johnson 3DGS
+interior and exports EuRoC. Locally patched
+([`scripts/rne/example113_walkers.patch`](../scripts/rne/example113_walkers.patch),
+against RNE `1c39c50`; not pushed to RNE), it adds walkers as splat actors
+that pace lines across the loop, sorted and rendered with the scene, so they
+occlude it and are occluded correctly; their gait phases come from
+`ros2/visloc-ros2/gs/walker_splat_plys.py`. Rendered on the CPU (Mesa
+llvmpipe): about 10 minutes per 40 s episode.
+
+- **Map:** an episode without people, through the stereo-inertial SLAM
+  (`--save-map`): 220 keyframe images, 4,724 landmarks, 1.3 cm ATE.
+- **Queries:** the same loop from another waypoint, with 0, 4 and 6
+  walkers, and one with 4 walkers from the map's own start. VIO + map,
+  `--localize-every 2` (10 Hz), the demo's default matching settings.
+  Scored with the map's fixed alignment to the ground truth
+  (`scripts/rne/rne_gt_to_euroc.py`, then `evaluate_map_localization.py
+  --mode fixed`). The runs are deterministic.
+
+| Query | Setting | Fixes, error RMSE / max | Map poses | Map pose RMSE / median / max |
+| --- | --- | --- | --- | --- |
+| no people | none | 392, 2.5 / **38.2** cm | 799 | 2.1 / 1.6 / 7.9 cm |
+| no people | `--min-inlier-cells 6` | 389, 1.1 / 4.1 cm | 799 | 2.1 / 1.6 / 7.8 cm |
+| no people | `--init-warmup-s 3` | 387, 3.0 / 54.3 cm | 739 | 2.1 / 1.6 / 8.7 cm |
+| 4 walkers | none | 377, 1.1 / 7.5 cm | 799 | **4.7** / 1.7 / **20.4** cm |
+| 4 walkers | `--min-inlier-cells 6` | 375, 1.1 / 7.5 cm | 799 | 4.7 / 1.7 / 20.4 cm |
+| 4 walkers | `--init-warmup-s 3` | 383, 3.0 / 54.8 cm | 739 | **2.1** / 1.6 / **9.5** cm |
+| 4 walkers | both | 380, 1.0 / 4.0 cm | 739 | 2.1 / 1.6 / 9.5 cm |
+| 6 walkers | none | 380, 2.7 / **47.7** cm | 799 | 2.5 / 1.6 / 10.0 cm |
+| 6 walkers | `--min-inlier-cells 6` | 378, 1.1 / 6.3 cm | 799 | 2.5 / 1.6 / 9.9 cm |
+| 6 walkers | both | 381, 1.1 / 6.3 cm | 739 | 2.4 / 1.6 / 11.0 cm |
+| 4 walkers, map's start | none | 379, 1.3 / 5.5 cm | 799 | 2.4 / 1.4 / 12.6 cm |
+| 4 walkers, map's start | `--init-warmup-s 3` | 395, 1.5 / 5.5 cm | 739 | 2.3 / 1.3 / 12.9 cm |
+
+- **The walkers cost little here.** They hide about 7% of the mapped image
+  cells (93% matched, against 100% without them; TUM's walking people hid
+  a third), and the map pose stays at 2.1–2.5 cm RMSE with 4 or 6 of them.
+- **`--min-inlier-cells 6` removes the wrong fixes** (worst 38–48 cm to 4–6
+  cm), with or without people, losing 2–3 fixes in 400. The correction's
+  gate had already turned them away, so the map pose does not change.
+- **`--init-warmup-s 3` fixes a bad start** on the 4-walker query (4.7 →
+  2.1 cm, worst 20 → 9.5 cm). There the correction started from two good
+  fixes at 0.07 s, while the just-started VIO was still settling; it then
+  turned away good fixes (0.7 cm off) and the map pose was 8–20 cm off from
+  0.4 to 4.5 s. Starting 3 s in avoids it. The warm-up's own column of fix
+  errors (up to 55 cm) is the fixes it waits through, none of them used.
+- Both switches cost nothing per image (52–56 ms either way).
+
+**Next, to make it harder:** walkers that stop or turn in front of the
+robot, and more of them, so that they hide a large share of the view as on
+TUM; masks from the actors (ids or depth) for the share of inliers on them.
+
 ## On ROS 2
 
 `visloc_map_localize_node` takes the two measured switches as parameters,

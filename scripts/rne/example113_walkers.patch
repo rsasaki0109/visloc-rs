@@ -1,0 +1,230 @@
+diff --git a/examples/113_drjohnson_euroc_export/main.rs b/examples/113_drjohnson_euroc_export/main.rs
+index 4d3e9e9..38f9b70 100644
+--- a/examples/113_drjohnson_euroc_export/main.rs
++++ b/examples/113_drjohnson_euroc_export/main.rs
+@@ -9,6 +9,8 @@
+ //!
+ //! Usage: `113_drjohnson_euroc_export OUTPUT_DIR`
+ 
++mod walkers;
++
+ use std::error::Error;
+ use std::fs::{self, File};
+ use std::io::{self, BufWriter};
+@@ -22,7 +24,9 @@ use rne_math::{Quat, Transform3, Vec3};
+ use rne_render::{
+     validate_gaussian_splat_manifest_with_override, Camera, HybridRenderScene, RenderScene,
+ };
+-use rne_render_3dgs::{load_gaussian_splat_background, render_hybrid_scene_camera};
++use rne_render_3dgs::{
++    load_gaussian_splat_background, render_hybrid_scene_camera, GaussianSplatBackground,
++};
+ use rne_render_wgpu::WgpuRenderBackend;
+ use rne_sensor::{sample_imu, ImuSpec};
+ 
+@@ -320,8 +324,20 @@ fn main() -> Result<(), Box<dyn Error>> {
+         .map_err(|error| io::Error::other(format!("wgpu unavailable: {error}")))?;
+     let splat_env = validate_gaussian_splat_manifest_with_override(&manifest, None)
+         .map_err(|error| io::Error::other(format!("splat manifest: {error}")))?;
+-    let mut background = load_gaussian_splat_background(backend.device(), &splat_env)
+-        .map_err(|error| io::Error::other(format!("splat background: {error}")))?;
++    // Local experiment: walkers (RNE_WALKERS), a shifted start waypoint
++    // (RNE_START_WAYPOINT), no preview images (RNE_NO_PREVIEW).
++    let mut walkers = walkers::Walkers::from_env();
++    let mut background = match &walkers {
++        Some(w) => GaussianSplatBackground::from_environment_with_actors(
++            backend.device(),
++            &splat_env,
++            w.actors(),
++        ),
++        None => load_gaussian_splat_background(backend.device(), &splat_env),
++    }
++    .map_err(|error| io::Error::other(format!("splat background: {error}")))?;
++    let no_preview = std::env::var_os("RNE_NO_PREVIEW").is_some();
++    let mut people_csv = String::from("timestamp_ns,walker,x,z,yaw_phase\n");
+     let hybrid = HybridRenderScene::new(splat_env.clone(), RenderScene::new());
+     let camera = Camera::new(CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FOV_Y_RAD);
+     let imu_spec = ImuSpec::default();
+@@ -335,7 +351,10 @@ fn main() -> Result<(), Box<dyn Error>> {
+     let mut frames = 0_u64;
+     let mut imu_count = 0_u64;
+ 
+-    let mut waypoint_index = 0_usize;
++    let mut waypoint_index: usize = std::env::var("RNE_START_WAYPOINT")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(0);
+     for step in 0..MAX_STEPS {
+         let action = follow_route(
+             &mut waypoint_index,
+@@ -370,6 +389,24 @@ fn main() -> Result<(), Box<dyn Error>> {
+             Quat::from_rotation_y(observation.base_yaw_rad),
+         );
+         if step % CAMERA_PERIOD_STEPS == 0 {
++            if let Some(w) = walkers.as_mut() {
++                let t_s = timestamp_ns as f64 * 1e-9;
++                for i in 0..w.phases.len() {
++                    let (pose, phase) = w.state(i, t_s);
++                    if w.swap(i, phase) {
++                        background
++                            .replace_actor_asset(backend.queue(), i, w.phases[i][phase].clone())
++                            .map_err(|error| io::Error::other(format!("walker: {error}")))?;
++                    }
++                    background
++                        .set_actor_pose(backend.queue(), i, Some(&pose))
++                        .map_err(|error| io::Error::other(format!("walker: {error}")))?;
++                    people_csv.push_str(&format!(
++                        "{timestamp_ns},{i},{:.4},{:.4},{phase}\n",
++                        pose.translation.x, pose.translation.z
++                    ));
++                }
++            }
+             for (side, lateral, csv) in [
+                 (0_u16, -0.5 * STEREO_BASELINE_M, &mut cam0_csv),
+                 (1_u16, 0.5 * STEREO_BASELINE_M, &mut cam1_csv),
+@@ -393,19 +430,21 @@ fn main() -> Result<(), Box<dyn Error>> {
+                     pass.color.height,
+                     &luma,
+                 )?;
+-                write_rgb_png(
+-                    &output.join(format!("preview_rgb/{dir}/{name}")),
+-                    pass.color.width,
+-                    pass.color.height,
+-                    &pass.color.rgba8,
+-                )?;
++                if !no_preview || side == 0 && frames % 20 == 0 {
++                    write_rgb_png(
++                        &output.join(format!("preview_rgb/{dir}/{name}")),
++                        pass.color.width,
++                        pass.color.height,
++                        &pass.color.rgba8,
++                    )?;
++                }
+                 csv.push_str(&format!("{timestamp_ns},{name}\n"));
+             }
+             frames += 1;
+         }
+ 
+         // Fixed overview camera: URDF LinkVisuals (base mesh, mast, bar).
+-        if step % FIXED_PERIOD_STEPS == 0 {
++        if !no_preview && step % FIXED_PERIOD_STEPS == 0 {
+             let fixed_view = fixed_view();
+             let fixed_camera = Camera::new(CAMERA_WIDTH, CAMERA_HEIGHT, FIXED_FOV_Y_RAD);
+             let mut foreground = build_visual_render_scene(world);
+@@ -446,6 +485,9 @@ fn main() -> Result<(), Box<dyn Error>> {
+     fs::write(output.join("mav0/cam1/data.csv"), cam1_csv)?;
+     fs::write(output.join("mav0/imu0/data.csv"), imu_csv)?;
+     fs::write(output.join("gt.tum"), gt_tum)?;
++    if walkers.is_some() {
++        fs::write(output.join("people.csv"), people_csv)?;
++    }
+ 
+     let f = focal_length_px();
+     let (cx, cy) = (CAMERA_WIDTH as f64 / 2.0, CAMERA_HEIGHT as f64 / 2.0);
+diff --git a/examples/113_drjohnson_euroc_export/walkers.rs b/examples/113_drjohnson_euroc_export/walkers.rs
+new file mode 100644
+index 0000000..80fd2e1
+--- /dev/null
++++ b/examples/113_drjohnson_euroc_export/walkers.rs
+@@ -0,0 +1,101 @@
++//! Walkers crossing the robot's route, as splat actors (local experiment).
++//!
++//! `RNE_WALKERS=DIR` loads `DIR/walker_<i>_phase_<k>.ply` (visloc-rs
++//! `ros2/visloc-ros2/gs/walker_splat_plys.py`: x forward, z up, feet at z = 0)
++//! for `RNE_WALKER_COUNT` walkers (default 4), scaled by `RNE_WALKER_SCALE`
++//! (default 1). Each walks back and forth along its own line across the
++//! route, cycling its gait phases with the distance walked.
++
++use std::path::{Path, PathBuf};
++
++use rne_math::{Quat, Transform3, Vec3};
++use rne_render_3dgs::{load_splat_actor, SplatActorAsset};
++
++/// Lines (RNE world x, z) the walkers pace, crossing the rounded-rectangle route.
++const LINES: &[([f64; 2], [f64; 2])] = &[
++    ([-3.6, -3.8], [-0.2, -3.8]),
++    ([-2.0, -5.6], [-2.0, -2.2]),
++    ([-3.4, -2.6], [-0.4, -5.2]),
++    ([-0.6, -2.5], [-3.2, -5.0]),
++    ([-3.6, -4.4], [-0.2, -4.4]),
++    ([-1.4, -5.6], [-1.4, -2.2]),
++];
++const SPEEDS: &[f64] = &[0.8, 0.6, 0.7, 0.9, 0.75, 0.65];
++const STRIDE: f64 = 1.4;
++
++pub(crate) struct Walkers {
++    pub(crate) phases: Vec<Vec<SplatActorAsset>>,
++    pub(crate) scale: f64,
++    shown: Vec<usize>,
++}
++
++impl Walkers {
++    /// From the environment, or `None` without `RNE_WALKERS`.
++    pub(crate) fn from_env() -> Option<Self> {
++        let dir = PathBuf::from(std::env::var_os("RNE_WALKERS")?);
++        let count: usize = std::env::var("RNE_WALKER_COUNT")
++            .ok()
++            .and_then(|v| v.parse().ok())
++            .unwrap_or(4)
++            .min(LINES.len());
++        let scale: f64 = std::env::var("RNE_WALKER_SCALE")
++            .ok()
++            .and_then(|v| v.parse().ok())
++            .unwrap_or(1.0);
++        let phases = (0..count).map(|i| load_phases(&dir, i)).collect::<Vec<_>>();
++        println!(
++            "walkers: {count} x {} phases, scale {scale}",
++            phases.first().map_or(0, Vec::len)
++        );
++        Some(Self {
++            shown: vec![0; count],
++            phases,
++            scale,
++        })
++    }
++
++    /// The first phase of each walker, the actors to load.
++    pub(crate) fn actors(&self) -> Vec<SplatActorAsset> {
++        self.phases.iter().map(|p| p[0].clone()).collect()
++    }
++
++    /// Walker `i` at time `t_s`: its pose (RNE world, y up) and gait phase.
++    pub(crate) fn state(&self, i: usize, t_s: f64) -> (Transform3, usize) {
++        let (a, b) = LINES[i];
++        let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
++        let length = dx.hypot(dz);
++        // Speeds are in metres per second; the scene's unit is `scale` metres.
++        let walked = SPEEDS[i] * self.scale * t_s;
++        let leg = (walked / length).floor() as i64;
++        let along = walked - leg as f64 * length;
++        let forward = leg % 2 == 0;
++        let s = if forward { along } else { length - along };
++        let (x, z) = (a[0] + dx * s / length, a[1] + dz * s / length);
++        let (hx, hz) = if forward { (dx, dz) } else { (-dx, -dz) };
++        let yaw = (-hz).atan2(hx);
++        let z_up_to_y_up = Quat::from_rotation_x(-std::f64::consts::FRAC_PI_2);
++        let pose = Transform3 {
++            translation: Vec3::new(x, 0.0, z),
++            rotation: (Quat::from_rotation_y(yaw) * z_up_to_y_up).normalize(),
++            scale: Vec3::splat(self.scale),
++        };
++        let phases = self.phases[i].len();
++        let phase = ((walked / (STRIDE * self.scale)) * phases as f64).floor() as usize % phases;
++        (pose, phase)
++    }
++
++    /// Whether walker `i` must swap to `phase`; records it.
++    pub(crate) fn swap(&mut self, i: usize, phase: usize) -> bool {
++        let changed = self.shown[i] != phase;
++        self.shown[i] = phase;
++        changed
++    }
++}
++
++fn load_phases(dir: &Path, i: usize) -> Vec<SplatActorAsset> {
++    (0..)
++        .map(|k| dir.join(format!("walker_{i}_phase_{k}.ply")))
++        .take_while(|p| p.exists())
++        .map(|p| load_splat_actor(&p).expect("walker phase"))
++        .collect()
++}
