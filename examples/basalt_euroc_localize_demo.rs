@@ -291,6 +291,11 @@ struct Args {
     /// Turn down a localization with a lower inlier ratio (inliers over
     /// correspondences) to a weak one (0: off).
     min_inlier_ratio: f64,
+    /// `OdomCorrectionConfig::init_fixes` (agreeing fixes that set the first
+    /// correction; 2 unless set; the weak count is at least this).
+    init_fixes: Option<usize>,
+    /// `OdomCorrectionConfig::reset_after` (3 unless set).
+    reset_after: Option<usize>,
 }
 
 impl Args {
@@ -311,7 +316,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N]"
             .into()
     }
 
@@ -378,6 +383,8 @@ impl Args {
             eval_mask_dir: None,
             min_inlier_cells: 0,
             min_inlier_ratio: 0.0,
+            init_fixes: None,
+            reset_after: None,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -512,6 +519,8 @@ impl Args {
                 "--eval-mask-dir" => args.eval_mask_dir = Some(PathBuf::from(value()?)),
                 "--min-inlier-cells" => args.min_inlier_cells = number(&option, value()?)?,
                 "--min-inlier-ratio" => args.min_inlier_ratio = number(&option, value()?)?,
+                "--init-fixes" => args.init_fixes = Some(number(&option, value()?)?),
+                "--reset-after" => args.reset_after = Some(number(&option, value()?)?),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -1295,9 +1304,17 @@ impl CorrectedRun {
     fn new(args: &Args) -> Self {
         let header = "# timestamp tx ty tz qx qy qz qw\n";
         Self {
-            correction: OdomCorrection::new(OdomCorrectionConfig {
-                weak_gate_m: args.weak_gate_m,
-                ..OdomCorrectionConfig::default()
+            correction: OdomCorrection::new({
+                let defaults = OdomCorrectionConfig::default();
+                OdomCorrectionConfig {
+                    weak_gate_m: args.weak_gate_m,
+                    init_fixes: args.init_fixes.unwrap_or(defaults.init_fixes),
+                    init_fixes_weak: args.init_fixes.map_or(defaults.init_fixes_weak, |n| {
+                        n.max(defaults.init_fixes_weak)
+                    }),
+                    reset_after: args.reset_after.unwrap_or(defaults.reset_after),
+                    ..defaults
+                }
             }),
             fixes_used: 0,
             last_used_fix: None,
