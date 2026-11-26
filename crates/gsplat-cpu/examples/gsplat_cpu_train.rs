@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ssim_weight = 0.2f32;
     let mut densify_cfg = Some(visloc_gsplat_train::densify::DensifyConfig::default());
     let mut truncate: Option<usize> = None;
-    let mut sparse_adam = false;
+    let mut sparse_adam = true;
     let mut stride = 1usize;
     let mut adam = AdamConfig::default();
     let mut newton = NewtonConfig::default();
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--truncate" => truncate = Some(next()?.parse()?),
             "--ssim-weight" => ssim_weight = next()?.parse()?,
             "--no-densify" => densify_cfg = None,
-            "--sparse-adam" => sparse_adam = true,
+            "--dense-adam" => sparse_adam = false,
             "--stride" => stride = next()?.parse()?,
             "--seed" => seed = next()?.parse()?,
             "--overlap" => overlap = next()?.parse()?,
@@ -210,6 +210,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         per(tm[4]),
         per(tm[5]),
         t0.elapsed().as_secs_f64()
+    );
+    println!(
+        "per view: {:.0} projected splats, {:.0} tile intersections",
+        tr.splats as f64 / steps as f64,
+        tr.isects as f64 / steps as f64
     );
     if let Some(out) = out {
         tr.sync();

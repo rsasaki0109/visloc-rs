@@ -331,6 +331,9 @@ pub struct Trainer {
     /// of its screen-mean gradient, and the views it was projected in.
     grad_accum: Vec<f32>,
     grad_count: Vec<f32>,
+    /// Tile intersections and projected splats summed over the rendered views.
+    pub isects: u64,
+    pub splats: u64,
     /// Seconds spent per stage: project+bin, forward, loss, backward, lift, update.
     pub timing: [f64; 6],
 }
@@ -366,13 +369,15 @@ impl Trainer {
             loss: Loss::L2,
             overlap: 1.0,
             ssim_weight: 0.0,
-            sparse_adam: false,
+            sparse_adam: true,
             ssim: None,
             ssim_size: (0, 0),
             stride: 1,
             grad_accum: Vec::new(),
             grad_count: Vec::new(),
             timing: [0.0; 6],
+            isects: 0,
+            splats: 0,
         }
     }
 
@@ -389,6 +394,8 @@ impl Trainer {
         let proj = project_all(&self.model, view);
         let frame = Frame::new(&proj, view.camera.width, view.camera.height, self.bg);
         let t1 = Instant::now();
+        self.isects += frame.sorted.len() as u64;
+        self.splats += proj.len() as u64;
         let raster = forward(&frame);
         let t2 = Instant::now();
         let (loss, mut d) = image_loss(&raster.image, gt, self.loss);

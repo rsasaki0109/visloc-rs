@@ -76,6 +76,28 @@ What it took besides the host pipeline:
   into subnormals within ~650 steps, and x86 computes those on a slow path
   (the Adam stage went from 44 to 120 ms a step; lavapipe flushes them).
 
+## Speedups from the survey, measured
+
+Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):
+
+| Change | Eval PSNR at 7k | Training time | Adopted |
+| --- | ---: | ---: | --- |
+| None (dense Adam) | 29.87 dB | 1,119 s | |
+| Deferred sparse Adam (GS-Scale: only projected gaussians are updated, the others caught up in closed form when next projected, and before evaluating, saving and densifying) | 29.95 dB | 1,054 s (-6%) | yes, the default (`--dense-adam` turns it off) |
+| + 2x2 strided pixels, cycling offset, Turbo-GS's low-pass (`--stride 2`) | 24.52 dB at 2k (28.72 without) | -10% a step | no |
+| + exact ellipse-tile test (AccuTile) | | binning 21 -> 30 ms | no |
+
+- **Sparse Adam** moves the Adam stage from 44 to 32 ms a step: a view of
+  bonsai projects about two thirds of the gaussians, so most are updated
+  anyway.
+- **Strided pixels** lose 4 dB by step 2,000 for 10%: at 390x260 the step
+  is not bound by pixels but by tile intersections (293k a view; the
+  stride leaves 215k, since most splats are a few pixels across), and each
+  costs ~0.7 µs in the backward walk.
+- **The exact tile test** removes 2% of the intersections (293k -> 287k):
+  the splats are small, so their boxes waste little, and the test costs
+  more than it saves.
+
 ## The local Newton step
 
 Each iteration renders the primary view at full resolution and its 3
