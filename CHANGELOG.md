@@ -21,6 +21,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `gsplat_cpu_train` colours the points of a model whose points are all
+  white (as this repository's SfM writes them) from the training photos.
+  bonsai from `unordered_sfm_demo` poses, 7,000 steps: 23.67 -> 25.55 dB
+  (30.03 dB from the dataset's COLMAP model). See
+  `docs/gsplat_cpu_trainer.md`, "From photos, with no GPU".
 - `--fusion-seed-s S` (`basalt_euroc_localize_demo`) / `fusion_seed_s`
   (`visloc_map_localize_node`), off by default: the fusion starts from the
   warm-up's fixes that agree under one odometry, not one fix, so the source
