@@ -21,6 +21,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `basalt_euroc_localize_demo --vio-recover N`: after N full fixes in a row
+  are rejected, without agreeing among themselves, the VIO is rebuilt and
+  the correction starts over. With `--vio-static-hold` and the map prior on
+  a monocular VIO without wheels, no run on five OpenLORIS-Scene query/map
+  pairs diverges (office1-1, every 10th image: 231 m to 14.2 cm), and it
+  fires on no other run. Not yet in the ROS 2 nodes. See
+  `docs/odometry_fusion.md`.
 - `visloc_map_localize_node -p profile:=dynamic_indoor`: the defaults measured with
   people about (`init_warmup_s` 3 and, with `fusion:=true`, `fusion_source_check_s` 1 and
   `fusion_seed_s` 3), each still overridable; the node logs the values it uses.
