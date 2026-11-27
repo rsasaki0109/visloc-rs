@@ -21,6 +21,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `visloc_basalt::vio::StaticHold`, `basalt_euroc_localize_demo
+  --vio-static-hold` and `visloc_vio_node`'s `static_hold` (opt-in): from a
+  static start, a zero velocity in the VIO window on every frame until the
+  IMU first shows motion. With the map prior on a monocular VIO without
+  wheels it stops the run-away the prior can start while the robot stands
+  still: OpenLORIS-Scene office1-7, replayed through ROS 2, 14 m to 2.88 cm.
+  See `docs/odometry_fusion.md`.
+
 - `--fusion-seed-s S` (`basalt_euroc_localize_demo`) / `fusion_seed_s`
   (`visloc_map_localize_node`), off by default: the fusion starts from the
   warm-up's fixes that agree under one odometry, not one fix, so the source
