@@ -446,4 +446,17 @@ Long-range shape comes from long tracks and distant points. visloc-rs's pass on 
 landmarks with 918,299 observations (3.7 per landmark) from 5.5 M keypoints; 438,052 tracks go into the
 triangulation and 41 % of them leave it there, most at the 1° triangulation angle gate (`--min-angle`) that
 drops distant, low-parallax points. The paper triangulates from the initial poses and leaves outliers to its
-robust passes. Next: the pass with the gate at 0.5° and 0.25° on the thirteen (runs 45912780873, 45912773073).
+robust passes.
+
+**The angle gate is not it.** The pass with the gate at 0.25° (run 45912773073) keeps 23 % more landmarks on
+R_12_10cp (305,648) but its heading drifts as before: R_11_5cp −1.99, R_12_10cp −0.77, R_13_15cp −0.91,
+sequence_1_19 −1.01, 1_20 +1.01, 2_11 +0.43, 2_12 +1.39, 3_17 −0.20, 3_18 +0.26, 4_10 −0.64, 4_11 −1.52, 5_11 +0.42,
+5_12 −0.21; mean −0.29. At 0.5° (run 45912780873): mean −0.03, from −1.56 (sequence_4_11) to +1.90 (2_12). The gate
+stays at 1°.
+
+**No stereo matches.** The two SLAM cameras' optical axes are 75.2° apart and the matching skips pairs whose
+axes differ by more than 75° (`--max-axis-angle`), so cam0 and cam1 of the same keyframe were never matched, and
+cross-camera pairs only when the head turns. The batch pass so had almost nothing of the rig's 13.8 cm baseline
+at one instant, the direct hold on the scale. SLAM Dunk matches camera 0 with camera 1 (Table 5). `match
+--stereo` adds the pair of each keyframe within the rig's epipolar band (on a synthetic scene with the training
+calibration: 1,294 of 1,294 matches right); the pass with it on the thirteen: run 45945971578.
