@@ -912,6 +912,10 @@ pub struct OdomCorrector {
     /// odometry's body in the second odometry's frame.
     fusion: Option<MapFusion>,
     second: OdomBuffer,
+    /// Consecutive full fixes the running fusion turned away, with both
+    /// odometries' poses at each: when enough agree under one odometry's
+    /// motion, the fusion restarts from them.
+    fusion_rejected: Vec<(i64, SE3, [Option<SE3>; 2])>,
 }
 
 impl OdomCorrector {
@@ -937,6 +941,7 @@ impl OdomCorrector {
                 })
             }),
             second: OdomBuffer::new(options.odom_history_s),
+            fusion_rejected: Vec::new(),
         }
     }
 
@@ -1204,6 +1209,7 @@ impl OdomCorrector {
                             {
                                 fusion.reset();
                                 fusion.add_fix(stamp_ns, &map_from_body, &sources);
+                                self.fusion_rejected.clear();
                             } else if fusion.is_set() {
                                 let close = fusion.map_from_body(&sources).is_some_and(|p| {
                                     (p.translation - map_from_body.translation).norm()
@@ -1213,6 +1219,36 @@ impl OdomCorrector {
                                 });
                                 if close {
                                     fusion.add_fix(stamp_ns, &map_from_body, &sources);
+                                    self.fusion_rejected.clear();
+                                } else {
+                                    // Gating only on its own prediction, a
+                                    // fusion that went wrong (both
+                                    // odometries off, or a bad start) would
+                                    // never take a fix again: restart it from
+                                    // rejected fixes that agree, as the
+                                    // correction resets.
+                                    let needed = self.options.correction.reset_after.max(2);
+                                    self.fusion_rejected.push((
+                                        stamp_ns,
+                                        map_from_body.clone(),
+                                        sources.clone(),
+                                    ));
+                                    if self.fusion_rejected.len() > needed {
+                                        self.fusion_rejected
+                                            .drain(..self.fusion_rejected.len() - needed);
+                                    }
+                                    if self.fusion_rejected.len() == needed
+                                        && fixes_agree_under_an_odometry(
+                                            &self.fusion_rejected,
+                                            self.options.correction.agreement_m,
+                                        )
+                                    {
+                                        fusion.reset();
+                                        for (stamp, fix, sources) in self.fusion_rejected.drain(..)
+                                        {
+                                            fusion.add_fix(stamp, &fix, &sources);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1232,6 +1268,25 @@ impl OdomCorrector {
         }
         events
     }
+}
+
+/// Whether each pair of consecutive `fixes` moved as one odometry did
+/// between them (the same odometry for all pairs): within `tolerance_m`
+/// and 3 deg.
+fn fixes_agree_under_an_odometry(fixes: &[(i64, SE3, [Option<SE3>; 2])], tolerance_m: f64) -> bool {
+    (0..2).any(|source| {
+        fixes.windows(2).all(|pair| {
+            let (_, fix_a, sources_a) = &pair[0];
+            let (_, fix_b, sources_b) = &pair[1];
+            let (Some(odom_a), Some(odom_b)) = (&sources_a[source], &sources_b[source]) else {
+                return false;
+            };
+            let fix_motion = fix_a.inverse().compose(fix_b);
+            let odom_motion = odom_a.inverse().compose(odom_b);
+            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
+                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= 3f64.to_radians()
+        })
+    })
 }
 
 /// Which received images to localize: every `every`-th once the odometry
@@ -1479,8 +1534,9 @@ mod tests {
 
     /// The first odometry (a VIO) runs off at 6 s, reporting three times the
     /// true motion; the second (wheels, mounted elsewhere on the body) and
-    /// the fixes (10 Hz) are exact. The worst map pose error from 7 s on.
-    fn runaway_first_odometry(fusion: Option<FusionOptions>) -> f64 {
+    /// the fixes (10 Hz, none from 6 s until `fixes_back_s`) are exact. The
+    /// worst map pose error from one second after the fixes are back.
+    fn runaway_first_odometry(fusion: Option<FusionOptions>, fixes_back_s: f64) -> f64 {
         let body_from_wheels = SE3::new(
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
             Vector3::new(0.2, -0.1, -0.4),
@@ -1517,10 +1573,10 @@ mod tests {
                     .compose(&body_from_wheels),
             );
             core.add_odom(stamp, vio.clone());
-            if k % 2 == 0 {
+            if k % 2 == 0 && !(6.0..fixes_back_s).contains(&t) {
                 core.add_fix(stamp, circle(t));
             }
-            if t >= 7.0 {
+            if t >= fixes_back_s.max(6.0) + 1.0 {
                 let map_pose = core.latest_map_pose().expect("set");
                 worst =
                     worst.max((map_pose.map_from_body.translation - circle(t).translation).norm());
@@ -1531,13 +1587,32 @@ mod tests {
 
     #[test]
     fn fusing_a_second_odometry_with_the_source_check_outlasts_a_runaway_first() {
-        let alone = runaway_first_odometry(None);
-        let fused = runaway_first_odometry(Some(FusionOptions {
-            source_check_window_s: 1.0,
-            ..FusionOptions::default()
-        }));
+        let alone = runaway_first_odometry(None, 0.0);
+        let fused = runaway_first_odometry(
+            Some(FusionOptions {
+                source_check_window_s: 1.0,
+                ..FusionOptions::default()
+            }),
+            0.0,
+        );
         assert!(alone > 0.1, "the correction of the VIO alone: {alone}");
         assert!(fused < 0.05, "fused with the wheels, source check: {fused}");
+    }
+
+    #[test]
+    fn a_fusion_carried_off_while_fixes_are_missing_restarts_from_agreeing_fixes() {
+        // No fixes for 2 s (people in front of the camera) while the VIO
+        // runs off: the fusion follows it well past its 15 cm gate, so it
+        // must restart from the fixes that come back, which agree under the
+        // wheels' motion.
+        let fused = runaway_first_odometry(
+            Some(FusionOptions {
+                source_check_window_s: 1.0,
+                ..FusionOptions::default()
+            }),
+            8.0,
+        );
+        assert!(fused < 0.05, "fused after the gap: {fused}");
     }
 
     #[test]

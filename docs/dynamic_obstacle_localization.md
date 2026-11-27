@@ -728,10 +728,59 @@ visloc_map_localize_node --map runs/map -p fusion:=true -r odom2:=wheel/odom \
 The nodes track the offline runs (default a4: 70.2 cm offline; last row:
 3.4 / 1.1 offline with the node's rule).
 
+## Compute budget (towards a Jetson)
+
+No Jetson here, so the budget was measured on this machine's Xeon
+(2.3 GHz) by pinning `visloc_vio_node` and `visloc_map_localize_node`
+together to fewer cores (`taskset`; the player on its own core), replaying
+in **real time** (20 Hz stereo + 200 Hz IMU, 40 s episodes) and faster (2x,
+3x: as on a CPU that much slower). Setting: the last row above (fusion,
+source check, warm-up, map prior), `localize_every:=2`. One run each; a
+repeat of one case differed by a run with dropped frames, so read single
+rows with care.
+
+| Cores, speed | VIO config | q0 | a4 | CPU (both nodes) | VIO frames dropped |
+| --- | --- | --- | --- | --- | --- |
+| 1 core, 1x | default | 1.1 (2.3) cm | 2.0 (12) | 0.6-0.75 core | 0-5 of 783 |
+| 1 core, 2x | default | 1.7 (11) | 3.9 (27) | | 17-241 |
+| 1 core, 3x | default | — | 11.6 (69) | | 197 |
+| 1 core, 1x | light | — | 4.4 (75) | 0.5 core | 0 |
+| 1 core, 2x | light | 1.1 (3.0) | 2.5 (42) | | 20-28 |
+| 1 core, 3x | light | — | 8.5 (57) | | 99 |
+
+- **One Xeon core keeps up in real time**, with about 0.6-0.75 of it
+  busy (VIO about 70 %, map localization the rest) and 210 MB of memory
+  (VIO 120 MB, map localization 90 MB with this 4,700-landmark map). 2-3
+  cores (1x) gave the same numbers.
+- **At 2x** (a CPU core half as fast; a Jetson Orin's Cortex-A78AE core at
+  1.5-2.2 GHz is roughly there, an estimate, not measured) the default
+  config drops up to a third of the VIO frames on q0 (busier images) but
+  the map pose holds. The **light** VIO config
+  (`optical_flow_detection_grid_size` 50 -> 70, about half the points;
+  `vio_max_kfs` 7 -> 5; `configs/basalt/variants/official_euroc_ds/euroc_config_light.json`) holds both at 2x with few drops. **At 3x** both
+  degrade.
+- Not levers: `max_iterations:=2` (the VIO's time is not in its LM
+  iterations) and `localize_every:=4` (no better at 2x).
+- So: **two Orin cores for the two nodes** should hold real time with the
+  default config, one core with the light one. A Jetson run is still
+  needed to confirm it.
+
+**A fault the budget runs found.** With the light config at 1x, the VIO
+broke down on a4 (people ahead) and the node's map pose ended up 7.6 m off.
+The correction of the VIO rejected every fix after it (322). The fusion,
+gating fixes only on its own prediction, never took one again once it was
+more than 15 cm off, though the wheels were fine. The fusion now restarts
+from `reset_after` (3) consecutive fixes it rejected that move as one
+odometry did between them, as the correction resets. Same run: 757.7 cm
+-> **4.4 cm**; the unit test (no fixes for 2 s while the VIO runs off):
+1.04 m -> under 5 cm. Not repeated with the default config: a4 1x went
+from 3.6 to 2.0 cm, q0 1.1 both.
+
 ## Not yet measured
 
 - The Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware.
+- **The nodes on a Jetson:** estimated above from a slowed Xeon only.
 
 ## Targets (proposed with Phase 0)
 
