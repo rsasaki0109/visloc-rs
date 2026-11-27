@@ -81,6 +81,10 @@ PARAMETERS (--name value  or  -p name:=value):
   fusion_source_check_s  leave out an odometry whose motion over the last this many
                          seconds disagrees with the fixes (people dragging a VIO)
                          while it does; 1 was measured in RNE                    [0: off]
+  fusion_seed_s          when the map pose starts (or resets), start the fusion from
+                         the fixes of the last this many seconds that agree with that
+                         fix under one odometry, so the source check judges the VIO
+                         from the start; 3 (with init_warmup_s 3) measured in RNE [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -207,6 +211,10 @@ fn run() -> Result<(), String> {
         if !(fusion.source_check_window_s >= 0.0 && fusion.source_check_window_s.is_finite()) {
             return Err("fusion_source_check_s must be a non-negative number".into());
         }
+        fusion.seed_s = args.parsed_or("fusion_seed_s", fusion.seed_s)?;
+        if !(fusion.seed_s >= 0.0 && fusion.seed_s.is_finite()) {
+            return Err("fusion_seed_s must be a non-negative number".into());
+        }
         options.fusion = Some(fusion);
     } else {
         for key in [
@@ -214,6 +222,7 @@ fn run() -> Result<(), String> {
             "odom2_noise",
             "odom2_body_offset",
             "fusion_source_check_s",
+            "fusion_seed_s",
         ] {
             if args.string(key).is_some() {
                 return Err(format!("{key} needs fusion:=true"));

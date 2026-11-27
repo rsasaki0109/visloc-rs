@@ -148,6 +148,7 @@
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -165,10 +166,10 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    apply_inlier_spread_gate, view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates,
-    ExpectedVisibility, FixOutcome, ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig,
-    OdomCorrection, OdomCorrectionConfig, OdometryNoise, ViewDiagnostics, VisibilityGates,
-    VIEW_GRID_MAX,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, view_diagnostics, BinaryLandmarkIndex,
+    BinaryMatchGates, ExpectedVisibility, FixOutcome, ImageGrid, KeyframeRetrieval, MapFusion,
+    MapFusionConfig, OdomCorrection, OdomCorrectionConfig, OdometryNoise, ViewDiagnostics,
+    VisibilityGates, VIEW_GRID_MAX,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -314,6 +315,11 @@ struct Args {
     /// With `--fusion`: `MapFusionConfig::source_check_window_s` (0: off), so
     /// an odometry that disagrees with the fixes is left out while it does.
     fusion_source_check_s: f64,
+    /// With `--fusion`: when the correction initializes or resets, start the
+    /// fusion from the full fixes of the last this many seconds that agree
+    /// with that fix under one odometry's motion, not that fix alone, so the
+    /// source check has their history at once (0: off).
+    fusion_seed_s: f64,
 }
 
 impl Args {
@@ -334,7 +340,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S]"
             .into()
     }
 
@@ -409,6 +415,7 @@ impl Args {
             init_warmup_s: 0.0,
             object_boxes: None,
             fusion_source_check_s: 0.0,
+            fusion_seed_s: 0.0,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -555,6 +562,7 @@ impl Args {
                 "--fusion-source-check-s" => {
                     args.fusion_source_check_s = number(&option, value()?)?;
                 }
+                "--fusion-seed-s" => args.fusion_seed_s = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -605,6 +613,12 @@ impl Args {
         }
         if args.fusion_source_check_s != 0.0 && !args.fusion {
             return Err("--fusion-source-check-s needs --fusion".into());
+        }
+        if args.fusion_seed_s != 0.0 && !args.fusion {
+            return Err("--fusion-seed-s needs --fusion".into());
+        }
+        if !(args.fusion_seed_s >= 0.0 && args.fusion_seed_s.is_finite()) {
+            return Err("--fusion-seed-s must be a non-negative number".into());
         }
         if args.diagnostics.is_none() && args.eval_mask_dir.is_some() {
             return Err("--eval-mask-dir needs --diagnostics".into());
@@ -1299,6 +1313,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `--fusion-seed-s`: how closely an earlier fix must agree with the one the
+/// correction starts from, under one odometry's motion between them.
+const SEED_AGREEMENT_M: f64 = 0.10;
+const SEED_AGREEMENT_PER_M: f64 = 0.10;
+const SEED_AGREEMENT_DEG: f64 = 3.0;
+
 /// Odometry corrected into the map frame, frame by frame: the fixes, the
 /// correction and every output file of `--vio` / `--odometry`.
 struct CorrectedRun {
@@ -1306,6 +1326,10 @@ struct CorrectedRun {
     /// With `--fusion`: the fused map pose, fed the fixes the correction
     /// accepts.
     fusion: Option<MapFusion>,
+    /// With `--fusion-seed-s`: that span, and the full fixes within it of the
+    /// newest (stamp, map pose, odometry poses).
+    fusion_seed_ns: i64,
+    recent_fixes: VecDeque<(i64, SE3, Vec<Option<SE3>>)>,
     /// Fixes the correction accepted or initialized from, and the newest.
     fixes_used: usize,
     last_used_fix: Option<(i64, SE3)>,
@@ -1363,6 +1387,8 @@ impl CorrectedRun {
             }),
             fixes_used: 0,
             last_used_fix: None,
+            fusion_seed_ns: (args.fusion_seed_s * 1e9) as i64,
+            recent_fixes: VecDeque::new(),
             fusion: args.fusion.then(|| {
                 let mut sources = Vec::new();
                 if args.vio {
@@ -1505,7 +1531,7 @@ impl CorrectedRun {
                         odom_from_imu,
                         attempt.result.inlier_count as f64,
                     );
-                    self.fuse(timestamp_ns, map_from_imu, sources, outcome);
+                    self.fuse(timestamp_ns, map_from_imu, sources, outcome, false);
                     outcome_name(outcome)
                 }
                 (None, Some(map_from_imu)) => {
@@ -1516,7 +1542,7 @@ impl CorrectedRun {
                         odom_from_imu,
                         attempt.result.inlier_count as f64,
                     );
-                    self.fuse(timestamp_ns, map_from_imu, sources, outcome);
+                    self.fuse(timestamp_ns, map_from_imu, sources, outcome, true);
                     match outcome {
                         FixOutcome::Pending => "weak-pending",
                         FixOutcome::Initialized => "weak-initialized",
@@ -1569,6 +1595,7 @@ impl CorrectedRun {
         map_from_imu: &SE3,
         sources: &[Option<SE3>],
         outcome: FixOutcome,
+        weak: bool,
     ) {
         if matches!(
             outcome,
@@ -1580,9 +1607,34 @@ impl CorrectedRun {
         let Some(fusion) = &mut self.fusion else {
             return;
         };
+        if self.fusion_seed_ns > 0 && !weak {
+            self.recent_fixes
+                .retain(|(stamp, _, _)| timestamp_ns - stamp <= self.fusion_seed_ns);
+            self.recent_fixes
+                .push_back((timestamp_ns, map_from_imu.clone(), sources.to_vec()));
+        }
         match outcome {
             FixOutcome::Initialized | FixOutcome::Reset => {
                 fusion.reset();
+                if self.fusion_seed_ns > 0 {
+                    // The earlier fixes that agree with this one under some
+                    // odometry, oldest first, then this one.
+                    for (stamp, fix, fix_sources) in &self.recent_fixes {
+                        if *stamp < timestamp_ns
+                            && fixes_agree_under_a_source(
+                                fix,
+                                fix_sources,
+                                map_from_imu,
+                                sources,
+                                SEED_AGREEMENT_M,
+                                SEED_AGREEMENT_PER_M,
+                                SEED_AGREEMENT_DEG,
+                            )
+                        {
+                            fusion.add_fix(*stamp, fix, fix_sources);
+                        }
+                    }
+                }
                 fusion.add_fix(timestamp_ns, map_from_imu, sources);
             }
             FixOutcome::Accepted => fusion.add_fix(timestamp_ns, map_from_imu, sources),

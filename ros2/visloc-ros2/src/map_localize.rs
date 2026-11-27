@@ -40,9 +40,10 @@ use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureRea
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
-    apply_inlier_spread_gate, AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates,
-    FixOutcome, ImageGrid, LocalizationConfig, LocalizationPipeline, MapFusion, MapFusionConfig,
-    OdomCorrection, OdomCorrectionConfig, OdometryNoise, PackedDescriptors,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, AllLandmarksSelector,
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid, LocalizationConfig,
+    LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
+    OdometryNoise, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -808,6 +809,11 @@ pub struct MapPose {
 /// prediction is used (the same gate as the correction's at a fresh fix).
 const FUSION_GATE_M: f64 = 0.15;
 const FUSION_GATE_DEG: f64 = 3.0;
+/// [`FusionOptions::seed_s`]: how closely an earlier fix must agree with the
+/// one the correction starts from, under one odometry's motion between them
+/// (and within `FUSION_GATE_DEG`).
+const SEED_AGREEMENT_M: f64 = 0.10;
+const SEED_AGREEMENT_PER_M: f64 = 0.10;
 
 /// The second odometry fused with the first and the fixes
 /// ([`MapLocalizeOptions::fusion`]).
@@ -822,6 +828,10 @@ pub struct FusionOptions {
     /// `MapFusionConfig::source_check_window_s`: leave out an odometry that
     /// disagrees with the fixes while it does (0: off).
     pub source_check_window_s: f64,
+    /// When the correction initializes or resets, start the fusion from the
+    /// full fixes of the last this many seconds that agree with that fix
+    /// under one odometry's motion, not that fix alone (0: off).
+    pub seed_s: f64,
 }
 
 impl Default for FusionOptions {
@@ -831,6 +841,7 @@ impl Default for FusionOptions {
             second_noise: OdometryNoise::WHEEL,
             body_from_second_body: SE3::identity(),
             source_check_window_s: 0.0,
+            seed_s: 0.0,
         }
     }
 }
@@ -916,6 +927,8 @@ pub struct OdomCorrector {
     /// odometries' poses at each: when enough agree under one odometry's
     /// motion, the fusion restarts from them.
     fusion_rejected: Vec<(i64, SE3, [Option<SE3>; 2])>,
+    /// With [`FusionOptions::seed_s`]: the full fixes of that span.
+    recent_fixes: VecDeque<(i64, SE3, [Option<SE3>; 2])>,
 }
 
 impl OdomCorrector {
@@ -942,6 +955,7 @@ impl OdomCorrector {
             }),
             second: OdomBuffer::new(options.odom_history_s),
             fusion_rejected: Vec::new(),
+            recent_fixes: VecDeque::new(),
         }
     }
 
@@ -1198,6 +1212,20 @@ impl OdomCorrector {
                     };
                     if !weak && self.fusion.is_some() {
                         let sources = self.fusion_sources(stamp_ns, &odom_from_body);
+                        let seed_ns = self
+                            .options
+                            .fusion
+                            .as_ref()
+                            .map_or(0, |fusion| (fusion.seed_s * 1e9) as i64);
+                        if seed_ns > 0 {
+                            self.recent_fixes
+                                .retain(|(stamp, _, _)| stamp_ns - stamp <= seed_ns);
+                            self.recent_fixes.push_back((
+                                stamp_ns,
+                                map_from_body.clone(),
+                                sources.clone(),
+                            ));
+                        }
                         if let Some(fusion) = &mut self.fusion {
                             // The fusion starts (and restarts) with the
                             // correction; once running it gates fixes
@@ -1208,6 +1236,24 @@ impl OdomCorrector {
                                 || (!fusion.is_set() && outcome == FixOutcome::Accepted)
                             {
                                 fusion.reset();
+                                // With seed_s: the earlier fixes that agree
+                                // with this one under some odometry, so the
+                                // source check has their history at once.
+                                for (stamp, fix, fix_sources) in &self.recent_fixes {
+                                    if *stamp < stamp_ns
+                                        && fixes_agree_under_a_source(
+                                            fix,
+                                            fix_sources,
+                                            &map_from_body,
+                                            &sources,
+                                            SEED_AGREEMENT_M,
+                                            SEED_AGREEMENT_PER_M,
+                                            FUSION_GATE_DEG,
+                                        )
+                                    {
+                                        fusion.add_fix(*stamp, fix, fix_sources);
+                                    }
+                                }
                                 fusion.add_fix(stamp_ns, &map_from_body, &sources);
                                 self.fusion_rejected.clear();
                             } else if fusion.is_set() {
@@ -1537,6 +1583,19 @@ mod tests {
     /// the fixes (10 Hz, none from 6 s until `fixes_back_s`) are exact. The
     /// worst map pose error from one second after the fixes are back.
     fn runaway_first_odometry(fusion: Option<FusionOptions>, fixes_back_s: f64) -> f64 {
+        runaway(fusion, 6.0, fixes_back_s, 0.0, fixes_back_s.max(6.0) + 1.0)
+    }
+
+    /// As [`runaway_first_odometry`], with the VIO running off from
+    /// `runaway_s`, the correction's warm-up `warmup_s`, and the worst error
+    /// measured from `measure_s` on (or from the first map pose).
+    fn runaway(
+        fusion: Option<FusionOptions>,
+        runaway_s: f64,
+        fixes_back_s: f64,
+        warmup_s: f64,
+        measure_s: f64,
+    ) -> f64 {
         let body_from_wheels = SE3::new(
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
             Vector3::new(0.2, -0.1, -0.4),
@@ -1545,10 +1604,12 @@ mod tests {
             fusion.body_from_second_body = body_from_wheels.clone();
             fusion
         });
-        let mut core = OdomCorrector::new(&MapLocalizeOptions {
+        let mut options = MapLocalizeOptions {
             fusion,
             ..MapLocalizeOptions::default()
-        });
+        };
+        options.correction.init_warmup_s = warmup_s;
+        let mut core = OdomCorrector::new(&options);
         let odom_from_map = offset().inverse();
         let wheels_from_map = SE3::new(
             UnitQuaternion::from_euler_angles(0.0, 0.0, -1.1),
@@ -1561,7 +1622,7 @@ mod tests {
             let stamp = k * 50 * MS;
             if k > 0 {
                 let mut step = circle(t - 0.05).inverse().compose(&circle(t));
-                if t >= 6.0 {
+                if t >= runaway_s {
                     step.translation *= 3.0;
                 }
                 vio = vio.compose(&step);
@@ -1573,11 +1634,13 @@ mod tests {
                     .compose(&body_from_wheels),
             );
             core.add_odom(stamp, vio.clone());
-            if k % 2 == 0 && !(6.0..fixes_back_s).contains(&t) {
+            if k % 2 == 0 && !(runaway_s..fixes_back_s).contains(&t) {
                 core.add_fix(stamp, circle(t));
             }
-            if t >= fixes_back_s.max(6.0) + 1.0 {
-                let map_pose = core.latest_map_pose().expect("set");
+            if t >= measure_s {
+                let Some(map_pose) = core.latest_map_pose() else {
+                    continue;
+                };
                 worst =
                     worst.max((map_pose.map_from_body.translation - circle(t).translation).norm());
             }
@@ -1613,6 +1676,30 @@ mod tests {
             8.0,
         );
         assert!(fused < 0.05, "fused after the gap: {fused}");
+    }
+
+    #[test]
+    fn seeding_the_fusion_with_the_warm_up_fixes_leaves_a_vio_bad_from_the_start_out() {
+        // The VIO runs off from the start; the map pose starts after a 3 s
+        // warm-up. Started from one fix, the fusion follows the VIO until
+        // the source check has a second of fixes; seeded with the warm-up's
+        // fixes, it leaves the VIO out at once.
+        let fused = |seed_s| {
+            runaway(
+                Some(FusionOptions {
+                    source_check_window_s: 1.0,
+                    seed_s,
+                    ..FusionOptions::default()
+                }),
+                0.0,
+                0.0,
+                3.0,
+                0.0,
+            )
+        };
+        let (one, seeded) = (fused(0.0), fused(3.0));
+        assert!(seeded < 0.03, "seeded: {seeded}");
+        assert!(one > 2.0 * seeded, "from one fix: {one}, seeded: {seeded}");
     }
 
     #[test]

@@ -722,11 +722,76 @@ run once):
 ```bash
 visloc_map_localize_node --map runs/map -p fusion:=true -r odom2:=wheel/odom \
   -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068 \
-  -p fusion_source_check_s:=1 -p init_warmup_s:=3
+  -p fusion_source_check_s:=1 -p init_warmup_s:=3 -p fusion_seed_s:=3
 ```
 
 The nodes track the offline runs (default a4: 70.2 cm offline; last row:
 3.4 / 1.1 offline with the node's rule).
+
+## Starting the fusion from the warm-up's fixes (`--fusion-seed-s`)
+
+The worst poses left above (a2: 37 cm, a4: 22 cm) come in the first two
+seconds of the map pose. The wheels alone have none there (a2, a4: 1.7 /
+1.4 cm at most in the first second, `--init-warmup-s 3`): it is the VIO,
+not yet right after people blocked the start, that the fusion follows. The
+source check cannot tell yet: the fusion starts from the one fix the
+correction starts from, and the check needs a second of fixes.
+
+`--fusion-seed-s S` (demo) / `fusion_seed_s` (node), off by default: when
+the correction initializes or resets, the fusion starts from the full fixes
+of the last S seconds that agree with that fix under one odometry's motion
+(10 cm + 10 % of the distance, 3 deg;
+`visloc_localization::fixes_agree_under_a_source`), oldest first. The
+source check then has their history at once.
+
+RNE, offline (map pose RMSE (max); first second of the map pose, max):
+
+| `--vio-map-prior --init-warmup-s 3 --fusion-source-check-s 1` | q0 | q4 | q6 | a2 | a4 |
+| --- | --- | --- | --- | --- | --- |
+| as above | 1.1 (1.9) | 1.0 (3.1) | 1.1 (2.2) | 2.4 (37); 37 | 2.8 (22); 3.6 |
+| `--fusion-seed-s 3` | 1.1 (1.8) | 1.1 (3.1) | 1.1 (2.3) | **1.9 (4.5); 1.3** | **2.2 (14); 1.4** |
+
+The start-up errors are gone; a4's worst pose left (14 cm) is mid-run.
+Through the nodes over DDS (one core, real time, one run each), a4 goes
+from 2.0 (12) to **1.9 (10)** cm, its first second from 9.9 to 1.2 cm at
+most; a2 (1.2 (4.1)) and q0 (1.1 (2.0)) are unchanged. On OpenLORIS cafe
+it does no harm: 17.6 -> 17.7 cm (`--fusion-seed-s 1`, source check only)
+and 20.7 -> 20.4 cm (with the map prior and warm-up, `--fusion-seed-s 3`).
+A unit test (VIO off from the start, 3 s warm-up): 40 cm -> 0.
+
+## A real person detector instead of the true boxes (YOLOX)
+
+The boxes above were RNE's true walker boxes. With a detector
+(`yolox_track_demo --boxes-csv`, the official YOLOX ONNX models of
+`docs/object_tracking.md`, ONNX Runtime 1.32 on the CPU) on cam0:
+
+| Model | Recall of the true boxes (a2, a4) | False detections | Time per frame, one Xeon core |
+| --- | --- | --- | --- |
+| `yolox_nano` (416) | 79 %, 81 % | 0 | 12 ms |
+| `yolox_s` (640) | 84 %, 88 % | 0 | 64 ms |
+
+(`scripts/rne/rne_box_recall.py`: true boxes of at least 2,000 px, found
+at IoU >= 0.3. The true boxes ignore walls, so a walker hidden behind one
+counts as missed: the recall is a lower bound. The time includes reading
+the PNG and the tracker.)
+
+The boxes into the VIO's moving-object filter, on top of the best setting
+(`--vio-map-prior --init-warmup-s 3 --fusion-source-check-s 1
+--fusion-seed-s 3`; map pose RMSE (max), VIO ATE):
+
+| Boxes | a2 | a4 |
+| --- | --- | --- |
+| none | 1.9 (4.5) cm, VIO 51 cm | 2.2 (14) cm, VIO 36 cm |
+| true | 1.7 (4.5), VIO 81 | **4.0** (14), VIO **242** |
+| `yolox_nano` | 1.9 (5.0), VIO 51 | 2.0 (14), VIO 36 |
+
+**Not worth its cost here.** The fusion already leaves the dragged VIO out,
+so the filter has little left to fix: the detector's boxes change the map
+pose by 0.2 cm at most, and the true boxes (more of them, people hidden
+behind walls included) still break the VIO on a4, as above. A detector at
+the camera rate would cost about a quarter of a Xeon core (`yolox_nano`)
+for nothing measurable; on a Jetson its GPU could run it, but the budget is
+better left to the VIO. The detector stays out of the recommended setting.
 
 ## Compute budget (towards a Jetson)
 
@@ -779,7 +844,7 @@ from 3.6 to 2.0 cm, q0 1.1 both.
 ## Not yet measured
 
 - The Gazebo actors and masks: not started.
-- **Detector cost on a Jetson:** needs hardware.
+- **Detector cost on a Jetson:** needs hardware (on a Xeon core: above).
 - **The nodes on a Jetson:** estimated above from a slowed Xeon only.
 
 ## Targets (proposed with Phase 0)
