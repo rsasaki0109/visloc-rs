@@ -759,6 +759,40 @@ it does no harm: 17.6 -> 17.7 cm (`--fusion-seed-s 1`, source check only)
 and 20.7 -> 20.4 cm (with the map prior and warm-up, `--fusion-seed-s 3`).
 A unit test (VIO off from the start, 3 s warm-up): 40 cm -> 0.
 
+## A real person detector instead of the true boxes (YOLOX)
+
+The boxes above were RNE's true walker boxes. With a detector
+(`yolox_track_demo --boxes-csv`, the official YOLOX ONNX models of
+`docs/object_tracking.md`, ONNX Runtime 1.32 on the CPU) on cam0:
+
+| Model | Recall of the true boxes (a2, a4) | False detections | Time per frame, one Xeon core |
+| --- | --- | --- | --- |
+| `yolox_nano` (416) | 79 %, 81 % | 0 | 12 ms |
+| `yolox_s` (640) | 84 %, 88 % | 0 | 64 ms |
+
+(`scripts/rne/rne_box_recall.py`: true boxes of at least 2,000 px, found
+at IoU >= 0.3. The true boxes ignore walls, so a walker hidden behind one
+counts as missed: the recall is a lower bound. The time includes reading
+the PNG and the tracker.)
+
+The boxes into the VIO's moving-object filter, on top of the best setting
+(`--vio-map-prior --init-warmup-s 3 --fusion-source-check-s 1
+--fusion-seed-s 3`; map pose RMSE (max), VIO ATE):
+
+| Boxes | a2 | a4 |
+| --- | --- | --- |
+| none | 1.9 (4.5) cm, VIO 51 cm | 2.2 (14) cm, VIO 36 cm |
+| true | 1.7 (4.5), VIO 81 | **4.0** (14), VIO **242** |
+| `yolox_nano` | 1.9 (5.0), VIO 51 | 2.0 (14), VIO 36 |
+
+**Not worth its cost here.** The fusion already leaves the dragged VIO out,
+so the filter has little left to fix: the detector's boxes change the map
+pose by 0.2 cm at most, and the true boxes (more of them, people hidden
+behind walls included) still break the VIO on a4, as above. A detector at
+the camera rate would cost about a quarter of a Xeon core (`yolox_nano`)
+for nothing measurable; on a Jetson its GPU could run it, but the budget is
+better left to the VIO. The detector stays out of the recommended setting.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon
@@ -810,7 +844,7 @@ from 3.6 to 2.0 cm, q0 1.1 both.
 ## Not yet measured
 
 - The Gazebo actors and masks: not started.
-- **Detector cost on a Jetson:** needs hardware.
+- **Detector cost on a Jetson:** needs hardware (on a Xeon core: above).
 - **The nodes on a Jetson:** estimated above from a slowed Xeon only.
 
 ## Targets (proposed with Phase 0)
