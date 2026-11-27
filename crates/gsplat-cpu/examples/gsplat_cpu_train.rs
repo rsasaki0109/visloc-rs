@@ -134,8 +134,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    let views: Vec<TrainView> = ds
+        .train
+        .par_iter()
+        .map(|v| Ok(TrainView::new(v.camera, &load_view_rgb(v)?)))
+        .collect::<Result<_, visloc_gsplat_train::dataset::DatasetError>>()?;
     // As gsplat_train: SfM points, isotropic at the mean distance to 3 neighbours.
-    let mut scene = seed_scene(&read_points3d(find_model_dir(&data)?)?, 3);
+    let mut points = read_points3d(find_model_dir(&data)?)?;
+    if !points.is_empty() && points.iter().all(|p| p.rgb == [255; 3]) {
+        // A model written without colours (visloc-rs's own SfM export
+        // writes every point white): seed from the training photos instead.
+        colour_points(&mut points, &views);
+        eprintln!(
+            "points3D has no colours (all white): coloured {} points from the training views",
+            points.len()
+        );
+    }
+    let mut scene = seed_scene(&points, 3);
     if let Some(m) = truncate {
         scene.gaussians.truncate(m);
     }
@@ -143,11 +158,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         d.max_gaussians = m;
     }
     let model = Model::from_scene(&scene);
-    let views: Vec<TrainView> = ds
-        .train
-        .par_iter()
-        .map(|v| Ok(TrainView::new(v.camera, &load_view_rgb(v)?)))
-        .collect::<Result<_, visloc_gsplat_train::dataset::DatasetError>>()?;
     let eval: Vec<_> = ds
         .eval
         .par_iter()
@@ -323,4 +333,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("wrote {}", out.display());
     }
     Ok(())
+}
+
+/// Colour each point with the per-channel median of the pixels it projects
+/// to in the training views (in front of the camera and inside the image).
+/// The median shrugs off the views where something occludes it. Points no
+/// view sees stay mid-grey.
+fn colour_points(points: &mut [visloc_gsplat_train::init::ColoredPoint], views: &[TrainView]) {
+    points.par_iter_mut().for_each(|p| {
+        let mut samples: [Vec<f32>; 3] = Default::default();
+        for v in views {
+            let pc = v.view.world_to_camera_point(p.position);
+            if pc.z <= 1e-6 {
+                continue;
+            }
+            let (u, w, _) = v.view.camera.project(pc);
+            let (cam_w, cam_h) = (v.view.camera.width as f32, v.view.camera.height as f32);
+            if !(u >= 0.0 && w >= 0.0 && u < cam_w && w < cam_h) {
+                continue;
+            }
+            let o = 3 * (w as usize * v.view.camera.width as usize + u as usize);
+            for (c, s) in samples.iter_mut().enumerate() {
+                s.push(v.gt[o + c]);
+            }
+        }
+        p.rgb = samples.map(|mut s| {
+            if s.is_empty() {
+                return 128;
+            }
+            let mid = s.len() / 2;
+            let (_, m, _) = s.select_nth_unstable_by(mid, f32::total_cmp);
+            (m.clamp(0.0, 1.0) * 255.0).round() as u8
+        });
+    });
 }
