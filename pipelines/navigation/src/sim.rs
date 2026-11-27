@@ -23,7 +23,7 @@
 //! no image rendering: the camera model is exact geometry on the landmarks,
 //! which tests everything downstream of feature extraction.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
 use nalgebra::{Matrix3, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
@@ -911,7 +911,9 @@ pub fn build_map(
         trajectory.push(robot.pose);
     }
 
-    let mut counts: HashMap<usize, usize> = HashMap::new();
+    // Ordered: each landmark below draws its noise from `rng` in this order,
+    // so a hash map's per-process order made the map differ between runs.
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
     for (_, seen) in &keyframes {
         for (i, _) in seen {
             *counts.entry(*i).or_default() += 1;
