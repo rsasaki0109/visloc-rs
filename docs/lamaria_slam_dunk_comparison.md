@@ -460,3 +460,25 @@ cross-camera pairs only when the head turns. The batch pass so had almost nothin
 at one instant, the direct hold on the scale. SLAM Dunk matches camera 0 with camera 1 (Table 5). `match
 --stereo` adds the pair of each keyframe within the rig's epipolar band (on a synthetic scene with the training
 calibration: 1,294 of 1,294 matches right); the pass with it on the thirteen: run 45945971578.
+
+**The paper's other front-end settings, one at a time** (the pass only, paired against the RootSIFT default
+chain on the thirteen; low light runs the default chain there):
+
+| Change | R_11 | R_12 | R_13 | 1_19 | 1_20 | 2_11 | 2_12 | 3_17 | 3_18 | 5_11 | 5_12 | Mean of 13 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SIFT contrast threshold 0.006, edge threshold 12 (run 45930831921) | −2.82 | −1.82 | −0.29 | +1.04 | +2.84 | +0.05 | +4.32 | −2.08 | +0.17 | +2.13 | −0.08 | +0.27 |
+| Revisits within 25 m (run 45930840980) | −0.25 | −1.76 | +0.14 | −0.08 | +0.14 | +0.10 | 0 | −0.08 | −0.01 | 0 | 0 | −0.14 |
+| Same-keyframe stereo matches (run 45945971578, 5_12 pending) | −0.64 | +1.19 | −0.59 | +2.16 | −2.47 | +1.18 | +0.25 | +0.78 | −1.24 | −0.03 | | |
+
+None is kept. The stereo pairs add 52,000 matches on sequence_1_20 (26 a keyframe): the rectified crops of the
+two cameras overlap by about 40°, against about 77° on the raw fisheye images SLAM Dunk matches, and the
+sequence_1_20 scale profile against SLAM Dunk stays as it was (1.0136 / 1.0060 / … / 0.9984 per eighth, against
+1.0126 / 1.0055 / … / 0.9989). The same small changes move single recordings by ±2–3, so only the mean over the
+thirteen decides.
+
+The scale drift is the same whatever the front end, so it is in the model. Without real stereo the scale rests on
+the accelerometer, and on sequence_1_20 the pass's accelerometer bias moves from (−0.013, 0.006, −0.010) to
+(0.011, 0.007, −0.021) m/s² over the first half, where the scale drifts, while the device warms up. The pass
+loosens the gyroscope's bias walk tenfold over the first 300 s (`--gyro-rw-warmup`) but not the
+accelerometer's; `solve --accel-rw-warmup` does it for the accelerometer: runs 45983348355 (×10) and
+45983360728 (×30).
