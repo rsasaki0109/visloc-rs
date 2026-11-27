@@ -650,6 +650,32 @@ fn solve_block_tridiagonal(
     Some(x)
 }
 
+/// Whether fix `b` lies where fix `a` and one odometry's motion between
+/// them put it, within `tolerance_m` plus `tolerance_per_m` of that motion's
+/// length, and `tolerance_deg`. `a_sources` and `b_sources` are the
+/// odometries' poses of the body at the two fixes, as [`MapFusion`] takes
+/// them; a source missing at either is skipped.
+pub fn fixes_agree_under_a_source(
+    a: &SE3,
+    a_sources: &[Option<SE3>],
+    b: &SE3,
+    b_sources: &[Option<SE3>],
+    tolerance_m: f64,
+    tolerance_per_m: f64,
+    tolerance_deg: f64,
+) -> bool {
+    a_sources.iter().zip(b_sources).any(|(odom_a, odom_b)| {
+        let (Some(odom_a), Some(odom_b)) = (odom_a, odom_b) else {
+            return false;
+        };
+        let motion = odom_a.inverse().compose(odom_b);
+        let predicted = a.compose(&motion);
+        (predicted.translation - b.translation).norm()
+            <= tolerance_m + tolerance_per_m * motion.translation.norm()
+            && predicted.rotation.angle_to(&b.rotation) <= tolerance_deg.to_radians()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,5 +914,33 @@ mod tests {
         for (i, xi) in x.iter().enumerate() {
             assert!((xi - expected.rows(4 * i, 4)).norm() < 1e-9);
         }
+    }
+
+    #[test]
+    fn fixes_agree_when_one_source_moved_as_they_did() {
+        let a = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.4),
+            Vector3::new(1.0, 2.0, 0.0),
+        );
+        let step = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1),
+            Vector3::new(0.5, 0.0, 0.0),
+        );
+        let b = a.compose(&step);
+        let good = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, -1.0),
+            Vector3::new(5.0, 0.0, 0.0),
+        );
+        let runaway = good.compose(&SE3::new(step.rotation, step.translation * 3.0));
+        let a_sources = [Some(good.clone()), Some(good.clone())];
+        // The second source moved as the fixes did; the first ran off.
+        let b_sources = [Some(runaway.clone()), Some(good.compose(&step))];
+        assert!(fixes_agree_under_a_source(
+            &a, &a_sources, &b, &b_sources, 0.05, 0.1, 3.0
+        ));
+        let b_sources = [Some(runaway), None];
+        assert!(!fixes_agree_under_a_source(
+            &a, &a_sources, &b, &b_sources, 0.05, 0.1, 3.0
+        ));
     }
 }
