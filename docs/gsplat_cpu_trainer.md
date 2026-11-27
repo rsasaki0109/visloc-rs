@@ -109,8 +109,10 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 | --- | --- | ---: |
 | `gsplat_train --strategy brush` | 25.28 / 28.51 / 29.82 / **31.40** | 1,775 s |
 | `gsplat_train --strategy brush --seed 7` | 25.41 / 28.47 / 29.70 / **31.43** | 1,709 s |
-| `gsplat-cpu --strategy brush` | 24.91 / 28.71 / 30.04 / **31.39** | **1,416 s (1.25x)** |
+| `gsplat-cpu --strategy brush` | 24.91 / 28.71 / 30.04 / **31.39** | **1,168 s (1.52x)** |
 
+- **Times are after the tight raster bounds** (below). Before them the same
+  run, bit-identical, took 1,416 s.
 - **The populations agree** (228,751 against 228,481 at step 1,000; both
   at the cap by 6,000), and so do the curves.
 - **Same quality, within 0.05 dB** of `gsplat_train`'s two seeds (31.40 /
@@ -247,3 +249,23 @@ Open, if the bet is pursued further:
   one rotation angle, 2D scales) instead of damping a rank-deficient 11x11.
 - Fewer pixels per Gauss-Newton view (strided, as LM-RS samples 32 per
   tile), which would cut the 534 ms backward.
+
+## Tight raster bounds
+
+A splat's rows and 8-lane half rows were padded by a full pixel. On bonsai
+`images_8` (brush), 28% of the half rows the rasterizer walked had no pixel
+at or above `alpha = 1/255`. With the bounds on the exact level, computed in
+f64 and widened only for the f32 `sigma` and polynomial `exp` of the pixel
+loops, the result is bit-identical. Time over 7,000 steps:
+
+| Strategy | Before | After |
+| --- | ---: | ---: |
+| brush | 1,413 s | 1,184 s (-16%) |
+| Inria | 1,156 s | 1,043 s (-10%) |
+
+The bounds must be conservative. An f32 version was 20% faster on Inria,
+but on brush it cut off one real hit of a large splat ~300 px off the tile,
+where the bound quadratic's terms nearly cancel, and the run drifted from
+step 3,000. A unit test draws random splats, far ones included, and checks
+that every hit stays inside the bounds. A regression case for that splat
+fails on the f32 bounds.

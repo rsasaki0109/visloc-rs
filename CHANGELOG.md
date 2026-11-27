@@ -33,7 +33,7 @@ All notable changes to `visloc-rs` will be documented here.
 - `gsplat_cpu_train --strategy brush`: brush's refine strategy, rates, aux
   losses and mean noise on the CPU trainer, as `gsplat_train --strategy
   brush` (`docs/gsplat_cpu_trainer.md`). bonsai `images_8`, 7,000 steps:
-  31.39 dB in 1,416 s against `gsplat_train`'s 31.40 / 31.43 dB in
+  31.39 dB in 1,168 s against `gsplat_train`'s 31.40 / 31.43 dB in
   1,775 / 1,709 s.
 - `gsplat_train --seed`; `--mean-noise` and `--aux-weights` on both
   trainers (brush ablations).
@@ -136,6 +136,11 @@ All notable changes to `visloc-rs` will be documented here.
   vectorizes the colour update. Results are bit-identical. bonsai
   `images_8` brush, 7,000 steps: update stage 53.8 to 44.2 ms/step, total
   1,433 to 1,413 s; most of the gain is in the first 3,000 steps.
+- `visloc-gsplat-cpu` rasterizer: a splat's rows and 8-lane half rows are
+  bounded by the exact `alpha = 1/255` ellipse (f64, widened for the
+  pixel loops' rounding) instead of a one-pixel pad, which left 28% of the
+  walked half rows empty. Results are bit-identical. bonsai `images_8`,
+  7,000 steps: brush 1,413 to 1,184 s, Inria 1,156 to 1,043 s.
 
 ### Fixed
 
