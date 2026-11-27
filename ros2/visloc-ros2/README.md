@@ -489,6 +489,7 @@ measurements behind the defaults.
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
+| `profile` | `default` | `dynamic_indoor`: the defaults measured with people about (`docs/dynamic_obstacle_localization.md`): `init_warmup_s` 3 and, with `fusion:=true`, `fusion_source_check_s` 1 and `fusion_seed_s` 3. Parameters given explicitly still win; the node logs the values it uses |
 | `fusion` | `false` | also fuse `odom2` with `odom` and the fixes in `visloc_localization::fusion::MapFusion` (a sliding-window pose graph); `map_pose` and `map -> odom` follow the fusion. A fix is used if the correction initializes or resets from it, or once the fusion has a pose, if it lies within 15 cm / 3 deg of the fusion's prediction |
 | `odom_noise`, `odom2_noise` | `vio`, `wheel` | drift models of the two odometries: `vio`, `wheel` or `legged` |
 | `odom2_body_offset` | identity | `odom2`'s body in `odom`'s body frame (`T_body_body2`), `tx,ty,tz,qx,qy,qz,qw`, e.g. a VIO's IMU <- `base_link` |
@@ -499,6 +500,19 @@ measurements behind the defaults.
 | `orientation_stddev` | `0.02` rad | |
 | `image_queue` | `1` | images waiting while one is localized (drop-oldest) |
 | `domain_id`, `node_name` | | as above |
+
+**With people about** (a VIO on `odom`, the wheels on `odom2`): measured in
+RNE with people walking just ahead of the robot, 1–2 cm through the nodes
+(`docs/dynamic_obstacle_localization.md`):
+
+```sh
+visloc_vio_node --calibration calib.json --config config.json \
+  --ros-args -p map_prior:=true -r left/image_raw:=cam0/image_raw \
+  -r right/image_raw:=cam1/image_raw -r imu:=imu0
+visloc_map_localize_node --map runs/map --ros-args -p profile:=dynamic_indoor \
+  -p fusion:=true -r odom2:=wheel/odom -r image:=cam0/image_raw \
+  -p odom2_body_offset:=<tx,ty,tz,qx,qy,qz,qw of base_link in the IMU frame>
+```
 
 **EuRoC, replayed over DDS.** A RustDDS player published MH_02's stereo
 images and IMU to `visloc_vio_node` and `visloc_map_localize_node` (map

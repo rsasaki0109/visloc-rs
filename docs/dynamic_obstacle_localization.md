@@ -723,6 +723,9 @@ run once):
 visloc_map_localize_node --map runs/map -p fusion:=true -r odom2:=wheel/odom \
   -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068 \
   -p fusion_source_check_s:=1 -p init_warmup_s:=3 -p fusion_seed_s:=3
+# the same, as a profile:
+visloc_map_localize_node --map runs/map -p profile:=dynamic_indoor -p fusion:=true \
+  -r odom2:=wheel/odom -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068
 ```
 
 The nodes track the offline runs (default a4: 70.2 cm offline; last row:
@@ -792,6 +795,37 @@ behind walls included) still break the VIO on a4, as above. A detector at
 the camera rate would cost about a quarter of a Xeon core (`yolox_nano`)
 for nothing measurable; on a Jetson its GPU could run it, but the budget is
 better left to the VIO. The detector stays out of the recommended setting.
+
+## The recommended setting on real data: OpenLORIS office
+
+RNE tuned the setting; OpenLORIS-Scene office (a real wheeled robot, a
+T265, few people) checks it on real data. The maps were built from
+office1-1 and office1-2 (`basalt_euroc_online_slam_demo --smooth-features
+1.5 --detector-quality 0.003`, SLAM ATE 2.8 / 1.7 cm). office1-6 and
+office1-7 were localized against them, with fixes every 5th frame. Map
+pose RMSE (max), fixed alignment:
+
+| Setting | office1-6 → 1-1 | office1-7 → 1-2 |
+| --- | --- | --- |
+| VIO + map (`--vio`) | **3.13 (4.3)** cm | 2.59 (4.6) |
+| wheels + map (`--odometry`) | 5.31 (7.9) | 5.95 (14.5) |
+| VIO + wheels (`--fusion`) | 4.18 (5.2) | 1.84 (3.5) |
+| ... + source check | 4.18 (5.2) | 1.84 (3.5) |
+| recommended (+ map prior, warm-up, seed 3) | 4.23 (5.2) | **1.77 (3.4)** |
+
+- **The parts for people do nothing here, and cost nothing.** The source
+  check left no edge out on either run, and seeding and the warm-up moved
+  the RMSE by 0.07 cm at most. With nobody dragging the VIO there is nothing
+  for them to catch.
+- **Fusing the wheels is what changes the result, in both directions.**
+  It helps office1-7 (2.59 to 1.84 cm) and costs office1-6 1 cm (3.13 to
+  4.18). These wheels alone are 5–6 cm off, twice the VIO. The fusion
+  weighs them by the `wheel` noise model, which fits RNE's simulated wheels
+  better than these.
+- With people about (cafe, above) all settings stay within 17.6–21 cm, the
+  map's own error. So the gains measured in RNE (people right in front of
+  the robot) are not yet shown on real data. That needs a real crowded run
+  with a better map (OpenLORIS market, 41.5 GB, did not fit here).
 
 ## A map built with people walking about (F3)
 
