@@ -251,6 +251,9 @@ struct Args {
     /// Zero velocity in the VIO window on every frame until the IMU first
     /// shows motion (a static start).
     vio_static_hold: bool,
+    /// Rebuild the VIO and restart the correction after this many full
+    /// fixes in a row are rejected (0: never).
+    vio_recover: usize,
     /// 1-sigma of `--vio-map-prior`: position (m), yaw and roll/pitch (deg;
     /// 0 leaves roll/pitch to the IMU). By default 0.03 m, 1 deg, 1 deg, and
     /// no roll/pitch for `--mono` without `--vio-wheel-velocity`: there a
@@ -399,6 +402,7 @@ impl Args {
             vio_map_prior: false,
             vio_wheel_velocity: false,
             vio_static_hold: false,
+            vio_recover: 0,
             mono: false,
             map_prior_sigma: None,
             localize_every: 1,
@@ -504,6 +508,7 @@ impl Args {
                 "--vio-map-prior" => args.vio_map_prior = true,
                 "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
                 "--vio-static-hold" => args.vio_static_hold = true,
+                "--vio-recover" => args.vio_recover = number(&option, value()?)?,
                 "--mono" => args.mono = true,
                 "--map-prior-sigma" => {
                     let text = value()?;
@@ -1376,6 +1381,8 @@ struct CorrectedRun {
     map_poses: usize,
     frames: usize,
     outcomes: std::collections::BTreeMap<&'static str, usize>,
+    /// The last localization attempt's outcome (`outcome_name`, "-" for none).
+    last_outcome: Option<&'static str>,
     started: Instant,
 }
 
@@ -1441,6 +1448,7 @@ impl CorrectedRun {
             map_poses: 0,
             frames: 0,
             outcomes: std::collections::BTreeMap::new(),
+            last_outcome: None,
             started: Instant::now(),
         }
     }
@@ -1566,6 +1574,7 @@ impl CorrectedRun {
                 (None, None) => "-",
             };
             *self.outcomes.entry(outcome).or_default() += 1;
+            self.last_outcome = Some(outcome);
             csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
             inlier_rows(&mut self.inliers, timestamp_ns, &attempt);
             diagnostics_row(
@@ -1688,6 +1697,7 @@ impl CorrectedRun {
                 };
             }
             *self.outcomes.entry(outcome).or_default() += 1;
+            self.last_outcome = Some(outcome);
             csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
             diagnostics_row(
                 &mut self.diagnostics,
@@ -1792,9 +1802,20 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let mut static_hold = args
         .vio_static_hold
         .then(visloc_basalt::vio::StaticHold::default);
+    let mut rejected_in_a_row = 0usize;
+    let mut restart_vio = false;
     for index in 0..frames {
-        let frame = dataset.frame(index)?;
+        let mut frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
+        if restart_vio {
+            // Map recovery: a fresh estimator, levelled by this frame's last
+            // IMU sample.
+            restart_vio = false;
+            adapter =
+                BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
+            adapter.estimator.set_lean_marg_data(true);
+            frame.initialization_imu = frame.imu.last().copied();
+        }
         let held = match static_hold.as_mut() {
             Some(hold) => {
                 let was_holding = hold.moved_at_ns().is_none();
@@ -1847,7 +1868,23 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
             );
         }
         let fixes_before = run.fixes_used;
+        run.last_outcome = None;
         run.frame(localizer, timestamp_ns, &sources, image.as_ref())?;
+        if args.vio_recover > 0 {
+            match run.last_outcome {
+                Some("rejected") => rejected_in_a_row += 1,
+                Some("accepted" | "initialized" | "reset" | "pending") => rejected_in_a_row = 0,
+                _ => {}
+            }
+            if rejected_in_a_row >= args.vio_recover {
+                eprintln!(
+                    "VIO recovery at {since_s:.2} s: {rejected_in_a_row} fixes rejected in a row"
+                );
+                rejected_in_a_row = 0;
+                restart_vio = true;
+                run.correction = OdomCorrection::new(run.correction.config().clone());
+            }
+        }
         let frame_id = adapter
             .estimator
             .active_frames()
