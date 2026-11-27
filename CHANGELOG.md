@@ -21,6 +21,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `--fusion-seed-s S` (`basalt_euroc_localize_demo`) / `fusion_seed_s`
+  (`visloc_map_localize_node`), off by default: the fusion starts from the
+  warm-up's fixes that agree under one odometry, not one fix, so the source
+  check leaves a VIO that is wrong from the start out at once. RNE a2 / a4
+  (people ahead): worst pose 37 / 22 cm -> 4.5 / 14 cm, RMSE 2.4 / 2.8 ->
+  1.9 / 2.2 cm; neutral on OpenLORIS cafe.
 - `visloc_map_localize_node -p fusion:=true` (off by default) subscribes
   `odom2`, a second odometry (e.g. the wheels next to the VIO on `odom`),
   and fuses both with the fixes in `MapFusion`; `map_pose` and
