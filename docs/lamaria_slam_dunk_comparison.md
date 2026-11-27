@@ -517,3 +517,9 @@ The VIO has the first eighth's scale right; the online windows put it 1.5 % high
 240 s get their online estimate from short windows (0:60, 0:120, … 0:480 keyframes) solved while the gyroscope's
 bias walk is ten times looser (`--gyro-rw-warmup`). The experiments above all shared the default chain's online
 windows; `--ba-experiment-online-args` gives an experiment its own (run 46053914300: without the warm-up walk).
+
+**Stereo pairs in an 8 px band** (run 46035882190): R_11 −0.98, R_12 +1.41, R_13 −1.18, sequence_1_19 +3.18,
+1_20 −0.35, 2_11 +0.13, 2_12 +2.37, 3_17 +0.49, 3_18 −0.77, 4_10 0, 4_11 0, 5_11 0.00, 5_12 +0.49: mean +0.37,
+6 of 13 gain, just under the rule; repeated in run 46076486039. **The online windows without the gyroscope's
+warm-up walk** (run 46053914300, four recordings): R_11 −0.84, R_12 −1.12, sequence_1_19 +1.00, 1_20 −0.36, and
+the online first eighth of sequence_1_20 stays 1.0148: not the warm-up.
