@@ -2366,7 +2366,8 @@ def cmd_online(a):
     t0 = time.time()
     states = None  # each window starts from the biases and velocities of the one before
     with open(base + "_windows.log", "w") as log:
-        for k1 in list(range(min(a.step, n), n, a.step)) + [n]:
+        first = min(max(a.step, getattr(a, "first_window", 0)), n)
+        for k1 in [first] + [k for k in range(first + a.step, n, a.step)] + ([n] if first < n else []):
             w = copy.copy(a)
             w.init_states = states
             w.kf_range, w.vio, w.save_states = f"{max(0, k1 - a.window)}:{k1}", a.out, False
@@ -2905,6 +2906,8 @@ def main():
     solve_args(o)
     o.add_argument("--window", type=int, default=480, help="keyframes per window (the most recent ones)")
     o.add_argument("--step", type=int, default=60, help="keyframes between two windows")
+    o.add_argument("--first-window", type=int, default=0,
+                   help="keyframes of the first window (default: --step), solved from the VIO at once")
     o.set_defaults(iterations=10, ext_segments=2)  # per window
     fl = sub.add_parser("flow", help="link consecutive keyframes by Lucas-Kanade flow through the frames between "
                         "them (after match)")
