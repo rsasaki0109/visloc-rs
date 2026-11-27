@@ -674,6 +674,8 @@ def cmd_match(a):
     pairs = []
     n = len(kf_ns)
     for ka in range(n):
+        if a.stereo:  # the two cameras of one keyframe: the rig's fixed baseline, whatever their axes' angle
+            pairs.append((ka, 0, ka, 1, a.tau0))
         for d in offs:
             kb = ka + d
             if kb >= n:
@@ -2700,6 +2702,9 @@ def main():
     m.add_argument("--calib", required=True, help="Basalt calibration (pinhole)")
     m.add_argument("--offsets", default="1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256",
                    help="keyframe offsets to match")
+    m.add_argument("--stereo", action="store_true",
+                   help="also match the two cameras of each keyframe (their axes are 75.2 degrees apart, beyond "
+                        "--max-axis-angle), within the epipolar band of the rig's calibration")
     m.add_argument("--max-axis-angle", type=float, default=75.0, help="skip pairs whose optical axes differ more")
     m.add_argument("--max-dist", type=float, default=200.0, help="skip pairs whose cameras are further apart (m)")
     m.add_argument("--tau0", type=float, default=2.0, help="epipolar band (px) at offset 0")
