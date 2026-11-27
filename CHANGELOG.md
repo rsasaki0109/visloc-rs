@@ -16,6 +16,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `MapFusionConfig::source_check_window_s` (`basalt_euroc_localize_demo
+  --fusion-source-check-s S`, off by default): at every fix, an odometry
+  whose motion disagrees with the fixes' is left out of the fusion while it
+  does. On RNE with people walking just ahead of the robot, VIO + wheels +
+  map prior + warm-up goes from 5.2 / 3.7 cm to 2.4 / 2.8 cm and stays at
+  1.0-1.1 cm where the camera is clear; neutral on OpenLORIS cafe
+  (`docs/dynamic_obstacle_localization.md`).
 - The wgpu trainer takes a depth prior, as gsplat-cuda's: `gsplat_train
   --depth-prior DIR --depth-weight W --depth-every N` trains the rendered
   depth against `DIR/<image name>.bin`, e.g. `000000.jpg.bin` (a LiDAR scan projected into each

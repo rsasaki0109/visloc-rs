@@ -596,7 +596,9 @@ RNE's example 113 now also exports the base's wheel odometry
 true planar motion per step with a 2 % distance and 3 % turn error plus
 noise, as the visloc-rs simulator's wheels. For the episodes rendered
 before that, `scripts/rne/rne_wheel_odom_from_gt.py` computes the same from
-their `gt.tum`. The body is the IMU turned −90° about x
+their `gt.tum`: an `a2` episode rendered again with RNE `main` (`71bfc94`)
+gives a byte-identical `gt.tum`, and its exported `wheel_odom.tum` is
+byte-identical to the script's. The body is the IMU turned −90° about x
 (`--imu-from-body 0,0,0,-0.7071068,0,0,0.7071068`).
 
 Map pose RMSE (max), with the map fixes at 10 Hz:
@@ -620,9 +622,52 @@ Map pose RMSE (max), with the map fixes at 10 Hz:
   agree.
 - For a wheeled robot among people, then: **wheel odometry + map is the
   robust choice; VIO + wheels + map prior + warm-up the accurate one where
-  the camera is not crowded.** Telling the two apart online (the VIO
-  disagreeing with both the wheels and the fixes) and dropping the VIO from
-  the fusion while it does is the next lever.
+  the camera is not crowded.** The source check below tells the two apart
+  online and gets both.
+
+## Leaving a runaway odometry out of the fusion (source check)
+
+`MapFusionConfig::source_check_window_s` (`--fusion-source-check-s S`; off
+by default): at every fix, each odometry's motion since the oldest fix of
+the last S seconds is compared with the motion between the two fixes. A
+source that disagrees (more than 5 cm + 10 % of the distance, or 3°) has
+its edges over that stretch left out of the graph, stays out of the nodes
+added until a check finds it agreeing again, and is not used for the
+current pose; the sources that agree carry it. If every source disagrees,
+none is left out (the fixes are more likely wrong). It acts one fix
+interval late: until the next fix nothing tells the sources apart.
+
+**RNE** (map pose RMSE (max); `--vio --fusion --odometry wheel_odom.tum`,
+fixes at 10 Hz, `--fusion-source-check-s 1`):
+
+| Setting | q0 | q4 | q6 | a2 | a4 |
+| --- | --- | --- | --- | --- | --- |
+| wheels + map | 2.4 (3.7) cm | 2.4 (3.7) | 2.4 (4.8) | 2.5 (4.2) | 2.6 (4.1) |
+| VIO + wheels, `--vio-map-prior --init-warmup-s 3` | 1.1 (1.9) | 1.0 (3.1) | 1.1 (2.2) | 5.2 (60) | 3.7 (24) |
+| **the same with the source check** | **1.1 (1.9)** | **1.0 (3.1)** | **1.1 (2.2)** | **2.4 (37)** | **2.8 (22)** |
+| VIO edges left out (of ~2,700) | 0 | 0 | 0 | 5 | 129 |
+
+With the check, one setting is the best or level with the best on every
+query: 1.0–1.1 cm where the camera is clear (the wheels alone: 2.4), and
+2.4–2.8 cm with people just ahead of the robot (the wheels alone: 2.5–2.6).
+The worst poses left (22–37 cm) are a few frames after the start (a2: 6
+poses over 8 cm, all within 0.3 s; a4: 19).
+
+**OpenLORIS cafe** (real robot, people about; VIO + wheels + map, fixed
+alignment; the map's own 17–19 cm error dominates):
+
+| Setting | Map pose RMSE (max) | Edges left out (VIO, wheels) |
+| --- | --- | --- |
+| VIO + map (above) | 18.1 (33.9) cm | — |
+| VIO + wheels | 20.0 (35.5) | — |
+| VIO + wheels, source check | **17.6** (34.3) | 6, 213 |
+| VIO + wheels, `--vio-map-prior --init-warmup-s 3` | 21.0 (37.6) | — |
+| the same with the source check | 20.7 (36.8) | 0, 6 |
+
+No harm on real data. Here it is mostly the **wheels** that it leaves out:
+the café run turns 915° in 90 s, and the wheels slip in turns (see the
+OpenLORIS page). The check leaves out whichever source the fixes
+contradict.
 
 ## On ROS 2
 
