@@ -6,6 +6,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- `visloc_map_localize_node` with `fusion:=true`: a fusion carried more
+  than 15 cm off (fixes missing while the VIO ran off) never took a fix
+  again. It now restarts from three consecutive rejected fixes that move as
+  one odometry did. RNE a4 with a lighter VIO config on one core: 7.6 m ->
+  4.4 cm.
 - `visloc_vio_node` with `mono:=true` now matches the offline demo. It reads
   `config.vio_init_accel_average_s` and starts the stream as the EuRoC
   reader does, levelled by the mean IMU sample over that span instead of
