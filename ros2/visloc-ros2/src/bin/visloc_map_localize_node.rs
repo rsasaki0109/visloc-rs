@@ -43,6 +43,10 @@ USAGE:
   visloc_map_localize_node --map <dir from basalt_euroc_online_slam_demo --save-map> [options]
 
 PARAMETERS (--name value  or  -p name:=value):
+  profile                default, or dynamic_indoor: the defaults measured with people
+                         about (docs/dynamic_obstacle_localization.md): init_warmup_s 3
+                         and, with fusion, fusion_source_check_s 1 and fusion_seed_s 3;
+                         parameters given explicitly still win                [default]
   map                    saved map directory (map.json, sparse/, landmark_descriptors.txt) [required]
   camera                 Basalt camera index of the image topic                       [0]
   map_frame              frame of the map; parent of the published map -> odom       [map]
@@ -176,7 +180,20 @@ fn run() -> Result<(), String> {
     if !(initial_window_s >= 0.0 && initial_window_s.is_finite()) {
         return Err("initial_window_s must be a non-negative number".into());
     }
+    // A profile only changes defaults; a parameter given explicitly wins.
+    let dynamic_indoor = match args.string_or("profile", "default").as_str() {
+        "default" => false,
+        "dynamic_indoor" => true,
+        other => {
+            return Err(format!(
+                "profile: expected default or dynamic_indoor, got {other:?}"
+            ))
+        }
+    };
     let mut options = MapLocalizeOptions::default();
+    if dynamic_indoor {
+        options.correction.init_warmup_s = 3.0;
+    }
     options.min_inliers = args.parsed_or("min_inliers", options.min_inliers)?;
     options.weak_min_inliers = args.parsed_or("weak_min_inliers", options.weak_min_inliers)?;
     options.correction.weak_gate_m =
@@ -195,6 +212,10 @@ fn run() -> Result<(), String> {
     }
     if args.flag("fusion", false)? {
         let mut fusion = FusionOptions::default();
+        if dynamic_indoor {
+            fusion.source_check_window_s = 1.0;
+            fusion.seed_s = 3.0;
+        }
         if let Some(name) = args.string("odom_noise") {
             fusion.noise = odometry_noise_by_name(&name).map_err(|e| format!("odom_noise: {e}"))?;
         }
@@ -228,6 +249,19 @@ fn run() -> Result<(), String> {
                 return Err(format!("{key} needs fusion:=true"));
             }
         }
+    }
+    if dynamic_indoor {
+        eprintln!(
+            "visloc_map_localize_node: profile dynamic_indoor: init_warmup_s {}{}",
+            options.correction.init_warmup_s,
+            options.fusion.as_ref().map_or_else(
+                || ", no fusion (set fusion:=true with a wheel odometry on odom2)".to_owned(),
+                |f| format!(
+                    ", fusion_source_check_s {}, fusion_seed_s {}",
+                    f.source_check_window_s, f.seed_s
+                ),
+            ),
+        );
     }
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
     let ratio = args.parsed_or("ratio", options.ratio.unwrap_or(0.0))?;
