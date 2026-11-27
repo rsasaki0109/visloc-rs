@@ -24,12 +24,13 @@ use visloc_ros2::dds::{
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_fix_msg, map_pose_msg,
-    map_to_odom_tf, odom_fix_msg, se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions,
-    MapLocalizer, Matching, OdomCorrector, OdomLookup,
+    map_to_odom_tf, odom_fix_msg, odometry_noise_by_name, se3_from_csv, se3_from_ros, Fix,
+    FixEvent, FusionOptions, ImageCadence, MapLocalizeOptions, MapLocalizer, Matching,
+    OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Int32, Odometry, PointCloud2, PoseWithCovarianceStamped,
-    TfMessage, Time,
+    DiagnosticArray, Header, Image, Int32, KeyValue, Odometry, PointCloud2,
+    PoseWithCovarianceStamped, TfMessage, Time,
 };
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::queue::DropOldestQueue;
@@ -70,6 +71,16 @@ PARAMETERS (--name value  or  -p name:=value):
   init_warmup_s          before the first map pose, wait this long, then start from the
                          strongest fixes (most inliers) that agree, not the first two
                          that agree; 3 was measured on TUM walking                 [0: off]
+  fusion                 also subscribe odom2 (a second odometry, e.g. wheels next to a
+                         VIO on odom) and fuse both with the fixes in a sliding-window
+                         pose graph; the map pose follows the fusion             [false]
+  odom_noise             drift model of odom: vio, wheel or legged                    [vio]
+  odom2_noise            ... of odom2                                                 [wheel]
+  odom2_body_offset      odom2's body in odom's body frame (T_body_body2),
+                         tx,ty,tz,qx,qy,qz,qw, e.g. a VIO's IMU <- base_link   [identity]
+  fusion_source_check_s  leave out an odometry whose motion over the last this many
+                         seconds disagrees with the fixes (people dragging a VIO)
+                         while it does; 1 was measured in RNE                    [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -110,7 +121,7 @@ TOPICS (remap with --remap from=to or -r from:=to):
        its header.frame_id and child_frame_id name the odometry and body frames),
        /tf_static (tf2_msgs/TFMessage, with extrinsics tf), odom_reset (std_msgs/Int32,
        from visloc_vio_node: when it changes, the odometry restarted in a new frame, and
-       the map pose starts over from new fixes)
+       the map pose starts over from new fixes), odom2 (nav_msgs/Odometry, with fusion)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, after two agreeing fixes), map_fix (geometry_msgs/
        PoseWithCovarianceStamped, the body pose of each image localized with min_inliers,
@@ -178,6 +189,37 @@ fn run() -> Result<(), String> {
     if !(options.correction.init_warmup_s >= 0.0 && options.correction.init_warmup_s.is_finite()) {
         return Err("init_warmup_s must be a non-negative number".into());
     }
+    if args.flag("fusion", false)? {
+        let mut fusion = FusionOptions::default();
+        if let Some(name) = args.string("odom_noise") {
+            fusion.noise = odometry_noise_by_name(&name).map_err(|e| format!("odom_noise: {e}"))?;
+        }
+        if let Some(name) = args.string("odom2_noise") {
+            fusion.second_noise =
+                odometry_noise_by_name(&name).map_err(|e| format!("odom2_noise: {e}"))?;
+        }
+        if let Some(text) = args.string("odom2_body_offset") {
+            fusion.body_from_second_body =
+                se3_from_csv(&text).map_err(|e| format!("odom2_body_offset: {e}"))?;
+        }
+        fusion.source_check_window_s =
+            args.parsed_or("fusion_source_check_s", fusion.source_check_window_s)?;
+        if !(fusion.source_check_window_s >= 0.0 && fusion.source_check_window_s.is_finite()) {
+            return Err("fusion_source_check_s must be a non-negative number".into());
+        }
+        options.fusion = Some(fusion);
+    } else {
+        for key in [
+            "odom_noise",
+            "odom2_noise",
+            "odom2_body_offset",
+            "fusion_source_check_s",
+        ] {
+            if args.string(key).is_some() {
+                return Err(format!("{key} needs fusion:=true"));
+            }
+        }
+    }
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
     let ratio = args.parsed_or("ratio", options.ratio.unwrap_or(0.0))?;
     options.ratio = (ratio > 0.0).then_some(ratio);
@@ -218,6 +260,7 @@ fn run() -> Result<(), String> {
     let namespace = args.namespace.clone().unwrap_or_else(|| "/".into());
     let image_topic = args.topic("image");
     let odom_topic = args.topic("odom");
+    let odom2_topic = args.topic("odom2");
     let tf_topic = args.topic("/tf");
     let tf_static_topic = args.topic("/tf_static");
     let pose_topic = args.topic("map_pose");
@@ -260,6 +303,11 @@ fn run() -> Result<(), String> {
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let image_sub = ros.subscription::<Image>(&image_topic, sensor_qos(2))?;
     let odom_sub = ros.subscription::<Odometry>(&odom_topic, sensor_qos(50))?;
+    let odom2_sub = options
+        .fusion
+        .is_some()
+        .then(|| ros.subscription::<Odometry>(&odom2_topic, sensor_qos(50)))
+        .transpose()?;
     let odom_reset_sub = ros.subscription::<Int32>(&odom_reset_topic, latched_qos(1))?;
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
@@ -354,6 +402,18 @@ fn run() -> Result<(), String> {
         })?;
     }
 
+    // The second odometry, for the fusion: only buffered; the first one's
+    // messages publish.
+    if let Some(odom2_sub) = odom2_sub {
+        let core = Arc::clone(&core);
+        spawn_receiver("odom2-rx", odom2_sub, move |msg: Odometry| {
+            core.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .add_second_odom(msg.header.stamp.to_nanos(), se3_from_ros(&msg.pose.pose));
+        })?;
+        eprintln!("visloc_map_localize_node: fusing {odom_topic} and {odom2_topic} with the fixes");
+    }
+
     // Images: keep every N-th (every M-th until the first map pose, while
     // images localize), localize the latest one when free.
     let queue = Arc::new(DropOldestQueue::<Image>::new(image_queue));
@@ -441,7 +501,7 @@ fn run() -> Result<(), String> {
         if fix.matching == Some(Matching::Projection) {
             projected += 1;
         }
-        let (map_pose, pending) = {
+        let (map_pose, pending, excluded) = {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
                 localized += 1;
@@ -470,13 +530,22 @@ fn run() -> Result<(), String> {
                     core.add_scored_weak_fix(stamp.to_nanos(), map_from_body.clone(), fix.inliers);
                 log_events(&events);
             }
-            (core.latest_map_pose(), core.pending_fixes())
+            (
+                core.latest_map_pose(),
+                core.pending_fixes(),
+                core.fusion_excluded_edges(),
+            )
         };
-        publish_logged(
-            &diagnostics_pub,
-            map_diagnostics_msg(&fix, stamp, map_pose.as_ref(), pending, &node_name),
-            "diagnostics",
-        );
+        let mut diagnostics =
+            map_diagnostics_msg(&fix, stamp, map_pose.as_ref(), pending, &node_name);
+        if let (Some(excluded), Some(status)) = (&excluded, diagnostics.status.first_mut()) {
+            // Per odometry (odom, odom2): stretches the source check left out.
+            status.values.push(KeyValue {
+                key: "fusion_excluded_edges".into(),
+                value: format!("{excluded:?}"),
+            });
+        }
+        publish_logged(&diagnostics_pub, diagnostics, "diagnostics");
         if attempts <= 3 || attempts.is_multiple_of(50) {
             eprintln!(
                 "visloc_map_localize_node: attempt {attempts}: localized={} inliers={} \

@@ -688,6 +688,46 @@ They were measured offline on TUM and Bonn only (above): use them where
 the map covers the robot's surroundings, and check them on the robot before
 relying on them.
 
+**Fusion and the source check** (`fusion:=true`, off by default): the node
+subscribes `odom2` (e.g. the wheels; `odom` stays the VIO) and fuses both
+with the fixes as the demo's `--fusion`. One difference: once the fusion
+has a pose, it takes every full fix within 15 cm / 3 deg of **its own**
+prediction, whatever the correction of `odom` made of it. The demo passes
+only the fixes that correction accepted, which fails when `odom` runs away:
+the correction then turns the good fixes away (a unit test: VIO running 3x
+too fast after 6 s, wheels fine, 1.04 m off with the demo's rule, under
+5 cm with the node's). In RNE, where the source check catches the VIO
+within a fix interval, the node's rule costs a little offline:
+
+| `--fusion-source-check-s 1`, VIO + wheels | q0 | q4 | q6 | a2 | a4 |
+| --- | --- | --- | --- | --- | --- |
+| + map prior + warm-up, demo's rule (above) | 1.1 (1.9) | 1.0 (3.1) | 1.1 (2.2) | 2.4 (37) | 2.8 (22) |
+| the same, node's rule | 1.1 (1.9) | 1.0 (3.1) | 1.1 (2.2) | 3.2 (37) | 3.4 (23) |
+| no map prior or warm-up, demo's rule | 1.4 (4.3) | 2.7 (14) | 1.7 (6.5) | 11.2 (90) | 11.0 (105) |
+| the same, node's rule | 1.5 (5.3) | 2.8 (14) | 1.7 (6.4) | 11.1 (90) | 12.3 (105) |
+
+The demo keeps its rule (the numbers above stay as they are).
+
+**Through the nodes over DDS** (`euroc_dds_replay --rate 0.2 --odometry
+wheel_odom.tum` into `visloc_vio_node` and `visloc_map_localize_node
+localize_every:=2`, one 4-core machine; `map_pose` scored as above; each
+run once):
+
+| Setting | q0 | a4 |
+| --- | --- | --- |
+| default (VIO only) | 2.2 (7.0) cm | 71.6 (353) |
+| `fusion:=true fusion_source_check_s:=1` | 1.8 (6.4) | 11.2 (92) |
+| ... + `init_warmup_s:=3`, VIO `map_prior:=true` | **1.1 (2.4)** | **3.6 (31)** |
+
+```bash
+visloc_map_localize_node --map runs/map -p fusion:=true -r odom2:=wheel/odom \
+  -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068 \
+  -p fusion_source_check_s:=1 -p init_warmup_s:=3
+```
+
+The nodes track the offline runs (default a4: 70.2 cm offline; last row:
+3.4 / 1.1 offline with the node's rule).
+
 ## Not yet measured
 
 - The Gazebo actors and masks: not started.

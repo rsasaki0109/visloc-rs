@@ -41,8 +41,8 @@ use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
     apply_inlier_spread_gate, AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates,
-    FixOutcome, ImageGrid, LocalizationConfig, LocalizationPipeline, OdomCorrection,
-    OdomCorrectionConfig, PackedDescriptors,
+    FixOutcome, ImageGrid, LocalizationConfig, LocalizationPipeline, MapFusion, MapFusionConfig,
+    OdomCorrection, OdomCorrectionConfig, OdometryNoise, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -126,6 +126,10 @@ pub struct MapLocalizeOptions {
     /// (`docs/dynamic_obstacle_localization.md`). 0, the default: off.
     pub min_inlier_cells: u32,
     pub correction: OdomCorrectionConfig,
+    /// With a second odometry (e.g. wheels beside a VIO): fuse both with
+    /// the fixes in `MapFusion` and publish its map pose. `None`, the
+    /// default: the correction of the one odometry, as before.
+    pub fusion: Option<FusionOptions>,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
     /// Largest gap between two odometry poses a fix may be interpolated in.
@@ -161,6 +165,7 @@ impl Default for MapLocalizeOptions {
             extra_descriptors: 0,
             min_inlier_cells: 0,
             correction: OdomCorrectionConfig::default(),
+            fusion: None,
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
             position_stddev_m: 0.03,
@@ -799,6 +804,73 @@ pub struct MapPose {
     pub metres_since_fix: f64,
 }
 
+/// With fusion: a fix within this distance and angle of the fusion's own
+/// prediction is used (the same gate as the correction's at a fresh fix).
+const FUSION_GATE_M: f64 = 0.15;
+const FUSION_GATE_DEG: f64 = 3.0;
+
+/// The second odometry fused with the first and the fixes
+/// ([`MapLocalizeOptions::fusion`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FusionOptions {
+    /// Drift models of the first odometry (the `odom` topic) and the second.
+    pub noise: OdometryNoise,
+    pub second_noise: OdometryNoise,
+    /// The second odometry's body in the first's body frame
+    /// (`T_body_body2`, e.g. a VIO's IMU <- `base_link`).
+    pub body_from_second_body: SE3,
+    /// `MapFusionConfig::source_check_window_s`: leave out an odometry that
+    /// disagrees with the fixes while it does (0: off).
+    pub source_check_window_s: f64,
+}
+
+impl Default for FusionOptions {
+    fn default() -> Self {
+        Self {
+            noise: OdometryNoise::VIO,
+            second_noise: OdometryNoise::WHEEL,
+            body_from_second_body: SE3::identity(),
+            source_check_window_s: 0.0,
+        }
+    }
+}
+
+/// An odometry drift model by name: `vio`, `wheel` or `legged`.
+pub fn odometry_noise_by_name(name: &str) -> Result<OdometryNoise, String> {
+    match name {
+        "vio" => Ok(OdometryNoise::VIO),
+        "wheel" => Ok(OdometryNoise::WHEEL),
+        "legged" => Ok(OdometryNoise::LEGGED),
+        other => Err(format!(
+            "unknown odometry noise {other:?} (vio, wheel, legged)"
+        )),
+    }
+}
+
+/// A pose from `tx,ty,tz,qx,qy,qz,qw`.
+pub fn se3_from_csv(text: &str) -> Result<SE3, String> {
+    let numbers = text
+        .split(',')
+        .map(|field| {
+            field
+                .trim()
+                .parse::<f64>()
+                .map_err(|e| format!("{field:?}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [tx, ty, tz, qx, qy, qz, qw] = numbers[..] else {
+        return Err(format!("expected tx,ty,tz,qx,qy,qz,qw, got {text:?}"));
+    };
+    let q = NaQuaternion::new(qw, qx, qy, qz);
+    if !(q.norm() > 1e-9 && q.norm().is_finite()) {
+        return Err(format!("not a rotation: {text:?}"));
+    }
+    Ok(SE3::new(
+        UnitQuaternion::from_quaternion(q),
+        Vector3::new(tx, ty, tz),
+    ))
+}
+
 /// What happened to one fix in [`OdomCorrector`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FixEvent {
@@ -835,6 +907,11 @@ pub struct OdomCorrector {
     /// odometry frame (through the correction right after it): stamp and
     /// pose. Drained by [`Self::take_odom_fixes`].
     odom_fixes: Vec<(i64, SE3)>,
+    /// With [`MapLocalizeOptions::fusion`]: the fusion, fed the fixes the
+    /// correction uses, and the second odometry, as poses of the first
+    /// odometry's body in the second odometry's frame.
+    fusion: Option<MapFusion>,
+    second: OdomBuffer,
 }
 
 impl OdomCorrector {
@@ -852,7 +929,45 @@ impl OdomCorrector {
             carried: None,
             reset_guess: None,
             odom_fixes: Vec::new(),
+            fusion: options.fusion.as_ref().map(|fusion| {
+                MapFusion::new(MapFusionConfig {
+                    sources: vec![fusion.noise, fusion.second_noise],
+                    source_check_window_s: fusion.source_check_window_s,
+                    ..MapFusionConfig::default()
+                })
+            }),
+            second: OdomBuffer::new(options.odom_history_s),
         }
+    }
+
+    /// Adds a pose of the second odometry's body in its frame (with
+    /// [`MapLocalizeOptions::fusion`]; ignored otherwise).
+    pub fn add_second_odom(&mut self, stamp_ns: i64, second_from_second_body: SE3) {
+        let Some(fusion) = &self.options.fusion else {
+            return;
+        };
+        self.second.push(
+            stamp_ns,
+            second_from_second_body.compose(&fusion.body_from_second_body.inverse()),
+        );
+    }
+
+    /// Per odometry (the first, the second): the stretches the fusion's
+    /// source check has left out; `None` without fusion.
+    pub fn fusion_excluded_edges(&self) -> Option<Vec<u64>> {
+        self.fusion
+            .as_ref()
+            .map(|fusion| fusion.excluded_edges().to_vec())
+    }
+
+    /// Both odometries' poses of the first one's body at `stamp_ns`, as the
+    /// fusion takes them; the second is `None` where it has no pose yet.
+    fn fusion_sources(&self, stamp_ns: i64, first: &SE3) -> [Option<SE3>; 2] {
+        let second = match self.second.lookup(stamp_ns, self.max_gap_ns) {
+            OdomLookup::Pose(pose) => Some(pose),
+            _ => None,
+        };
+        [Some(first.clone()), second]
     }
 
     /// The fixes the correction used (initialized from, accepted, or reset
@@ -952,6 +1067,12 @@ impl OdomCorrector {
     ) -> (Vec<FixEvent>, Option<MapPose>) {
         self.odom.push(stamp_ns, odom_from_body.clone());
         self.correction.observe_odometry(stamp_ns, &odom_from_body);
+        if self.fusion.is_some() {
+            let sources = self.fusion_sources(stamp_ns, &odom_from_body);
+            if let Some(fusion) = &mut self.fusion {
+                fusion.observe(stamp_ns, &sources);
+            }
+        }
         if self.reset_guess.is_none() {
             if let Some((_, map_from_body)) = &self.carried {
                 self.reset_guess = Some((
@@ -1024,8 +1145,15 @@ impl OdomCorrector {
     /// The newest odometry pose in the map frame, once the correction is set.
     pub fn latest_map_pose(&self) -> Option<MapPose> {
         let (stamp_ns, odom_from_body) = self.latest_odom.as_ref()?;
-        let map_from_odom = self.correction.map_from_odom()?;
+        let mut map_from_odom = self.correction.map_from_odom()?;
         let (fix_ns, fix_position) = self.correction.last_fix()?;
+        // With fusion, its pose; map -> odom follows from it, so the
+        // published transform and pose agree.
+        if let Some(fused) = self.fusion.as_ref().and_then(|fusion| {
+            fusion.map_from_body(&self.fusion_sources(*stamp_ns, odom_from_body))
+        }) {
+            map_from_odom = fused.compose(&odom_from_body.inverse());
+        }
         Some(MapPose {
             stamp_ns: *stamp_ns,
             map_from_body: map_from_odom.compose(odom_from_body),
@@ -1063,6 +1191,32 @@ impl OdomCorrector {
                             score,
                         )
                     };
+                    if !weak && self.fusion.is_some() {
+                        let sources = self.fusion_sources(stamp_ns, &odom_from_body);
+                        if let Some(fusion) = &mut self.fusion {
+                            // The fusion starts (and restarts) with the
+                            // correction; once running it gates fixes
+                            // against its own prediction, not the first
+                            // odometry's correction, which a runaway first
+                            // odometry would turn against good fixes.
+                            if matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset)
+                                || (!fusion.is_set() && outcome == FixOutcome::Accepted)
+                            {
+                                fusion.reset();
+                                fusion.add_fix(stamp_ns, &map_from_body, &sources);
+                            } else if fusion.is_set() {
+                                let close = fusion.map_from_body(&sources).is_some_and(|p| {
+                                    (p.translation - map_from_body.translation).norm()
+                                        <= FUSION_GATE_M
+                                        && p.rotation.angle_to(&map_from_body.rotation)
+                                            <= FUSION_GATE_DEG.to_radians()
+                                });
+                                if close {
+                                    fusion.add_fix(stamp_ns, &map_from_body, &sources);
+                                }
+                            }
+                        }
+                    }
                     if matches!(
                         outcome,
                         FixOutcome::Initialized | FixOutcome::Accepted | FixOutcome::Reset
@@ -1313,6 +1467,96 @@ mod tests {
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.7),
             Vector3::new(2.0, -1.0, 0.3),
         )
+    }
+
+    /// A body driving a circle of 2 m radius at 0.5 rad/s, in the map.
+    fn circle(t: f64) -> SE3 {
+        SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.5 * t + std::f64::consts::FRAC_PI_2),
+            Vector3::new(2.0 * (0.5 * t).cos(), 2.0 * (0.5 * t).sin(), 0.0),
+        )
+    }
+
+    /// The first odometry (a VIO) runs off at 6 s, reporting three times the
+    /// true motion; the second (wheels, mounted elsewhere on the body) and
+    /// the fixes (10 Hz) are exact. The worst map pose error from 7 s on.
+    fn runaway_first_odometry(fusion: Option<FusionOptions>) -> f64 {
+        let body_from_wheels = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
+            Vector3::new(0.2, -0.1, -0.4),
+        );
+        let fusion = fusion.map(|mut fusion| {
+            fusion.body_from_second_body = body_from_wheels.clone();
+            fusion
+        });
+        let mut core = OdomCorrector::new(&MapLocalizeOptions {
+            fusion,
+            ..MapLocalizeOptions::default()
+        });
+        let odom_from_map = offset().inverse();
+        let wheels_from_map = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, -1.1),
+            Vector3::new(-4.0, 3.0, 0.0),
+        );
+        let mut vio = odom_from_map.compose(&circle(0.0));
+        let mut worst: f64 = 0.0;
+        for k in 0..300_i64 {
+            let t = k as f64 * 0.05;
+            let stamp = k * 50 * MS;
+            if k > 0 {
+                let mut step = circle(t - 0.05).inverse().compose(&circle(t));
+                if t >= 6.0 {
+                    step.translation *= 3.0;
+                }
+                vio = vio.compose(&step);
+            }
+            core.add_second_odom(
+                stamp,
+                wheels_from_map
+                    .compose(&circle(t))
+                    .compose(&body_from_wheels),
+            );
+            core.add_odom(stamp, vio.clone());
+            if k % 2 == 0 {
+                core.add_fix(stamp, circle(t));
+            }
+            if t >= 7.0 {
+                let map_pose = core.latest_map_pose().expect("set");
+                worst =
+                    worst.max((map_pose.map_from_body.translation - circle(t).translation).norm());
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn fusing_a_second_odometry_with_the_source_check_outlasts_a_runaway_first() {
+        let alone = runaway_first_odometry(None);
+        let fused = runaway_first_odometry(Some(FusionOptions {
+            source_check_window_s: 1.0,
+            ..FusionOptions::default()
+        }));
+        assert!(alone > 0.1, "the correction of the VIO alone: {alone}");
+        assert!(fused < 0.05, "fused with the wheels, source check: {fused}");
+    }
+
+    #[test]
+    fn fusion_parameters_parse() {
+        assert_eq!(odometry_noise_by_name("wheel"), Ok(OdometryNoise::WHEEL));
+        assert!(odometry_noise_by_name("legs").is_err());
+        let pose = se3_from_csv("1, 2, 3, 0, 0, 0.7071068, 0.7071068").expect("pose");
+        assert!((pose.translation - Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-12);
+        assert!((pose.rotation.angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!(se3_from_csv("1,2,3").is_err());
+        assert!(se3_from_csv("0,0,0,0,0,0,0").is_err());
+    }
+
+    #[test]
+    fn without_fusion_the_second_odometry_is_ignored() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        core.add_second_odom(0, pose(1.0, 0.2));
+        assert!(core.fusion_excluded_edges().is_none());
+        assert_eq!(core.second.lookup(0, 1), OdomLookup::NotYet);
     }
 
     /// Used fixes come back as odometry-frame body poses, once each; pending
