@@ -107,6 +107,7 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `map_prior_stddev_m`, `map_prior_stddev_deg` | `0.03`, `1.0` | 1-sigma position and yaw of such a prior |
 | `map_prior_tilt_stddev_deg` | `1.0`; `0` with `mono` and no `wheel_velocity` | 1-sigma roll/pitch of such a prior (`0`: none); a monocular VIO without wheel velocity can run away under a roll/pitch prior that is a degree off its gravity |
 | `static_hold` | `false` | from a static start, a zero velocity on every frame until the IMU first shows motion (`visloc_basalt::vio::StaticHold`); with `map_prior` and `mono`, stops the run-away the map prior can start while the robot stands still (OpenLORIS-Scene office1-7: 14 m to 2.88 cm, [docs/odometry_fusion.md](../../docs/odometry_fusion.md#a-static-start-held-still)) |
+| `map_recover` | `false` | reset the estimator when `visloc_map_localize_node` asks on `vio_recover` (its `recover_after`): full fixes rejected in a row show the VIO left the map. With `map_prior` and `static_hold`, no OpenLORIS-Scene office replay diverges ([docs/odometry_fusion.md](../../docs/odometry_fusion.md#recovery-a-vio-the-map-shows-to-be-wrong)) |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -485,6 +486,7 @@ measurements behind the defaults.
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
 | `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the correction's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
+| `recover_after` | `0` (off) | after this many full fixes in a row are rejected without agreeing among themselves (the odometry left the map), bump `vio_recover` (`std_msgs/Int32`, transient-local) for `visloc_vio_node`'s `map_recover`; 3 matches the correction's own reset, which takes rejected fixes that do agree |
 | `dump_inliers` | none | CSV file: each accepted localization's PnP inliers, `timestamp_ns,x,y,landmark_id` (the image keypoint in pixels and the map landmark it matched), for visualizations |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |

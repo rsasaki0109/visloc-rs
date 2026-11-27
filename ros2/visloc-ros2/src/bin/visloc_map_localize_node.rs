@@ -104,6 +104,9 @@ PARAMETERS (--name value  or  -p name:=value):
   projection_fresh_m     ... and this many metres of odometry travel from it          [2]
   reset_prior_s          after a VIO reset (odom_reset), the last map pose is the
                          prior for this many seconds (0: off)                         [30]
+  recover_after          after this many full fixes in a row are rejected without
+                         agreeing (the odometry left the map), ask the VIO to reset
+                         on vio_recover (0: off)                                      [0]
   dump_inliers           CSV file: each accepted localization's PnP inliers,
                          `timestamp_ns,x,y,landmark_id` (keypoint px), for visualizations [none]
   prior_wait_ms          longest wait for the odometry of an image's stamp before
@@ -136,7 +139,9 @@ TOPICS (remap with --remap from=to or -r from:=to):
        e.g. for visloc_wheel_calibration_node), odom_fix (geometry_msgs/
        PoseWithCovarianceStamped, each fix the correction used, as the body pose it
        implies in the odometry frame; for visloc_vio_node's map_prior), /diagnostics (diagnostic_msgs/DiagnosticArray),
-       map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local)
+       map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local),
+       with recover_after: vio_recover (std_msgs/Int32, recoveries asked for so far, for
+       visloc_vio_node's map_recover; transient-local)
 ";
 
 fn main() {
@@ -280,6 +285,7 @@ fn run() -> Result<(), String> {
     options.projection_fresh_m =
         args.parsed_or("projection_fresh_m", options.projection_fresh_m)?;
     options.reset_prior_s = args.parsed_or("reset_prior_s", options.reset_prior_s)?;
+    options.recover_after = args.parsed_or("recover_after", options.recover_after)?;
     let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
     let prior_radius = args.parsed_or("prior_radius", 0.0f64)?;
@@ -312,6 +318,7 @@ fn run() -> Result<(), String> {
     let diagnostics_topic = args.topic("/diagnostics");
     let map_cloud_topic = args.topic("map_cloud");
     let odom_reset_topic = args.topic("odom_reset");
+    let vio_recover_topic = args.topic("vio_recover");
     args.finish()?;
 
     let map = load_basalt_map(&map_dir)?;
@@ -355,6 +362,13 @@ fn run() -> Result<(), String> {
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let fix_pub = ros.publisher::<PoseWithCovarianceStamped>(&fix_topic, output_qos(10))?;
+    let recover_pub = (options.recover_after > 0)
+        .then(|| ros.publisher::<Int32>(&vio_recover_topic, latched_qos(1)))
+        .transpose()?;
+    if let Some(publisher) = &recover_pub {
+        publish_logged(publisher, Int32 { data: 0 }, "vio_recover");
+    }
+    let mut recoveries_published = 0u32;
     let odom_fix_pub =
         ros.publisher::<PoseWithCovarianceStamped>(&odom_fix_topic, output_qos(10))?;
     let diagnostics_pub = ros.publisher::<DiagnosticArray>(&diagnostics_topic, output_qos(10))?;
@@ -568,6 +582,24 @@ fn run() -> Result<(), String> {
                 let events =
                     core.add_scored_fix(stamp.to_nanos(), map_from_body.clone(), fix.inliers);
                 log_events(&events);
+                if let Some(publisher) = &recover_pub {
+                    let requests = core.recovery_requests();
+                    if requests > recoveries_published {
+                        recoveries_published = requests;
+                        eprintln!(
+                            "visloc_map_localize_node: {} full fixes rejected in a row; the \
+                             odometry left the map, asking the VIO to reset ({requests})",
+                            options.recover_after
+                        );
+                        publish_logged(
+                            publisher,
+                            Int32 {
+                                data: i32::try_from(requests).unwrap_or(i32::MAX),
+                            },
+                            "vio_recover",
+                        );
+                    }
+                }
             } else if let Some(map_from_body) = &fix.weak_map_from_body {
                 let events =
                     core.add_scored_weak_fix(stamp.to_nanos(), map_from_body.clone(), fix.inliers);
