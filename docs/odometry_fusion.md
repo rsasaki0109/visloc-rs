@@ -249,6 +249,41 @@ localizes more images, but with A + weak gate it gave 1.65 and 2.99 cm
 (every 5th image), no better. With the wheels (C) the monocular VIO is
 stable: A + C gives 1.40 and 5.82 cm above.
 
+**Why office1-7's images stop matching, and maps that keep them.** On 34
+view pairs of office1-7 and office1-2 that the ground truth puts within
+10 cm and 5° of each other (after office1-7's first 2.5 s), OpenCV's ORB
+finds geometrically consistent matches (affine RANSAC, 5 px) in proportion
+to how many keypoints it keeps: 22 per pair at 375 keypoints (15% of the
+pairs reach 30), 38 at 750, 60 at 1500, 98 at 3000 (all pairs). SuperPoint
+gives 108 with mutual nearest neighbours and 180 with LightGlue. The
+localizer keeps about 420 keypoints there (its detector's 1% quality level
+stops it short of the 800-point budget), and gets the 16 matches of the 375
+row. A map built with blurred images, a 0.1% quality level and a 2000-point
+budget (`--smooth-features 1.5 --detector-quality 0.001`, with
+`config.mapper_detection_num_points` 2000; the localizer follows the map)
+keeps about 1200 keypoints per image and, after office1-7's first 2.5 s,
+accepts 138 of the 141 fixes tried before 26 s (the old mono map: none).
+The fixes are 2.1 to 2.3 cm off. The last 14 s still localize poorly (8 of
+68). Without the blur, the same quality and budget accept 79 of 141.
+
+With that map (RMSE in cm, monocular VIO, no wheels; the number is how
+often an image is localized):
+
+| | VIO + correction | A, every 3rd / 4th / 5th / 6th / 10th | A + weak gate, every 4th / 5th / 6th / 10th | ROS 2 replay, A / A + weak gate |
+|---|---:|---|---|---|
+| office1-7 | 27.6 | 2.61 / 2.61 / 2.76 / 2.85 / **147 m** | 2.65 / 2.82 / 2.91 / **147 m** | **14 m / 18 m** |
+| office1-6 | 6.57 | | 1.71 (every 5th) | 1.75 (A + weak gate) |
+
+Where it holds, office1-7 is held at 2.6 to 2.9 cm, but the map prior can
+still make a monocular VIO run away at the start. Every 10th image and the
+ROS 2 replay diverge within the first 2 s: three fixes are accepted, the
+VIO's speed passes 1 m/s, and every later fix is rejected. The VIO alone,
+at every 10th image, stays below 1.3 m/s. Holding the map prior back for
+the first seconds (a prototype, not kept) removes the divergence on
+office1-7 at any delay of 2 to 5 s (2.54 to 2.83 cm), but costs office1-6:
+1.71 cm becomes 4.95, 2.80 and 2.99 cm with 2, 3 and 5 s. That trade is
+not settled by two sequences.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
