@@ -1004,6 +1004,13 @@ def main() -> int:
                     (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
                     run([python, estimate_converter, "--in-tum", before,
                          "--out-estimate", args.log_dir / seq / "ba2_estimate.txt"], check=True)
+                if args.log_dir:  # the chain's seed and its online windows, to see where a drift starts
+                    for source, name in ((chain_args[1], "vio_estimate.txt"),
+                                         (ba_work / "online.tum", "online_estimate.txt")):
+                        if Path(source).is_file():
+                            (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
+                            run([python, estimate_converter, "--in-tum", source,
+                                 "--out-estimate", args.log_dir / seq / name], check=True)
 
             run([python, estimate_converter, "--in-tum", trajectory,
                  "--out-estimate", estimate], check=True)
