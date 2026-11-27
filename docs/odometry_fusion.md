@@ -284,6 +284,28 @@ office1-7 at any delay of 2 to 5 s (2.54 to 2.83 cm), but costs office1-6:
 1.71 cm becomes 4.95, 2.80 and 2.99 cm with 2, 3 and 5 s. That trade is
 not settled by two sequences.
 
+What starts the run-away is the map prior's position sigma (3 cm). While
+the robot is nearly still (its first 2.5 s, under 0.13 m/s), the monocular
+VIO observes little of its velocity, and each fix pulls its position by a
+few centimetres. At every 10th image the VIO then accelerates steadily from
+0.4 s, to 1.6 m/s at 3 s; the VIO alone stays at 0.03 to 0.14 m/s. The fixes
+fall further behind it (10, 27, 51 cm), pass the gate, are rejected, and so
+stop reaching the prior. On that run a 10 cm sigma holds (3.14 cm) and 30 cm
+holds less tightly (9.66 cm); a 10° yaw sigma does not help (84 m). Across
+the other cases, a 10 cm position sigma:
+
+| | office1-7 | office1-6 |
+|---|---|---|
+| blurred dense map, every 3rd / 4th / 5th / 6th image | 2.69 / 2.44 / 2.98 / 3.16 | 1.66 (3rd), 1.91 (5th), 2.00 (10th) |
+| — ROS 2 replay | 44 cm (3 cm sigma: 14 m) | 2.41 |
+| old mono map, A, every 3rd / 4th / 5th | 87 / 133 / 130 (3 cm sigma: 10, 209, 31) | 3.45 (5th; 3 cm sigma: 2.71) |
+| old mono map, A + weak gate, every 5th | 19.5 (3 cm sigma: 1.96) | 1.37 (1.32) |
+
+It removes the divergence where fixes keep coming, but where they are
+sparse (office1-7 on the old map) the 3 cm prior held the VIO better. The
+default stays at 3 cm; a prior that knows when the VIO's velocity is
+unobserved would be the fix.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
