@@ -99,6 +99,11 @@ pub struct MapLocalizeOptions {
     /// gates as any; 0 turns it off (map-wide matching only until the
     /// correction is set again).
     pub reset_prior_s: f64,
+    /// After this many full fixes in a row are rejected (without agreeing
+    /// among themselves, which resets the correction instead), the odometry
+    /// has left the map: [`OdomCorrector::recovery_requests`] counts one
+    /// more, for the VIO to reset. 0 (the default) turns it off.
+    pub recover_after: usize,
     /// Threads of the map-wide search (and of the radius search).
     pub match_threads: usize,
     /// With a prior whose projection search fails: match only the landmarks
@@ -159,6 +164,7 @@ impl Default for MapLocalizeOptions {
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
             reset_prior_s: 30.0,
+            recover_after: 0,
             match_threads: 1,
             prior_radius_m: None,
             no_global_with_prior: false,
@@ -929,6 +935,10 @@ pub struct OdomCorrector {
     fusion_rejected: Vec<(i64, SE3, [Option<SE3>; 2])>,
     /// With [`FusionOptions::seed_s`]: the full fixes of that span.
     recent_fixes: VecDeque<(i64, SE3, [Option<SE3>; 2])>,
+    /// Full fixes rejected in a row, and recoveries asked for so far
+    /// ([`MapLocalizeOptions::recover_after`]); the count survives resets.
+    rejected_in_a_row: usize,
+    recovery_requests: u32,
 }
 
 impl OdomCorrector {
@@ -956,7 +966,16 @@ impl OdomCorrector {
             second: OdomBuffer::new(options.odom_history_s),
             fusion_rejected: Vec::new(),
             recent_fixes: VecDeque::new(),
+            rejected_in_a_row: 0,
+            recovery_requests: 0,
         }
+    }
+
+    /// How many times the odometry was found to have left the map
+    /// ([`MapLocalizeOptions::recover_after`] full fixes rejected in a row).
+    /// The VIO node resets its estimator when this grows.
+    pub const fn recovery_requests(&self) -> u32 {
+        self.recovery_requests
     }
 
     /// Adds a pose of the second odometry's body in its frame (with
@@ -1006,12 +1025,14 @@ impl OdomCorrector {
     /// (`MapLocalizeOptions::reset_prior_s`), through further resets too.
     pub fn reset(&mut self) {
         let latest_fix_ns = self.latest_fix_ns;
+        let recovery_requests = self.recovery_requests;
         let carried = self
             .latest_map_pose()
             .map(|pose| (pose.stamp_ns, pose.map_from_body))
             .or_else(|| self.carried.clone());
         *self = Self::new(&self.options);
         self.latest_fix_ns = latest_fix_ns;
+        self.recovery_requests = recovery_requests;
         if self.options.reset_prior_s > 0.0 {
             self.carried = carried;
         }
@@ -1306,6 +1327,20 @@ impl OdomCorrector {
                         if let Some(map_from_odom) = self.correction.map_from_odom() {
                             self.odom_fixes
                                 .push((stamp_ns, map_from_odom.inverse().compose(&map_from_body)));
+                        }
+                    }
+                    if !weak && self.options.recover_after > 0 {
+                        match outcome {
+                            FixOutcome::Rejected => self.rejected_in_a_row += 1,
+                            FixOutcome::Accepted
+                            | FixOutcome::Initialized
+                            | FixOutcome::Reset
+                            | FixOutcome::Pending => self.rejected_in_a_row = 0,
+                            FixOutcome::Unused => {}
+                        }
+                        if self.rejected_in_a_row >= self.options.recover_after {
+                            self.rejected_in_a_row = 0;
+                            self.recovery_requests += 1;
                         }
                     }
                     events.push(FixEvent::Applied { stamp_ns, outcome });
@@ -1777,6 +1812,47 @@ mod tests {
         assert!((run(0.0) - 0.2).abs() < 1e-6);
         // A 1 s warm-up starts from the strong, exact ones.
         assert!(run(1.0) < 1e-9);
+    }
+
+    #[test]
+    fn fixes_rejected_in_a_row_ask_for_a_recovery() {
+        let options = MapLocalizeOptions {
+            recover_after: 3,
+            ..MapLocalizeOptions::default()
+        };
+        let mut core = OdomCorrector::new(&options);
+        // Set the correction on a still odometry.
+        let still = pose(0.5, 0.2);
+        for i in 0..4_i64 {
+            core.add_odom(i * 100 * MS, still.clone());
+            core.add_fix(i * 100 * MS, offset().compose(&still));
+        }
+        assert!(core.is_set());
+        assert_eq!(core.recovery_requests(), 0);
+        // The odometry runs away: each fix falls further behind it, so the
+        // rejected fixes do not agree with each other.
+        for k in 1..=3_i64 {
+            let i = 3 + k;
+            let runaway = pose(0.5 + 0.5 * (k * k) as f64, 0.2);
+            core.add_odom(i * 100 * MS, runaway);
+            core.add_fix(i * 100 * MS, offset().compose(&still));
+        }
+        assert_eq!(core.recovery_requests(), 1);
+        // A reset (the VIO's, on odom_reset) keeps the count.
+        core.reset();
+        assert_eq!(core.recovery_requests(), 1);
+        // Off by default.
+        let mut quiet = OdomCorrector::new(&MapLocalizeOptions::default());
+        for i in 0..4_i64 {
+            quiet.add_odom(i * 100 * MS, still.clone());
+            quiet.add_fix(i * 100 * MS, offset().compose(&still));
+        }
+        for k in 1..=5_i64 {
+            let i = 3 + k;
+            quiet.add_odom(i * 100 * MS, pose(0.5 + 0.5 * (k * k) as f64, 0.2));
+            quiet.add_fix(i * 100 * MS, offset().compose(&still));
+        }
+        assert_eq!(quiet.recovery_requests(), 0);
     }
 
     #[test]

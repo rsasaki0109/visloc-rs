@@ -36,7 +36,7 @@
 //! twist becomes a body-velocity factor on every frame.
 
 use std::process;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -132,6 +132,9 @@ PARAMETERS (--name value  or  -p name:=value):
   map_prior_stddev_deg   1-sigma yaw of such a prior (deg)                        [1.0]
   map_prior_tilt_stddev_deg  1-sigma roll/pitch of such a prior (deg; 0: none)
                          [1.0; 0 with mono and no wheel_velocity]
+  map_recover            reset the estimator when visloc_map_localize_node asks on
+                         vio_recover (its recover_after: fixes rejected in a row
+                         show the VIO left the map)                             [false]
   static_hold            from a static start, a zero velocity on every frame until
                          the IMU first shows motion; stops a monocular VIO's
                          start-up run-away under map_prior                      [false]
@@ -359,6 +362,7 @@ fn run() -> Result<(), String> {
     let wheel_velocity = args.flag("wheel_velocity", false)?;
     let map_prior = args.flag("map_prior", false)?;
     let static_hold = args.flag("static_hold", false)?;
+    let map_recover = args.flag("map_recover", false)?;
     let external_noise = ExternalNoise {
         fix_position_m: args.parsed_or("map_prior_stddev_m", 0.03f64)?,
         fix_orientation_rad: args.parsed_or("map_prior_stddev_deg", 1.0f64)?.to_radians(),
@@ -423,6 +427,7 @@ fn run() -> Result<(), String> {
     let map_path_topic = args.topic("map_path");
     let odom_reset_topic = args.topic("odom_reset");
     let odom_fix_topic = args.topic("odom_fix");
+    let vio_recover_topic = args.topic("vio_recover");
     args.finish()?;
 
     let read = |path: &str| {
@@ -548,6 +553,22 @@ fn run() -> Result<(), String> {
         )?;
         eprintln!("visloc_vio_node: map fixes on {odom_fix_topic} go into the estimator");
     }
+    // Map recovery: resets visloc_map_localize_node asked for on vio_recover
+    // (a count that grows; its first value is the baseline).
+    let recover_requests = Arc::new(AtomicU64::new(0));
+    if map_recover {
+        let sub = ros.subscription::<Int32>(&vio_recover_topic, latched_qos(1))?;
+        let requests = Arc::clone(&recover_requests);
+        let mut last = None::<i32>;
+        spawn_receiver("vio-recover-rx", sub, move |msg: Int32| {
+            if last.is_some_and(|count| msg.data > count) {
+                requests.fetch_add(1, Ordering::SeqCst);
+            }
+            last = Some(msg.data);
+        })?;
+        eprintln!("visloc_vio_node: resets the estimator on requests on {vio_recover_topic}");
+    }
+    let mut recover_handled = 0u64;
     let mut tf_static = (base_frame.is_some() || wheel_odom_topic.is_some())
         .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
         .transpose()?;
@@ -829,6 +850,15 @@ fn run() -> Result<(), String> {
         estimator_time.add(started.elapsed());
         // Why the estimator must start over, if it must.
         let mut estimated = estimated;
+        let requested = recover_requests.load(Ordering::SeqCst);
+        if requested > recover_handled {
+            recover_handled = requested;
+            estimated = Err(VioError {
+                message: "visloc_map_localize_node: the map's fixes show the VIO left the map"
+                    .into(),
+                needs_reset: true,
+            });
+        }
         if let Ok((estimate, _)) = &estimated {
             *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
             observations.add(estimate.observation_count);
