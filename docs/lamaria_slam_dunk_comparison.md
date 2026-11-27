@@ -468,7 +468,8 @@ chain on the thirteen; low light runs the default chain there):
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | SIFT contrast threshold 0.006, edge threshold 12 (run 45930831921) | −2.82 | −1.82 | −0.29 | +1.04 | +2.84 | +0.05 | +4.32 | −2.08 | +0.17 | +2.13 | −0.08 | +0.27 |
 | Revisits within 25 m (run 45930840980) | −0.25 | −1.76 | +0.14 | −0.08 | +0.14 | +0.10 | 0 | −0.08 | −0.01 | 0 | 0 | −0.14 |
-| Same-keyframe stereo matches (run 45945971578, 5_12 pending) | −0.64 | +1.19 | −0.59 | +2.16 | −2.47 | +1.18 | +0.25 | +0.78 | −1.24 | −0.03 | | |
+| Same-keyframe stereo matches, 2 px band (run 45945971578) | −0.64 | +1.19 | −0.59 | +2.16 | −2.47 | +1.18 | +0.25 | +0.78 | −1.24 | −0.03 | +0.16 | +0.06 |
+| The same and cross-camera pairs up to 100° apart (run 45962473835) | +0.85 | −1.43 | +0.69 | +0.37 | −2.49 | +0.31 | −0.98 | +1.57 | +0.36 | −1.79 | −0.08 | −0.20 |
 
 None is kept. The stereo pairs add 52,000 matches on sequence_1_20 (26 a keyframe): the rectified crops of the
 two cameras overlap by about 40°, against about 77° on the raw fisheye images SLAM Dunk matches, and the
@@ -482,3 +483,14 @@ the accelerometer, and on sequence_1_20 the pass's accelerometer bias moves from
 loosens the gyroscope's bias walk tenfold over the first 300 s (`--gyro-rw-warmup`) but not the
 accelerometer's; `solve --accel-rw-warmup` does it for the accelerometer: runs 45983348355 (×10) and
 45983360728 (×30).
+
+**Neither warm-up is it.** The accelerometer's bias walk ×10 over the first 300 s (run 45983348355): mean −0.11,
+4 gain; ×30 (run 45983360728): +0.27, carried by sequence_2_12 (+7.0), 4 gain. On sequence_1_20 the first eighth's
+scale stays 1.0138 and 1.0148 against SLAM Dunk; the walk lets the first bias run to 0.1–0.3 m/s² instead. Without
+the gyroscope's warm-up walk (run 46008754071, `--gyro-rw-warmup 1`) it is 1.0123. The scale profile moves with
+neither the front end nor the IMU's walks: the pass keeps the scale it starts from. (SLAM Dunk's full and baseline
+runs differ by 0.5 % over the same eighth.)
+
+**The stereo band was too narrow.** The pass turns cam0 by 0.46°, 0.32° and 0.19° about its axes from the factory
+rig on sequence_1_20 and cam1 by under 0.07°: the factory stereo rotation is about 0.6° off, 2.5 px at the pinhole
+focal length, beyond the 2 px band of the stereo pairs above. `match --stereo-tau 8` (run 46035882190).
