@@ -494,3 +494,26 @@ runs differ by 0.5 % over the same eighth.)
 **The stereo band was too narrow.** The pass turns cam0 by 0.46°, 0.32° and 0.19° about its axes from the factory
 rig on sequence_1_20 and cam1 by under 0.07°: the factory stereo rotation is about 0.6° off, 2.5 px at the pinhole
 focal length, beyond the 2 px band of the stereo pairs above. `match --stereo-tau 8` (run 46035882190).
+
+**The raw fisheye would not bring the stereo.** On R_11_5cp (frame 1100033591250), SIFT on the raw fisheye
+images (the SLAM streams of a sparse VRS copy, 0.94 GB) mapped to the pinhole images by inverting the radial
+model lands within 0.35 px (median) of the same keypoints in the ASL pinhole images, and 23–31 % of the raw
+keypoints lie beyond the pinhole crop (more than 57.5° off axis). But cam0–cam1 matches within the rig's epipolar
+band stay few: 61 on the pinhole images and 95 on the raw ones (2 px; 31 and 75 at 8 px, where more candidates fail
+the ratio test). The overlap is at the two images' edges, where the views differ most. With `--stereo-tau 8` the
+pass gets 122,000 stereo matches on sequence_1_20 (60 a keyframe; run 46035882190).
+
+**Where the scale drift starts.** The chain's stages on sequence_1_20 (run 46043552632, which keeps the VIO and
+online-window trajectories), local scale per eighth against SLAM Dunk's baseline:
+
+| Stage | CP | First eighth | Second | … | Last |
+|---|---:|---:|---:|---|---:|
+| VIO (the seed) | 33.55 | 0.9994 | 0.9678 | … | 0.9699 |
+| Online windows | 81.62 | **1.0153** | 1.0012 | … | 0.9900 |
+| Pass with the revisits (ba2) | 86.21 | 1.0114 | 1.0063 | … | 0.9988 |
+| Chain (after the rematch) | 87.38 | 1.0126 | 1.0054 | … | 0.9988 |
+
+The VIO has the first eighth's scale right; the online windows put it 1.5 % high and the pass keeps it. The first
+240 s get their online estimate from short windows (0:60, 0:120, … 0:480 keyframes) solved while the gyroscope's
+bias walk is ten times looser (`--gyro-rw-warmup`). The experiments above all shared the default chain's online
+windows; `--ba-experiment-online-args` gives an experiment its own (run 46053914300: without the warm-up walk).
