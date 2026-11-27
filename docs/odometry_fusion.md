@@ -393,9 +393,25 @@ With the static hold, the same matrix (RMSE in cm; recoveries in brackets):
 - **It needs fixes to see the run-away.** On office1-7 with the old mono map
   the fixes stop after 2 s, the recovery never fires, and the map prior
   stays at about 32 cm.
-- **The ROS 2 nodes do not have it yet.** There the rejections happen in
-  `visloc_map_localize_node` and the VIO in `visloc_vio_node`, so the map
-  node would have to ask the VIO node to reset.
+- **Through ROS 2**, `visloc_map_localize_node -p recover_after:=3` counts
+  the rejections and bumps `vio_recover` (`std_msgs/Int32`);
+  `visloc_vio_node -p map_recover:=true` resets on each bump through its
+  lost-tracking reset path, which publishes `odom_reset` as before, so the
+  map node's correction starts over too. DDS replays at 0.2x, `map_prior`
+  and `static_hold` on (RMSE; recoveries in brackets):
+
+  | | without recovery | with recovery |
+  |---|---:|---:|
+  | office1-1 → 1-6 map | 317–437 m | **15.1 cm (4)** |
+  | office1-3 → 1-1 map | 145 cm | **9.17 cm (1)** |
+  | office1-7 → 1-2 map | 2.88 cm | 2.22 cm (0) |
+  | office1-6 → 1-1 map | 1.93 cm | 1.85 cm (0) |
+  | office1-2 → 1-7 map | 3.43 cm | 3.31 cm (0) |
+
+  It fires only on the two that ran away (office1-3 runs away through ROS 2
+  but not offline: the node localizes the frames it gets through, not every
+  5th), and no replay diverges. The others differ by replay-to-replay
+  variation; no recovery fired there.
 
 ## What was adopted
 
