@@ -793,6 +793,53 @@ the camera rate would cost about a quarter of a Xeon core (`yolox_nano`)
 for nothing measurable; on a Jetson its GPU could run it, but the budget is
 better left to the VIO. The detector stays out of the recommended setting.
 
+## A map built with people walking about (F3)
+
+RNE example 113 rendered the mapping run again with six walkers wandering
+the scene (`RNE_WALKERS`, `RNE_WALKER_COUNT=6`, the same path as the clean
+map), and `basalt_euroc_online_slam_demo --save-map` built a map from it:
+5,362 landmarks over 296 keyframes (the clean map: 4,724 over 220), SLAM
+ATE 1.8 cm (clean: 1.3). The queries were localized against each map
+(map pose RMSE (max); fixes: RMSE (max)):
+
+| Query | Setting | Clean map | Map with walkers |
+| --- | --- | --- | --- |
+| q0 | default (`--vio`) | 2.1 (7.9) cm; fixes 2.5 (38) | 2.1 (6.9); fixes 1.3 (6.5) |
+| q4 | default | 4.7 (20) | 3.2 (21) |
+| a4 | default | 70.2 (373) | 80.4 (373) |
+| q0 | best (fusion, source check, warm-up, map prior, seed 3) | 1.1 (1.8) | 1.0 (4.0) |
+| q4 | best | 1.1 (3.1) | 1.1 (4.8) |
+| a4 | best | 2.2 (14) | 2.5 (13) |
+
+**No harm from people who keep walking.** Their points do not hold still
+across the keyframes, so they are not triangulated into the map: counting
+the landmarks within 0.45 m of a walker at an image that observes them
+finds 9.9 % in the map with walkers, but 15 % in the clean map against the
+same walker positions. The count catches background points near a
+walker's path, not points on walkers. The worst fixes (38–55 cm, against
+either map) are turned away by the correction or the fusion.
+
+**People standing still while the map is built**, gone at localization
+(a queue, a person at a desk): RNE example 113's `RNE_WALKER_MODE=still`
+has the six walkers stand at the start of their lines all episode. That map
+has 5,065 landmarks over 246 keyframes (SLAM ATE 1.3 cm), and 747 within
+0.45 m of a standing person at an observing image, against 599 in the clean
+map for the same positions: about 150 landmarks (3 %) on the people.
+
+| Query | Setting | Clean map | Map with people standing |
+| --- | --- | --- | --- |
+| q0 | default | 2.1 (7.9) cm; fixes 2.5 (38) | 2.1 (7.9); fixes 1.2 (5.2) |
+| q4 | default | 4.7 (20) | 4.6 (20) |
+| a4 | default | 70.2 (373) | 70.1 (373) |
+| q0 | best | 1.1 (1.8) | 1.1 (2.0) |
+| q4 | best | 1.1 (3.1) | 1.2 (3.2) |
+| a4 | best | 2.2 (14) | 2.1 (14) |
+
+**No harm either.** The people's 3 % of the landmarks, now matched to empty
+space, are outvoted in the RANSAC by the background around them. Six
+people standing at the side of a room is the case measured; a map made
+mostly of people (a crowded hall) is not.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon
@@ -846,6 +893,7 @@ from 3.6 to 2.0 cm, q0 1.1 both.
 - The Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware (on a Xeon core: above).
 - **The nodes on a Jetson:** estimated above from a slowed Xeon only.
+- **A map made mostly of people** (a crowded hall while it was mapped): six standing people were measured above.
 
 ## Targets (proposed with Phase 0)
 
