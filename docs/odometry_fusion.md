@@ -284,6 +284,76 @@ office1-7 at any delay of 2 to 5 s (2.54 to 2.83 cm), but costs office1-6:
 1.71 cm becomes 4.95, 2.80 and 2.99 cm with 2, 3 and 5 s. That trade is
 not settled by two sequences.
 
+What starts the run-away is the map prior's position sigma (3 cm). While
+the robot is nearly still (its first 2.5 s, under 0.13 m/s), the monocular
+VIO observes little of its velocity, and each fix pulls its position by a
+few centimetres. At every 10th image the VIO then accelerates steadily from
+0.4 s, to 1.6 m/s at 3 s; the VIO alone stays at 0.03 to 0.14 m/s. The fixes
+fall further behind it (10, 27, 51 cm), pass the gate, are rejected, and so
+stop reaching the prior. On that run a 10 cm sigma holds (3.14 cm) and 30 cm
+holds less tightly (9.66 cm); a 10° yaw sigma does not help (84 m). Across
+the other cases, a 10 cm position sigma:
+
+| | office1-7 | office1-6 |
+|---|---|---|
+| blurred dense map, every 3rd / 4th / 5th / 6th image | 2.69 / 2.44 / 2.98 / 3.16 | 1.66 (3rd), 1.91 (5th), 2.00 (10th) |
+| — ROS 2 replay | 44 cm (3 cm sigma: 14 m) | 2.41 |
+| old mono map, A, every 3rd / 4th / 5th | 87 / 133 / 130 (3 cm sigma: 10, 209, 31) | 3.45 (5th; 3 cm sigma: 2.71) |
+| old mono map, A + weak gate, every 5th | 19.5 (3 cm sigma: 1.96) | 1.37 (1.32) |
+
+It removes the divergence where fixes keep coming, but where they are
+sparse (office1-7 on the old map) the 3 cm prior held the VIO better. The
+default stays at 3 cm; a prior that knows when the VIO's velocity is
+unobserved would be the fix.
+
+## A static start, held still
+
+From a static start a robot cannot move before it accelerates or turns,
+and both show in the IMU. Until they do, a zero velocity is a measurement,
+not a guess, and it is exactly what the monocular VIO lacks while the map
+prior pulls it. `visloc_basalt::vio::StaticHold` watches the IMU from the
+first sample and, until the first gyro sample over 0.05 rad/s or the first
+0.1 s mean accelerometer sample 0.15 m/s² from the first full window's,
+puts a zero velocity (0.01 m/s) into the VIO window on every frame. Then it
+stops for good: a robot driving straight at a constant speed is as quiet to
+the IMU as one standing still (on these sessions, moving windows go as low
+as 0.015 rad/s and 0.06 m/s² against 0.014–0.21 and 0.05–0.28 standing),
+so a hold later on could pin a moving robot.
+`basalt_euroc_localize_demo --vio-static-hold` and `visloc_vio_node`'s
+`static_hold` use it; both are opt-in.
+
+Its motion onset agrees with the ground truth's (the first 0.2 s with a
+median speed over 3 cm/s): office1-6 3.57 s (ground truth 3.50 s), office1-7
+1.87 s (2.37 s); office1-1, 1-2 and 1-3 move from their first frame, and the
+hold ends there at once.
+
+Monocular VIO, no wheels, map prior (A), the blurred dense maps; five
+query → map pairs across days (office1-6 → 1-1, 1-7 → 1-2, 1-1 → 1-6,
+1-2 → 1-7, 1-3 → 1-1). RMSE in cm, without → with the hold:
+
+| | every 3rd image | 5th | 10th | A + weak gate (5th) |
+|---|---|---|---|---|
+| office1-7 | 2.61 → 2.21 | 2.76 → 3.86 | **147 m → 2.31** | 2.82 → 4.13 |
+| office1-6 | 1.68 → 1.65 | 1.71 → 1.74 | 1.82 → 2.14 | 1.71 → 1.74 |
+| office1-1, 1-2, 1-3 | unchanged | unchanged | unchanged | unchanged |
+
+Through the ROS 2 nodes (DDS replay at 0.2x), `map_prior` with
+`static_hold`: office1-7 14 m → **2.88 cm**, and with `weak_gate_m` 0.05
+18 m → **2.93 cm**; office1-6 1.93 cm.
+
+- **It removes the start-up run-away**, offline and through ROS 2, where
+  the robot starts still (office1-6 and office1-7).
+- **It is not free:** on office1-7 at every 5th image it costs 1.1 to 1.3 cm,
+  and on office1-6 at every 10th 0.3 cm.
+- **office1-1 against office1-6's map still diverges at every 10th image**
+  (231 m offline; 317 to 437 m through ROS 2 with or without the hold). It
+  moves from its first frame, so this is another failure: the map prior
+  with few fixes while moving (7 priors through ROS 2).
+- On the old mono maps, where office1-7 has fixes only in its first 2 s,
+  the map prior is unstable with or without the hold (10 cm to 209 m), and
+  the hold can land it worse (12 km at every 3rd image). Use it with a map
+  that keeps localizing.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
