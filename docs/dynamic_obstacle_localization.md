@@ -819,9 +819,26 @@ same walker positions. The count catches background points near a
 walker's path, not points on walkers. The worst fixes (38–55 cm, against
 either map) are turned away by the correction or the fusion.
 
-Not measured: people who stand still while the map is built (a queue, a
-person at a desk) and are gone at localization. Their points would be
-triangulated like any static surface; RNE's walkers do not stop.
+**People standing still while the map is built**, gone at localization
+(a queue, a person at a desk): RNE example 113's `RNE_WALKER_MODE=still`
+has the six walkers stand at the start of their lines all episode. That map
+has 5,065 landmarks over 246 keyframes (SLAM ATE 1.3 cm), and 747 within
+0.45 m of a standing person at an observing image, against 599 in the clean
+map for the same positions: about 150 landmarks (3 %) on the people.
+
+| Query | Setting | Clean map | Map with people standing |
+| --- | --- | --- | --- |
+| q0 | default | 2.1 (7.9) cm; fixes 2.5 (38) | 2.1 (7.9); fixes 1.2 (5.2) |
+| q4 | default | 4.7 (20) | 4.6 (20) |
+| a4 | default | 70.2 (373) | 70.1 (373) |
+| q0 | best | 1.1 (1.8) | 1.1 (2.0) |
+| q4 | best | 1.1 (3.1) | 1.2 (3.2) |
+| a4 | best | 2.2 (14) | 2.1 (14) |
+
+**No harm either.** The people's 3 % of the landmarks, now matched to empty
+space, are outvoted in the RANSAC by the background around them. Six
+people standing at the side of a room is the case measured; a map made
+mostly of people (a crowded hall) is not.
 
 ## Compute budget (towards a Jetson)
 
@@ -876,7 +893,7 @@ from 3.6 to 2.0 cm, q0 1.1 both.
 - The Gazebo actors and masks: not started.
 - **Detector cost on a Jetson:** needs hardware (on a Xeon core: above).
 - **The nodes on a Jetson:** estimated above from a slowed Xeon only.
-- **A map with people standing still while it was built** (F3's harder case): RNE's walkers do not stop.
+- **A map made mostly of people** (a crowded hall while it was mapped): six standing people were measured above.
 
 ## Targets (proposed with Phase 0)
 
