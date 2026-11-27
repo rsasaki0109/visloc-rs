@@ -113,6 +113,11 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 
 - **Times are after the tight raster bounds** (below). Before them the same
   run, bit-identical, took 1,416 s.
+- **garden holds up too** (`images_8`, 648x420, outdoors, same settings):
+  `gsplat_train` 23.80 / 26.16 / 27.46 / **27.75** dB in 1,983 s,
+  `gsplat-cpu` 23.77 / 25.92 / 27.47 / **27.82** dB in **1,568 s (1.26x)**.
+  The populations track each other (174,603 against 174,685 at step 1,000,
+  303,082 against 303,120 at 3,000, both at the cap by 5,000).
 - **A lower cap is not a speed lever.** Same run with `--max-gaussians
   300000`: 31.12 dB (-0.27) in 1,196 s. Through step 3,000 it was identical
   to the 400k run, yet 9% slower there, so this run's box was slower and the
@@ -281,3 +286,42 @@ where the bound quadratic's terms nearly cancel, and the run drifted from
 step 3,000. A unit test draws random splats, far ones included, and checks
 that every hit stays inside the bounds. A regression case for that splat
 fails on the f32 bounds.
+
+## From photos, with no GPU
+
+This repository's SfM can make the model the trainer starts from, all on
+the CPU. Every 2nd photo of bonsai `images_4` (146 images, 780x520), with a
+rough focal length that SfM refines:
+
+```bash
+cargo build --release --example unordered_sfm_demo --features image-io
+unordered_sfm_demo --feature-extractor sift --images-dir images \
+  --image-suffix .JPG --width 780 --height 520 \
+  --fx 936 --fy 936 --cx 390 --cy 260 --refine-intrinsics \
+  --sift-max-keypoints 4096 --retrieval-topk 12 --min-matches 30 \
+  --match-ratio 0.8 --verification-mode full --mapper incremental \
+  --next-image-policy auto --post-refinement-registration \
+  --final-iterative-refinement --out-colmap sfm
+ln -s sfm sparse   # gsplat_cpu_train reads images/ and sparse/
+gsplat_cpu_train --data . --strategy brush --steps 7000 --max-gaussians 400000
+```
+
+SfM takes 322 s on 4 threads: 146 / 146 images registered, 72,288 points,
+mean reprojection error 0.337 px, `fx` 936 -> 810.2 (COLMAP's: 806.2).
+
+The SfM writes every point white. `gsplat_cpu_train` now colours such a
+model's points itself: the per-channel median of the pixels each point
+projects to in the training photos. Without it the start is a white image
+(eval PSNR 3.2 dB at step 0, 23.67 dB at step 7,000); with it, 13.8 dB at
+step 0.
+
+Eval PSNR at step 7,000, the same photos and train / eval split:
+
+| Poses and points | Points | PSNR |
+| --- | ---: | ---: |
+| this repo's SfM | 72,288 | 25.55 dB |
+| the dataset's COLMAP model | 206,613 | 30.03 dB |
+
+The run works end to end, but 4.5 dB short of COLMAP's poses. The SfM
+model starts from a third of the points, and its principal point moved
+from 260 to 252.3 in `cy`. Which of the two costs more is not measured yet.

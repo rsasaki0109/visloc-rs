@@ -21,6 +21,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `gsplat_cpu_train` colours the points of a model whose points are all
+  white (as this repository's SfM writes them) from the training photos.
+  bonsai from `unordered_sfm_demo` poses, 7,000 steps: 23.67 -> 25.55 dB
+  (30.03 dB from the dataset's COLMAP model). See
+  `docs/gsplat_cpu_trainer.md`, "From photos, with no GPU".
 - `visloc_basalt::vio::StaticHold`, `basalt_euroc_localize_demo
   --vio-static-hold` and `visloc_vio_node`'s `static_hold` (opt-in): from a
   static start, a zero velocity in the VIO window on every frame until the
@@ -28,7 +33,6 @@ All notable changes to `visloc-rs` will be documented here.
   wheels it stops the run-away the prior can start while the robot stands
   still: OpenLORIS-Scene office1-7, replayed through ROS 2, 14 m to 2.88 cm.
   See `docs/odometry_fusion.md`.
-
 - `--fusion-seed-s S` (`basalt_euroc_localize_demo`) / `fusion_seed_s`
   (`visloc_map_localize_node`), off by default: the fusion starts from the
   warm-up's fixes that agree under one odometry, not one fix, so the source
