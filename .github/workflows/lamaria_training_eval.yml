@@ -27,7 +27,7 @@ env:
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
   PASS_ARGS: ""
   # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
-  EXPERIMENT_ARGS: "--ba-experiment-online-args=--gyro-rw-warmup,1"
+  EXPERIMENT_ARGS: "--ba-experiment-pass-match essential"
   # options of the batch pass's solves in both chains, e.g. an IMU model to compare the experiment on top of
   COMMON_PASS_ARGS: ""
   # further driver options for both chains, e.g. "--no-ba-temperature"
