@@ -454,6 +454,7 @@ measurements behind the defaults.
 | `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of a body frame, e.g. `visloc_vio_node`'s or a ground robot's wheel odometry; its `header.frame_id` names the odometry frame and its `child_frame_id` the body |
 | `/tf_static` | `tf2_msgs/TFMessage` | in | only with `extrinsics tf`: where the camera sits relative to the body |
 | `odom_reset` | `std_msgs/Int32` | in | `visloc_vio_node`'s reset count (transient-local): on a change, the correction is dropped and the node localizes every image until it has a new one |
+| `odom2` | `nav_msgs/Odometry` | in | with `fusion:=true`: a second odometry (e.g. the wheels next to the VIO on `odom`), fused with `odom` and the fixes |
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once the correction is set |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once the correction is set (not `pose`, which `visloc_vio_node` publishes) |
 | `map_fix` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose of each image localized with `min_inliers`, stamped with the image (for `visloc_wheel_calibration_node`) |
@@ -487,6 +488,11 @@ measurements behind the defaults.
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
+| `fusion` | `false` | also fuse `odom2` with `odom` and the fixes in `visloc_localization::fusion::MapFusion` (a sliding-window pose graph); `map_pose` and `map -> odom` follow the fusion. A fix is used if the correction initializes or resets from it, or once the fusion has a pose, if it lies within 15 cm / 3 deg of the fusion's prediction |
+| `odom_noise`, `odom2_noise` | `vio`, `wheel` | drift models of the two odometries: `vio`, `wheel` or `legged` |
+| `odom2_body_offset` | identity | `odom2`'s body in `odom`'s body frame (`T_body_body2`), `tx,ty,tz,qx,qy,qz,qw`, e.g. a VIO's IMU <- `base_link` |
+| `fusion_source_check_s` | `0` (off) | leave out an odometry whose motion over the last this many seconds disagrees with the fixes, while it does (people walking just ahead drag a VIO); `1` measured in RNE (`docs/dynamic_obstacle_localization.md`) |
+| `min_inlier_cells`, `init_warmup_s` | `0` (off) | see `docs/dynamic_obstacle_localization.md` |
 | `max_points` | the map's | ORB keypoints per image |
 | `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
 | `orientation_stddev` | `0.02` rad | |

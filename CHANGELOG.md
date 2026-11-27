@@ -16,6 +16,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `visloc_map_localize_node -p fusion:=true` (off by default) subscribes
+  `odom2`, a second odometry (e.g. the wheels next to the VIO on `odom`),
+  and fuses both with the fixes in `MapFusion`; `map_pose` and
+  `map -> odom` follow the fusion. Parameters `odom_noise`, `odom2_noise`,
+  `odom2_body_offset` and `fusion_source_check_s`; `/diagnostics` reports
+  the stretches the source check left out. Once set, the fusion takes the
+  fixes within 15 cm / 3 deg of its own prediction, so a runaway first
+  odometry cannot turn good fixes away.
 - `MapFusionConfig::source_check_window_s` (`basalt_euroc_localize_demo
   --fusion-source-check-s S`, off by default): at every fix, an odometry
   whose motion disagrees with the fixes' is left out of the fusion while it
