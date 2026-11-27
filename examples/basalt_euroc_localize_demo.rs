@@ -243,6 +243,9 @@ struct Args {
     /// Feed `--odometry`'s body velocity into the VIO window on every frame
     /// (wheel-inertial odometry).
     vio_wheel_velocity: bool,
+    /// Zero velocity in the VIO window on every frame until the IMU first
+    /// shows motion (a static start).
+    vio_static_hold: bool,
     /// 1-sigma of `--vio-map-prior`: position (m), yaw and roll/pitch (deg;
     /// 0 leaves roll/pitch to the IMU). By default 0.03 m, 1 deg, 1 deg, and
     /// no roll/pitch for `--mono` without `--vio-wheel-velocity`: there a
@@ -390,6 +393,7 @@ impl Args {
             drop_vio_s: None,
             vio_map_prior: false,
             vio_wheel_velocity: false,
+            vio_static_hold: false,
             mono: false,
             map_prior_sigma: None,
             localize_every: 1,
@@ -494,6 +498,7 @@ impl Args {
                 "--fusion" => args.fusion = true,
                 "--vio-map-prior" => args.vio_map_prior = true,
                 "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
+                "--vio-static-hold" => args.vio_static_hold = true,
                 "--mono" => args.mono = true,
                 "--map-prior-sigma" => {
                     let text = value()?;
@@ -1776,9 +1781,41 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let mut first_ns = None;
 
     let mut run = CorrectedRun::new(args);
+    // Static hold: the start's mean accelerometer sample, the recent samples
+    // (0.1 s), and whether motion has been seen.
+    let mut hold_accel_start: Option<Vector3<f64>> = None;
+    let mut hold_recent: std::collections::VecDeque<(i64, Vector3<f64>)> =
+        std::collections::VecDeque::new();
+    let mut hold_moved = false;
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
+        if args.vio_static_hold && !hold_moved {
+            for sample in &frame.imu {
+                hold_recent.push_back((sample.timestamp_ns, sample.accel_m_s2));
+                if sample.gyro_rad_s.norm() > 0.05 {
+                    hold_moved = true;
+                }
+            }
+            while hold_recent
+                .front()
+                .is_some_and(|(t, _)| timestamp_ns - t > 100_000_000)
+            {
+                hold_recent.pop_front();
+            }
+            if !hold_recent.is_empty() {
+                let mean = hold_recent.iter().map(|(_, a)| a).sum::<Vector3<f64>>()
+                    / hold_recent.len() as f64;
+                let start = *hold_accel_start.get_or_insert(mean);
+                if (mean - start).norm() > 0.15 {
+                    hold_moved = true;
+                    eprintln!(
+                        "static hold: motion at {:.2} s",
+                        (timestamp_ns - first_ns.unwrap_or(timestamp_ns)) as f64 * 1e-9
+                    );
+                }
+            }
+        }
         let frame_imu_gyro_mean = if frame.imu.is_empty() {
             Vector3::zeros()
         } else {
@@ -1849,6 +1886,17 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
                     },
                 });
             }
+        }
+        if let (true, false, Some(frame_id)) = (args.vio_static_hold, hold_moved, frame_id) {
+            adapter.estimator.add_external_factor(ExternalFactor {
+                frame_id,
+                measurement: ExternalMeasurement::BodyVelocity {
+                    imu_from_body: SE3::identity(),
+                    imu_angular_velocity: Vector3::zeros(),
+                    body_velocity: Vector3::zeros(),
+                    sqrt_information: Vector3::repeat(1.0 / 0.01),
+                },
+            });
         }
         if let (true, Some(frame_id), Some(odometry)) =
             (args.vio_wheel_velocity, frame_id, odometry.as_ref())
