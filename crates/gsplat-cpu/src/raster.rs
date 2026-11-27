@@ -658,7 +658,7 @@ mod bounds_tests {
             // Scales from sub-pixel to hundreds of pixels, any orientation.
             let s1 = 0.3 * 1000f32.powf(rnd());
             let s2 = 0.3 * 1000f32.powf(rnd());
-            let th = 6.283 * rnd();
+            let th = std::f32::consts::TAU * rnd();
             let (c, s) = (th.cos(), th.sin());
             let (a, b) = (1.0 / (s1 * s1), 1.0 / (s2 * s2));
             let (c00, c01, c11) = (
