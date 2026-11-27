@@ -97,6 +97,11 @@
 //! - `--vio-wheel-velocity` (with `--vio --odometry FILE --imu-from-body`):
 //!   the body velocity of `FILE` (a wheel odometry) goes into the VIO window
 //!   on every frame.
+//! - `--vio-static-hold` (with `--vio`): from a static start, a zero velocity
+//!   goes into the VIO window on every frame until the IMU first shows
+//!   motion (`visloc_basalt::vio::StaticHold`). With `--vio-map-prior` and a
+//!   monocular VIO without wheels, it stops the start-up run-away the map
+//!   prior can cause while the robot stands still.
 //! - `--fusion`: the map pose comes from `visloc_localization::MapFusion`, a
 //!   sliding-window pose graph over the odometries and the accepted fixes,
 //!   instead of the single rigid correction. With `--vio --odometry FILE`
@@ -243,6 +248,9 @@ struct Args {
     /// Feed `--odometry`'s body velocity into the VIO window on every frame
     /// (wheel-inertial odometry).
     vio_wheel_velocity: bool,
+    /// Zero velocity in the VIO window on every frame until the IMU first
+    /// shows motion (a static start).
+    vio_static_hold: bool,
     /// 1-sigma of `--vio-map-prior`: position (m), yaw and roll/pitch (deg;
     /// 0 leaves roll/pitch to the IMU). By default 0.03 m, 1 deg, 1 deg, and
     /// no roll/pitch for `--mono` without `--vio-wheel-velocity`: there a
@@ -334,7 +342,7 @@ impl Args {
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--fusion [--odometry-noise wheel|legged] \
          [--drop-vio-s START:END]] [--vio-map-prior [--map-prior-sigma M,YAW_DEG,TILT_DEG]] \
-         [--vio-wheel-velocity] [--mono] \
+         [--vio-wheel-velocity] [--vio-static-hold] [--mono] \
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
@@ -390,6 +398,7 @@ impl Args {
             drop_vio_s: None,
             vio_map_prior: false,
             vio_wheel_velocity: false,
+            vio_static_hold: false,
             mono: false,
             map_prior_sigma: None,
             localize_every: 1,
@@ -494,6 +503,7 @@ impl Args {
                 "--fusion" => args.fusion = true,
                 "--vio-map-prior" => args.vio_map_prior = true,
                 "--vio-wheel-velocity" => args.vio_wheel_velocity = true,
+                "--vio-static-hold" => args.vio_static_hold = true,
                 "--mono" => args.mono = true,
                 "--map-prior-sigma" => {
                     let text = value()?;
@@ -584,6 +594,9 @@ impl Args {
         }
         if args.vio_wheel_velocity && !(args.vio && args.odometry.is_some()) {
             return Err("--vio-wheel-velocity needs --vio and --odometry".into());
+        }
+        if args.vio_static_hold && !args.vio {
+            return Err("--vio-static-hold needs --vio".into());
         }
         if args.mono && !args.vio {
             return Err("--mono needs --vio".into());
@@ -1776,9 +1789,24 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let mut first_ns = None;
 
     let mut run = CorrectedRun::new(args);
+    let mut static_hold = args
+        .vio_static_hold
+        .then(visloc_basalt::vio::StaticHold::default);
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
+        let held = match static_hold.as_mut() {
+            Some(hold) => {
+                let was_holding = hold.moved_at_ns().is_none();
+                let held = hold.observe(&frame.imu);
+                if was_holding && !held {
+                    let since_s = (timestamp_ns - first_ns.unwrap_or(timestamp_ns)) as f64 * 1e-9;
+                    eprintln!("static hold: motion at {since_s:.2} s");
+                }
+                held
+            }
+            None => false,
+        };
         let frame_imu_gyro_mean = if frame.imu.is_empty() {
             Vector3::zeros()
         } else {
@@ -1849,6 +1877,9 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
                     },
                 });
             }
+        }
+        if let (Some(hold), true, Some(frame_id)) = (&static_hold, held, frame_id) {
+            adapter.estimator.add_external_factor(hold.factor(frame_id));
         }
         if let (true, Some(frame_id), Some(odometry)) =
             (args.vio_wheel_velocity, frame_id, odometry.as_ref())
