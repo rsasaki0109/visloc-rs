@@ -723,6 +723,9 @@ run once):
 visloc_map_localize_node --map runs/map -p fusion:=true -r odom2:=wheel/odom \
   -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068 \
   -p fusion_source_check_s:=1 -p init_warmup_s:=3 -p fusion_seed_s:=3
+# the same, as a profile:
+visloc_map_localize_node --map runs/map -p profile:=dynamic_indoor -p fusion:=true \
+  -r odom2:=wheel/odom -p odom2_body_offset:=0,0,0,-0.7071068,0,0,0.7071068
 ```
 
 The nodes track the offline runs (default a4: 70.2 cm offline; last row:
