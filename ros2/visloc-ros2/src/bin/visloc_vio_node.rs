@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use nalgebra::Vector3;
 
 use visloc_basalt::mapper_correction::tum_string;
+use visloc_basalt::vio::StaticHold;
 use visloc_basalt::RawU16Image;
 use visloc_ros2::dds::latched_qos;
 use visloc_ros2::dds::{
@@ -131,6 +132,9 @@ PARAMETERS (--name value  or  -p name:=value):
   map_prior_stddev_deg   1-sigma yaw of such a prior (deg)                        [1.0]
   map_prior_tilt_stddev_deg  1-sigma roll/pitch of such a prior (deg; 0: none)
                          [1.0; 0 with mono and no wheel_velocity]
+  static_hold            from a static start, a zero velocity on every frame until
+                         the IMU first shows motion; stops a monocular VIO's
+                         start-up run-away under map_prior                      [false]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -269,7 +273,9 @@ struct WheelSample {
 
 /// Frontend-thread output: a tracked frame, or a tracking error for the
 /// estimator thread to handle, tagged with the stream generation.
-type FrontendResult = (u64, Result<TrackedFrame, VioError>);
+/// A tracked frame with its generation, and whether `static_hold` still
+/// holds it (no motion seen in the IMU yet).
+type FrontendResult = (u64, Result<TrackedFrame, VioError>, bool);
 
 /// Logs at most once per `period` per call site.
 struct RateLimitedLog {
@@ -352,6 +358,7 @@ fn run() -> Result<(), String> {
         .filter(|topic| !topic.is_empty());
     let wheel_velocity = args.flag("wheel_velocity", false)?;
     let map_prior = args.flag("map_prior", false)?;
+    let static_hold = args.flag("static_hold", false)?;
     let external_noise = ExternalNoise {
         fix_position_m: args.parsed_or("map_prior_stddev_m", 0.03f64)?,
         fix_orientation_rad: args.parsed_or("map_prior_stddev_deg", 1.0f64)?.to_radians(),
@@ -686,8 +693,10 @@ fn run() -> Result<(), String> {
         std::thread::Builder::new()
             .name("vio-frontend".into())
             .spawn(move || match pool {
-                Some(pool) => pool.install(|| run_frontend(frontend, &shared, &tracked_tx)),
-                None => run_frontend(frontend, &shared, &tracked_tx),
+                Some(pool) => {
+                    pool.install(|| run_frontend(frontend, &shared, &tracked_tx, static_hold))
+                }
+                None => run_frontend(frontend, &shared, &tracked_tx, static_hold),
             })
             .map_err(|error| format!("spawning the frontend thread: {error}"))?;
     }
@@ -804,7 +813,7 @@ fn run() -> Result<(), String> {
             );
             last_status = Instant::now();
         }
-        let (frame_generation, tracked) = match received {
+        let (frame_generation, tracked, still) = match received {
             Ok(received) => received,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -849,6 +858,9 @@ fn run() -> Result<(), String> {
                     eprintln!("visloc_vio_node: first pose published");
                 }
                 frame_stamps.record(estimate.header_stamp_ns, estimate.frame_id);
+                if still {
+                    backend.add_external_factor(StaticHold::default().factor(estimate.frame_id));
+                }
                 if wheel_velocity {
                     let sample = wheel_latest
                         .lock()
@@ -1106,8 +1118,12 @@ fn run_frontend(
     mut frontend: VioFrontend,
     shared: &Shared,
     tracked_tx: &mpsc::SyncSender<FrontendResult>,
+    static_hold: bool,
 ) {
     let mut generation = 0u64;
+    // Watches the IMU from the start until the first motion; a reset does
+    // not restart it (the robot has moved by then).
+    let mut hold = static_hold.then(StaticHold::default);
     let mut waiting_log = RateLimitedLog::new(Duration::from_secs(5));
     loop {
         let (packet, packet_generation): (Option<SensorPacket<RawU16Image>>, u64) = {
@@ -1134,6 +1150,14 @@ fn run_frontend(
             }
             generation = packet_generation;
         }
+        let held = hold.as_mut().is_some_and(|hold| {
+            let was_holding = hold.moved_at_ns().is_none();
+            let held = hold.observe(&packet.imu);
+            if was_holding && !held {
+                eprintln!("visloc_vio_node: static hold ends, the IMU shows motion");
+            }
+            held
+        });
         let gyro_bias = *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner());
         // Errors go to the estimator thread too, which owns resets.
         let started = Instant::now();
@@ -1143,7 +1167,7 @@ fn run_frontend(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .add(started.elapsed());
-        if tracked_tx.send((generation, tracked)).is_err() {
+        if tracked_tx.send((generation, tracked, held)).is_err() {
             return;
         }
     }
