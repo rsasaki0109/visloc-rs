@@ -214,11 +214,40 @@ scale (about 1.15) is real, but where fixes keep coming, the 5 s window
 re-anchors the trajectory before the scale error builds up. office1-7 is
 where a scale would matter, and there it has nothing to fit: every run
 against office1-2's map gets its fixes in the first 2 s of 37 s (stereo map
-and VIO included; one monocular run got 26 fixes up to 10.5 s). The rest of
-the walk leaves what the map covers. Its 13 to 50 cm come from that, and
-more of the map, or images that still localize there
-([openloris_map_localization.md](openloris_map_localization.md)), is what
-would help.
+and VIO included; one monocular run got 26 fixes up to 10.5 s). It does not
+leave the map: its ground truth stays within 0.35 m of office1-2's path,
+facing the same way (within 9°). Its furniture was moved, and its images
+stop matching: after the first 2 s a median of 11 to 21 matches and 4 to 11
+inliers per try, against 42 to 66 and 30 to 48 on office1-6. Its 13 to 50 cm
+come from that.
+
+Close weak fixes (`--weak-gate-cm 5`; `weak_gate_m` on the ROS 2 map node)
+with the map prior keep more of them. office1-7 then has 165 weak fixes to 7
+full ones, and the map prior carries them into the VIO. Monocular VIO, no
+wheels, mono maps, RMSE in cm:
+
+| | VIO + correction | weak gate 5 cm | A | **A + weak gate 5 cm** |
+|---|---:|---:|---:|---:|
+| office1-6 | 7.66 | 6.67 | 2.71 | **1.32** (ROS 2: 1.92) |
+| office1-7, every 5th image localized | 49.75 | 49.93 | 30.64 | 1.96 |
+
+office1-6 holds across setups, but office1-7's 1.96 cm was a lucky draw.
+Which images get localized changes its outcome more than any option
+does:
+
+| office1-7, A | every 3rd | 4th | 5th | 6th | 10th | ROS 2 replay |
+|---|---:|---:|---:|---:|---:|---:|
+| + weak gate 5 cm | 13.1 | 23.5 | 1.96 | 14.1 | 10.4 | 32.9 |
+| no weak gate | 10.4 | 209 | 30.6 | | | 8.0 |
+
+With the weak gate it stays within 2 to 33 cm. Without it, the same runs
+range from 8 cm to 2 m. So for a monocular robot without wheels, use the
+weak gate with the map prior, and expect 10 to 30 cm where full fixes are
+rare. Rebuilding the maps with blurred images and a lower detector threshold
+([openloris_map_localization.md](openloris_map_localization.md#grainy-images-blur-before-orb))
+localizes more images, but with A + weak gate it gave 1.65 and 2.99 cm
+(every 5th image), no better. With the wheels (C) the monocular VIO is
+stable: A + C gives 1.40 and 5.82 cm above.
 
 ## What was adopted
 
