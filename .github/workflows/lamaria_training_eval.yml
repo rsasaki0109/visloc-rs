@@ -20,7 +20,7 @@ permissions:
 env:
   SPLIT: training
   # options of the experimental pass's solves, e.g. "--est-gyro-m"; empty: no comparison
-  PASS_ARGS: "--accel-rw-warmup 30"
+  PASS_ARGS: "--gyro-rw-warmup 1"
   # driver options of the experimental pass only, e.g. "--ba-fisheye-model --ba-est-gyro-m"
   EXPERIMENT_ARGS: ""
   # options of the batch pass's solves in both chains, e.g. an IMU model to compare the experiment on top of
