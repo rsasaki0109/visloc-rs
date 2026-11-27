@@ -188,22 +188,21 @@ fn fast_exp(x: f32) -> f32 {
 }
 
 /// The 8-lane halves of a tile row a splat can reach (see `cpu_raster`).
+///
+/// In f64: far from a large splat's centre the quadratic's terms are big and
+/// nearly cancel, and f32 rounding could cut off a real hit.
 #[inline(always)]
-fn row_lanes(
-    level: Option<(f32, f32, f32, f32)>,
-    dy: f32,
-    mu_x: f32,
-    x0: f32,
-) -> Option<(usize, usize)> {
+fn row_lanes(level: Option<Level>, dy: f32, mu_x: f32, x0: f32) -> Option<(usize, usize)> {
     let Some((c00, c01, c11, s2)) = level else {
         return Some((0, 16));
     };
+    let (c00, c01, c11, s2, dy) = (c00 as f64, c01 as f64, c11 as f64, s2 as f64, dy as f64);
     let disc = (c01 * dy) * (c01 * dy) - c00 * (c11 * dy * dy - s2);
     if disc <= 0.0 {
         return None;
     }
     let half = disc.sqrt() / c00;
-    let xc = mu_x - c01 * dy / c00 - x0 - 0.5;
+    let xc = mu_x as f64 - c01 * dy / c00 - x0 as f64 - 0.5;
     let (lo, hi) = (xc - half - SLACK, xc + half + SLACK);
     let a = lo <= 7.0 && hi >= 0.0;
     let b = lo <= 15.0 && hi >= 8.0;
@@ -215,34 +214,45 @@ fn row_lanes(
     }
 }
 
-/// Pixels of slack on the ellipse bounds (rounding only: a pixel centre is
-/// tested against the exact ellipse).
-const SLACK: f32 = 1e-3;
-/// Slack on the level `2 ln(255 opacity)`: `exp(5e-4)` is ~5e-4 relative,
-/// far above `fast_exp`'s error.
-const LEVEL_SLACK: f32 = 1e-3;
+/// Pixels of slack on the ellipse bounds.
+const SLACK: f64 = 1e-3;
+/// Slack on the level `2 ln(255 opacity)` against `fast_exp`'s error:
+/// `exp(5e-4)` is ~5e-4 relative, far above it.
+const LEVEL_SLACK: f64 = 1e-3;
+/// Slack on the level per unit of the tile's largest quadratic term, for
+/// the f32 rounding of `sigma` in the pixel loops (a few ulps of that term).
+const TERM_SLACK: f64 = 4e-6;
 
-/// A conic and its `alpha = 1/255` level: `(c00, c01, c11, s2)`.
+/// A conic and its widened `alpha = 1/255` level: `(c00, c01, c11, s2)`.
 type Level = (f32, f32, f32, f32);
 
 /// Rows of a tile a splat can reach and its conic level, or `None`.
+///
+/// The level is the exact one, widened enough that no pixel the loops count
+/// as a hit (`sigma` in f32, polynomial `exp`) falls outside it.
 #[inline(always)]
-fn splat_rows(p: &[f32], y0: u32, h: usize) -> Option<(usize, usize, Option<Level>)> {
-    let (mu_y, c00, c01, c11, opac) = (p[1], p[2], p[3], p[4], p[5]);
+fn splat_rows(p: &[f32], x0: u32, y0: u32, h: usize) -> Option<(usize, usize, Option<Level>)> {
+    let (mu_x, mu_y, c00, c01, c11, opac) = (p[0], p[1], p[2], p[3], p[4], p[5]);
     if opac.is_nan() || opac < 1.0 / 255.0 {
         return None;
     }
     let (mut ly0, mut ly1) = (0i64, h as i64 - 1);
-    let det = c00 * c11 - c01 * c01;
+    let (d00, d01, d11) = (c00 as f64, c01 as f64, c11 as f64);
+    let det = d00 * d11 - d01 * d01;
     let mut level = None;
     if c00 > 0.0 && c11 > 0.0 && det > 0.0 {
-        // The exact `alpha = 1/255` level, widened by `LEVEL_SLACK` so the
-        // polynomial `exp` can never put a hit outside it.
-        let s2 = 2.0 * (255.0 * opac).ln().max(0.0) + LEVEL_SLACK;
-        let hy = (s2 * c00 / det).sqrt() + SLACK;
-        ly0 = ly0.max((mu_y - hy - 0.5 - y0 as f32).ceil() as i64);
-        ly1 = ly1.min((mu_y + hy - 0.5 - y0 as f32).floor() as i64);
-        level = Some((c00, c01, c11, s2));
+        // Largest |dx|, |dy| from the splat to a pixel centre of the tile.
+        let far = |mu: f32, o: u32| {
+            let d = mu as f64 - o as f64;
+            (d - 0.5).abs().max((d - TILE as f64 + 0.5).abs())
+        };
+        let (rx, ry) = (far(mu_x, x0), far(mu_y, y0));
+        let big = 0.5 * d00 * rx * rx + 0.5 * d11 * ry * ry + d01.abs() * rx * ry;
+        let s2 = 2.0 * (255.0 * opac as f64).ln().max(0.0) + LEVEL_SLACK + TERM_SLACK * 2.0 * big;
+        let hy = (s2 * d00 / det).sqrt() + SLACK;
+        ly0 = ly0.max((mu_y as f64 - hy - 0.5 - y0 as f64).ceil() as i64);
+        ly1 = ly1.min((mu_y as f64 + hy - 0.5 - y0 as f64).floor() as i64);
+        level = Some((c00, c01, c11, s2 as f32));
     }
     (ly0 <= ly1).then_some((ly0 as usize, ly1 as usize, level))
 }
@@ -299,7 +309,7 @@ pub fn forward(f: &Frame) -> Raster {
                         }
                         let c = f.sorted[j] as usize;
                         let p = &f.projected[c * 9..c * 9 + 9];
-                        let Some((ly0, ly1, level)) = splat_rows(p, y0 as u32, h) else {
+                        let Some((ly0, ly1, level)) = splat_rows(p, x0 as u32, y0 as u32, h) else {
                             continue;
                         };
                         let (mu_x, mu_y, c00, c01, c11, opac) =
@@ -522,7 +532,7 @@ fn tile_backward<const GN: bool, const NA: usize>(
         j -= 1;
         let c = f.sorted[j] as usize;
         let p = &f.projected[c * 9..c * 9 + 9];
-        let Some((ly0, ly1, level)) = splat_rows(p, y0, h) else {
+        let Some((ly0, ly1, level)) = splat_rows(p, x0, y0, h) else {
             continue;
         };
         let (mu_x, mu_y, c00, c01, c11, opac) = (p[0], p[1], p[2], p[3], p[4], p[5]);
@@ -624,5 +634,93 @@ fn tile_backward<const GN: bool, const NA: usize>(
                 *s = lanes.iter().sum();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+
+    /// Every pixel the loops would count as a hit lies inside the bounds,
+    /// including large splats far off the tile (where f32 bounds cancelled).
+    #[test]
+    fn bounds_contain_every_hit() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut rnd = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 40) as f32) / (1u64 << 24) as f32
+        };
+        let (x0, y0) = (144u32, 144u32);
+        let mut hits = 0usize;
+        for i in 0..200_000 {
+            // Scales from sub-pixel to hundreds of pixels, any orientation.
+            let s1 = 0.3 * 1000f32.powf(rnd());
+            let s2 = 0.3 * 1000f32.powf(rnd());
+            let th = 6.283 * rnd();
+            let (c, s) = (th.cos(), th.sin());
+            let (a, b) = (1.0 / (s1 * s1), 1.0 / (s2 * s2));
+            let (c00, c01, c11) = (
+                a * c * c + b * s * s,
+                (a - b) * c * s,
+                a * s * s + b * c * c,
+            );
+            let reach = 3.0 * s1.max(s2);
+            let far = if i % 2 == 0 { reach } else { 40.0 };
+            let mu_x = x0 as f32 + 8.0 + far * (2.0 * rnd() - 1.0);
+            let mu_y = y0 as f32 + 8.0 + far * (2.0 * rnd() - 1.0);
+            let opac = (1.0 / 255.0) + rnd();
+            let p = [mu_x, mu_y, c00, c01, c11, opac.min(1.0), 0.0, 0.0, 0.0];
+            let rows = splat_rows(&p, x0, y0, 16);
+            for ly in 0..16usize {
+                let dy = (y0 as usize + ly) as f32 + 0.5 - mu_y;
+                let lanes = rows.and_then(|(r0, r1, level)| {
+                    (ly >= r0 && ly <= r1)
+                        .then(|| row_lanes(level, dy, mu_x, x0 as f32))
+                        .flatten()
+                });
+                for k in 0..16usize {
+                    let dx = (x0 as usize + k) as f32 + 0.5 - mu_x;
+                    let sigma = 0.5 * (c00 * dx * dx + c11 * dy * dy) + c01 * dx * dy;
+                    let al = (p[5] * fast_exp(-sigma)).min(0.99);
+                    if sigma >= 0.0 && al >= 1.0 / 255.0 {
+                        hits += 1;
+                        let inside = matches!(lanes, Some((lo, hi)) if k >= lo && k < hi);
+                        assert!(
+                            inside,
+                            "hit outside bounds: p={p:?} ly={ly} k={k} sigma={sigma}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(hits > 100_000, "too few hits exercised: {hits}");
+    }
+
+    /// The splat that f32 bounds cut off on bonsai_8 (brush, step ~2,500): a
+    /// large splat ~300 px off the tile's left edge.
+    #[test]
+    fn far_splat_regression() {
+        let p = [
+            -289.84393, 368.5127, 0.07371579, 0.15592265, 0.3299237, 0.0685014, 0.0, 0.0, 0.0,
+        ];
+        let (y0, ly, k) = (144u32, 4usize, 15usize);
+        let mut found = 0;
+        for x0 in (0u32..1024).step_by(16) {
+            let dy = (y0 as usize + ly) as f32 + 0.5 - p[1];
+            let dx = (x0 as usize + k) as f32 + 0.5 - p[0];
+            let sigma = 0.5 * (p[2] * dx * dx + p[4] * dy * dy) + p[3] * dx * dy;
+            let al = (p[5] * fast_exp(-sigma)).min(0.99);
+            if !(sigma >= 0.0 && al >= 1.0 / 255.0) {
+                continue;
+            }
+            found += 1;
+            let (r0, r1, level) = splat_rows(&p, x0, y0, 16).expect("rows");
+            assert!(ly >= r0 && ly <= r1);
+            let (lo, hi) = row_lanes(level, dy, p[0], x0 as f32).expect("lanes");
+            assert!(k >= lo && k < hi, "x0={x0}");
+        }
+        assert!(found > 0);
     }
 }
