@@ -657,13 +657,17 @@ def _lightglue_essential(pairs, a, count, chunk=512):
                 yield pair, kept
 
 
+def _essential_worker(pair):
+    """match --verify essential with SIFT: the pair's unguided ratio-test matches that an essential matrix explains
+    with its rotation near the VIO's, as a revisit is checked (_loop_worker), whatever the VIO's translation."""
+    return pair, _loop_worker(pair[:4])[1]
+
+
 def cmd_match(a):
     from contextlib import nullcontext
     kf_ns, offsets, xy, desc = load_features(a.work)
     extractor, image_wh = feature_kind(a.work)
     matcher = _matcher(a.matcher, extractor)
-    if a.verify == "essential" and matcher != "lightglue":
-        sys.exit("match --verify essential takes LightGlue's matches (learned features)")
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r,
@@ -692,7 +696,8 @@ def cmd_match(a):
     out_pairs, out_matches, count = [], [], [0, 0]
     lightglue = _lightglue_essential if a.verify == "essential" else _lightglue_guided
     with mp.Pool(a.jobs) if matcher == "ratio" else nullcontext() as pool:
-        results = pool.imap(_match_worker, pairs, chunksize=16) if pool else lightglue(pairs, a, count)
+        worker = _essential_worker if a.verify == "essential" else _match_worker
+        results = pool.imap(worker, pairs, chunksize=16) if pool else lightglue(pairs, a, count)
         for i, (pair, m) in enumerate(results):
             if len(m):
                 out_pairs.append(np.array(pair[:4], np.int32)[None].repeat(len(m), 0))
@@ -2720,8 +2725,9 @@ def main():
     m.add_argument("--max-desc", type=float, default=None,
                    help="maximum descriptor L2 distance of the ratio test (default: 300 for SIFT, none for learned)")
     m.add_argument("--verify", choices=("band", "essential"), default="band",
-                   help="band: keep the matches within the VIO's epipolar band; essential (LightGlue): keep those "
-                        "an essential matrix explains, as loops does, whatever the VIO's translation")
+                   help="band: keep the matches within the VIO's epipolar band; essential: keep those (unguided "
+                        "for SIFT, LightGlue's for learned features) an essential matrix explains, as loops does, "
+                        "whatever the VIO's translation")
     m.add_argument("--min-inliers", type=int, default=20, help="--verify essential: inliers to keep a pair")
     m.add_argument("--max-rot", type=float, default=10.0,
                    help="--verify essential: largest disagreement with the VIO rotation (deg)")
