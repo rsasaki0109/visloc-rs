@@ -113,6 +113,13 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 
 - **Times are after the tight raster bounds** (below). Before them the same
   run, bit-identical, took 1,416 s.
+- **A lower cap is not a speed lever.** Same run with `--max-gaussians
+  300000`: 31.12 dB (-0.27) in 1,196 s. Through step 3,000 it was identical
+  to the 400k run, yet 9% slower there, so this run's box was slower and the
+  cap bought no measurable time. With 200,000 the cap sits below the initial
+  206,613 points and nothing grows: 29.57 dB (-1.8) in 985 s (-16%). The
+  time is mostly per-pixel blending, and fewer, larger splats cover about
+  as many pixels.
 - **The populations agree** (228,751 against 228,481 at step 1,000; both
   at the cap by 6,000), and so do the curves.
 - **Same quality, within 0.05 dB** of `gsplat_train`'s two seeds (31.40 /
