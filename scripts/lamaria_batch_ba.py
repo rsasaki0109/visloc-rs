@@ -1469,20 +1469,22 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
                 imu[:, col] = np.interp(tf + d_acc * 1e9, tf, imu[:, col])
         imu_ns = imu_ns + int(round(d_cam * 1e9))
 
-    def make_params(gyro_rw):
+    def make_params(gyro_rw, accel_rw=None):
+        accel_rw = accel_rw_scale if accel_rw is None else accel_rw
         params = gtsam.PreintegrationCombinedParams.MakeSharedU(9.81)
         params.setAccelerometerCovariance(np.eye(3) * (noise_scale * noise["accel_noise_std"]) ** 2)
         params.setGyroscopeCovariance(np.eye(3) * (noise_scale * noise["gyro_noise_std"]) ** 2)
         params.setIntegrationCovariance(np.eye(3) * 1e-8)
-        params.setBiasAccCovariance(np.eye(3) * (accel_rw_scale * noise["accel_bias_std"]) ** 2)
+        params.setBiasAccCovariance(np.eye(3) * (accel_rw * noise["accel_bias_std"]) ** 2)
         params.setBiasOmegaCovariance(np.eye(3) * (gyro_rw * noise["gyro_bias_std"]) ** 2)
         if omega_coriolis is not None:  # Earth's rotation in the world frame, which the gyroscope also measures
             params.setOmegaCoriolis(np.asarray(omega_coriolis, float))
         return params
 
-    warm_scale, warm_s, warm_t0 = warmup
+    warm_scale, warm_s, warm_t0 = warmup[:3]
+    warm_accel = warmup[3] if len(warmup) > 3 else 1.0  # the accelerometer's bias walk scale at the start
     warm_t0 = kf_ns[0] if warm_t0 is None else warm_t0
-    by_scale = {1.0: make_params(gyro_rw_scale)}
+    by_scale = {(1.0, 1.0): make_params(gyro_rw_scale)}
 
     by_rw = {}
 
@@ -1499,11 +1501,13 @@ def _imu_graph(kf_ns, kf_p, kf_r, vio, imu_path, noise, noise_scale=1.0, accel_r
             by_rw[key] = params
         return by_rw[key]
 
-    def factor_params(t_ns):  # the gyro bias random walk of the warm-up at t_ns, rounded to share the params
-        f = max(round(1.0 + (warm_scale - 1.0) * np.exp(-(t_ns - warm_t0) * 1e-9 / warm_s), 2), 1.0)
-        if f not in by_scale:
-            by_scale[f] = make_params(f * gyro_rw_scale)
-        return by_scale[f]
+    def factor_params(t_ns):  # the bias random walks of the warm-up at t_ns, rounded to share the params
+        decay = np.exp(-(t_ns - warm_t0) * 1e-9 / warm_s)
+        f = max(round(1.0 + (warm_scale - 1.0) * decay, 2), 1.0)
+        fa = max(round(1.0 + (warm_accel - 1.0) * decay, 2), 1.0)
+        if (f, fa) not in by_scale:
+            by_scale[(f, fa)] = make_params(f * gyro_rw_scale, fa * accel_rw_scale)
+        return by_scale[(f, fa)]
     graph, values = gtsam.NonlinearFactorGraph(), gtsam.Values()
     imu_factors = []
     zero_bias = gtsam.imuBias.ConstantBias()
@@ -1918,7 +1922,7 @@ def cmd_solve(a):
     def build_imu(m_vec):
         return _imu_graph(kf_ns, kf_p, kf_r, vio, imu_data, noise, a.imu_noise_scale, a.accel_rw_scale,
                           a.gyro_rw_scale, a.prior_rot_sigma, omega, init_st,
-                          (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0]),
+                          (a.gyro_rw_warmup, a.gyro_rw_warmup_s, kf_ns_all[0], getattr(a, "accel_rw_warmup", 1.0)),
                           gyro_m=m_vec[:9].reshape(3, 3) if np.any(m_vec[:9]) else None,
                           accel_m=m_vec[9:18].reshape(3, 3) if np.any(m_vec[9:18]) else None,
                           temp=imu_temp, gyro_temp=m_vec[18:24] if np.any(m_vec[18:24]) else None,
@@ -2820,6 +2824,9 @@ def main():
                        help="the gyro bias random walk is this many times looser at the recording's first keyframe, "
                             "decaying to 1 over --gyro-rw-warmup-s (the device warming up)")
         s.add_argument("--gyro-rw-warmup-s", type=float, default=300.0)
+        s.add_argument("--accel-rw-warmup", type=float, default=1.0,
+                       help="the accelerometer's bias random walk at the start, times the walk, decaying to 1 over "
+                            "--gyro-rw-warmup-s as the gyroscope's (the device warming up)")
         s.add_argument("--loops", action="store_true", help="add the revisit matches of the loops stage")
         s.add_argument("--flow", default="", help="flow.npz of the flow step: its links join the matches")
         s.add_argument("--modes", default="", help="undamped deformation modes of the whole solution: yaw, scale "
