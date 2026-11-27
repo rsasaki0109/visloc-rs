@@ -113,6 +113,11 @@ bonsai `images_8`, 7,000 steps, cap 400k:
 
 - **Times are after the tight raster bounds** (below). Before them the same
   run, bit-identical, took 1,416 s.
+- **garden holds up too** (`images_8`, 648x420, outdoors, same settings):
+  `gsplat_train` 23.80 / 26.16 / 27.46 / **27.75** dB in 1,983 s,
+  `gsplat-cpu` 23.77 / 25.92 / 27.47 / **27.82** dB in **1,568 s (1.26x)**.
+  The populations track each other (174,603 against 174,685 at step 1,000,
+  303,082 against 303,120 at 3,000, both at the cap by 5,000).
 - **A lower cap is not a speed lever.** Same run with `--max-gaussians
   300000`: 31.12 dB (-0.27) in 1,196 s. Through step 3,000 it was identical
   to the 400k run, yet 9% slower there, so this run's box was slower and the
