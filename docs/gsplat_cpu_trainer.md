@@ -167,6 +167,11 @@ Same protocol (bonsai `images_8`, 7,000 steps, cap 400k):
 - **Four times the pixels cost 1.6x the time** (236 against 150 ms a step at
   390x260): intersections went from 293k to 564k a view. Backward 95 ms,
   forward 50, Adam 34, projection and binning 31, loss 18.
+- **Re-measured after the tight raster bounds**, back to back on one machine:
+  `gsplat_train` 999 s (28.86 dB), `gsplat-cpu` before the bounds 774 s,
+  after 765 s (both 29.03 dB), so 1.31x. At this resolution the bounds buy
+  only ~1% (forward and backward -6%): splats cover more pixels, so the
+  one-pixel pad was a smaller share of the walk than at 390x260.
 - **Strided pixels still lose at equal time**: 26.69 dB at 509 s, where the
   full-pixel run had 28.10 dB at 458 s (step 2,000).
 
