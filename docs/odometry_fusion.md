@@ -357,11 +357,45 @@ Through the ROS 2 nodes (DDS replay at 0.2x), `map_prior` with
   with the accelerometer's mean over the first 0.5 s. At every 5th image the
   fixes are accepted throughout and hold it (10.6 cm). A VIO that the map
   shows to be wrong (fixes rejected in a row while agreeing with each other)
-  would need to be reset at the map pose; nothing does that yet.
+  is reset by `--vio-recover` (below).
 - On the old mono maps, where office1-7 has fixes only in its first 2 s,
   the map prior is unstable with or without the hold (10 cm to 209 m), and
   the hold can land it worse (12 km at every 3rd image). Use it with a map
   that keeps localizing.
+
+## Recovery: a VIO the map shows to be wrong
+
+When a VIO runs away anyway, the map sees it: full fixes keep arriving and
+each is rejected, further off than the last. `basalt_euroc_localize_demo
+--vio-recover N` counts full fixes rejected in a row and, at N, rebuilds the
+VIO (levelled by the next frame's IMU, at zero velocity) and starts the
+correction over. With N = 3, the correction's own `reset_after`, fixes that
+are rejected but agree with each other reset the correction first (the VIO
+is fine and only its offset is wrong). Only rejections that also disagree,
+a VIO moving away from the map, reach the recovery.
+
+With the static hold, the same matrix (RMSE in cm; recoveries in brackets):
+
+| | every 3rd image | 5th | 10th | A + weak gate |
+|---|---|---|---|---|
+| office1-6 | 1.65 (0) | 1.74 (0) | 2.14 (0) | 1.74 (0) |
+| office1-7 | 2.21 (0) | 3.86 (0) | 2.31 (0) | 4.13 (0) |
+| office1-1 | 10.65 (0) | 10.58 (0) | **14.20 (1)**; 231 m without | 10.58 (0) |
+| office1-2 | 3.78 (0) | 5.23 (0) | 6.83 (0) | 5.23 (0) |
+| office1-3 | 3.09 (0) | 3.25 (0) | 3.12 (0) | 3.44 (0) |
+| office1-6, old mono map | 2.75 (0) | 2.59 (0) | 2.03 (0) | 1.44 (0) |
+| office1-7, old mono map | 32.3 (0) | 31.8 (0) | 31.8 (0) | 1.89 (0) |
+
+- **It fires once in 28 runs**, on the one that diverged, 1.67 s in, and
+  takes it from 231 m to 14.2 cm. Most of the rest is the run-away before
+  the reset (89 cm at most).
+- **With the hold and the recovery, no run on these maps diverges.**
+- **It needs fixes to see the run-away.** On office1-7 with the old mono map
+  the fixes stop after 2 s, the recovery never fires, and the map prior
+  stays at about 32 cm.
+- **The ROS 2 nodes do not have it yet.** There the rejections happen in
+  `visloc_map_localize_node` and the VIO in `visloc_vio_node`, so the map
+  node would have to ask the VIO node to reset.
 
 ## What was adopted
 

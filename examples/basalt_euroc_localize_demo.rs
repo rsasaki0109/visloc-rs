@@ -102,6 +102,10 @@
 //!   motion (`visloc_basalt::vio::StaticHold`). With `--vio-map-prior` and a
 //!   monocular VIO without wheels, it stops the start-up run-away the map
 //!   prior can cause while the robot stands still.
+//! - `--vio-recover N` (with `--vio`): after N full fixes in a row are
+//!   rejected, without agreeing among themselves (which would reset the
+//!   correction instead), the VIO has left the map: it is rebuilt, levelled
+//!   by the next frame's IMU, and the correction starts over.
 //! - `--fusion`: the map pose comes from `visloc_localization::MapFusion`, a
 //!   sliding-window pose graph over the odometries and the accepted fixes,
 //!   instead of the single rigid correction. With `--vio --odometry FILE`
@@ -345,7 +349,7 @@ impl Args {
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--fusion [--odometry-noise wheel|legged] \
          [--drop-vio-s START:END]] [--vio-map-prior [--map-prior-sigma M,YAW_DEG,TILT_DEG]] \
-         [--vio-wheel-velocity] [--vio-static-hold] [--mono] \
+         [--vio-wheel-velocity] [--vio-static-hold] [--vio-recover N] [--mono] \
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
@@ -602,6 +606,9 @@ impl Args {
         }
         if args.vio_static_hold && !args.vio {
             return Err("--vio-static-hold needs --vio".into());
+        }
+        if args.vio_recover > 0 && !args.vio {
+            return Err("--vio-recover needs --vio".into());
         }
         if args.mono && !args.vio {
             return Err("--mono needs --vio".into());
@@ -2161,6 +2168,13 @@ mod tests {
         assert!(with(&["--calibration", "c.json"]).is_err());
         assert!(with(&["--projection-radius-px", "20"]).is_err());
         let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
+        assert!(with(&["--vio-static-hold"]).is_err());
+        assert!(with(&["--vio-recover", "3"]).is_err());
+        let args = with(&[&vio[..], &["--vio-static-hold", "--vio-recover", "3"]].concat())
+            .expect("parses");
+        assert!(args.vio_static_hold);
+        assert_eq!(args.vio_recover, 3);
+        assert_eq!(with(&vio).expect("parses").vio_recover, 0);
         assert!(with(&[&vio[..], &["--stride", "2"]].concat()).is_err());
         assert!(with(&[&vio[..], &["--localize-every", "0"]].concat()).is_err());
         assert!(with(&["--initial-localize-every", "1"]).is_ok());

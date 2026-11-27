@@ -21,6 +21,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `basalt_euroc_localize_demo --vio-recover N`: after N full fixes in a row
+  are rejected, without agreeing among themselves, the VIO is rebuilt and
+  the correction starts over. With `--vio-static-hold` and the map prior on
+  a monocular VIO without wheels, no run on five OpenLORIS-Scene query/map
+  pairs diverges (office1-1, every 10th image: 231 m to 14.2 cm), and it
+  fires on no other run. Not yet in the ROS 2 nodes. See
+  `docs/odometry_fusion.md`.
+
 - `gsplat_cpu_train` colours the points of a model whose points are all
   white (as this repository's SfM writes them) from the training photos.
   bonsai from `unordered_sfm_demo` poses, 7,000 steps: 23.67 -> 25.55 dB
