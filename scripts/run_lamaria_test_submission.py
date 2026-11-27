@@ -639,6 +639,10 @@ def main() -> int:
                              "\"--num-features 900 --kf-step 20\"; commas may stand for the spaces)")
     parser.add_argument("--ba-experiment-pass-match-args", default="",
                         help="--ba-experiment-pass-features: options of their match steps (e.g. \"--ratio 0.78\")")
+    parser.add_argument("--ba-experiment-pass-match", choices=PASS_MATCH, default=None,
+                        help="the submitted chain only: how the pass's own keypoints are matched (see --ba-pass-match)")
+    parser.add_argument("--ba-experiment-pass-loop-args", default="",
+                        help="the submitted chain only: options of the pass's revisit search (e.g. \"--max-dist,25\")")
     parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
                         help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
@@ -731,7 +735,8 @@ def main() -> int:
     if args.ba_compare and not (args.ba_chain and args.log_dir
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m or args.ba_pass_args
                                      or args.ba_fisheye_model or args.ba_est_time_offsets
-                                     or args.ba_fuse_accelerometers or args.ba_experiment_pass_features)):
+                                     or args.ba_fuse_accelerometers or args.ba_experiment_pass_features
+                                     or args.ba_experiment_pass_match or args.ba_experiment_pass_loop_args)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
     if args.ba_compare_camera_gyro and not (
             args.ba_compare and args.ba_stereo_reference is not None and args.ba_est_gyro_m
@@ -940,13 +945,18 @@ def main() -> int:
                             run([python, estimate_converter, "--in-tum", source,
                                  "--out-estimate", log_dir / name], check=True)
                         # an experiment's own pass keypoints are made afresh, not the default chain's reused
-                        share_ba_inputs(baseline_work, ba_work,
-                                        None if low_light or args.ba_experiment_pass_features else learned)
-                    main_options = chain_options
+                        own = args.ba_experiment_pass_features or args.ba_experiment_pass_match \
+                            or args.ba_experiment_pass_loop_args
+                        share_ba_inputs(baseline_work, ba_work, None if low_light or own else learned)
+                    main_options = dict(chain_options)
+                    if args.ba_experiment_pass_match:
+                        main_options["pass_match"] = args.ba_experiment_pass_match
+                    if args.ba_experiment_pass_loop_args:
+                        main_options["pass_loop_args"] = words(args.ba_experiment_pass_loop_args)
                     if args.ba_experiment_pass_features:  # keypoints of their own for this chain's pass
                         log(f"{seq}: {args.ba_experiment_pass_features} keypoints of their own in the pass "
                             f"({args.ba_experiment_pass_feature_args or 'default options'})")
-                        main_options = dict(chain_options, pass_features=args.ba_experiment_pass_features,
+                        main_options = dict(main_options, pass_features=args.ba_experiment_pass_features,
                                             pass_feature_args=words(args.ba_experiment_pass_feature_args),
                                             pass_match_args=words(args.ba_experiment_pass_match_args))
                     trajectory = run_chain(*chain_args, ba_work, work / "ba_chain.tum",

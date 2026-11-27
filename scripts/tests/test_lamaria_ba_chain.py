@@ -153,6 +153,13 @@ class StepsTest(unittest.TestCase):
             self.assertEqual(value(p[name], "--ratio"), "0.78")
         self.assertEqual(value(p["pass solve"], "--work"), str(Path("w/rootsift")))
         self.assertEqual(value(p["pass solve"], "--vio"), str(Path("w/online.tum")))
+        loops = {name: [str(c) for c in cmd]
+                 for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4,
+                                                    rematch=True, pass_features="rootsift",
+                                                    pass_loop_args=["--max-dist", "25"])}
+        self.assertNotIn("--max-dist", loops["loops"])  # the online windows' revisits stay as they are
+        for name in ("pass loops", "rematch loops"):
+            self.assertEqual(value(loops[name], "--max-dist"), "25")
 
     def test_the_pass_matches_within_the_online_band_or_by_an_essential_matrix(self):
         def plan_with(guide):

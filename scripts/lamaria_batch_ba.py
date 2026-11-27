@@ -138,9 +138,9 @@ def _sift_image(path, clahe, denoise=0.0, denoise_window=21):
 
 def _sift_worker(task):
     import cv2
-    path, nfeat, clahe, denoise, denoise_window, rootsift = task
+    path, nfeat, clahe, denoise, denoise_window, rootsift, contrast, edge = task
     cv2.setNumThreads(1)
-    sift = cv2.SIFT_create(nfeatures=nfeat, contrastThreshold=0.01)
+    sift = cv2.SIFT_create(nfeatures=nfeat, contrastThreshold=contrast, edgeThreshold=edge)
     kp, des = sift.detectAndCompute(_sift_image(path, clahe, denoise, denoise_window), None)
     xy = np.array([k.pt for k in kp], dtype=np.float32).reshape(-1, 2)
     size = np.array([k.size for k in kp], dtype=np.float32)
@@ -204,8 +204,8 @@ def cmd_features(a):
     extra = {}
     if a.extractor == "sift":
         with mp.Pool(a.jobs) as pool:
-            res = pool.map(_sift_worker, [(p, a.num_features, a.clahe, a.denoise, a.denoise_window, a.rootsift)
-                                             for p in paths],
+            res = pool.map(_sift_worker, [(p, a.num_features, a.clahe, a.denoise, a.denoise_window, a.rootsift,
+                                           a.contrast_threshold, a.edge_threshold) for p in paths],
                            chunksize=8)
     else:  # no keypoint size: the solve's --sigma-size leaves these observations at --pixel-sigma
         res = [(xy, des, np.full(len(xy), np.nan, np.float32), wh) for xy, des, wh in _learned_features(a, paths)]
@@ -2673,6 +2673,8 @@ def main():
                    help="non-local means denoising strength h before detection (low light, e.g. 7; 0: off)")
     f.add_argument("--denoise-window", type=int, default=21,
                    help="its search window (px); 11 takes about 40 %% less time than 21")
+    f.add_argument("--contrast-threshold", type=float, default=0.01, help="SIFT: OpenCV's contrastThreshold")
+    f.add_argument("--edge-threshold", type=float, default=10.0, help="SIFT: OpenCV's edgeThreshold")
     f.add_argument("--rootsift", action="store_true",
                    help="SIFT: RootSIFT descriptors, compared by their Euclidean distance like SIFT's")
     f.add_argument("--extractor", choices=("sift", *LEARNED), default="sift",
