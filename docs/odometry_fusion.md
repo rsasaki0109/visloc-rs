@@ -214,11 +214,12 @@ scale (about 1.15) is real, but where fixes keep coming, the 5 s window
 re-anchors the trajectory before the scale error builds up. office1-7 is
 where a scale would matter, and there it has nothing to fit: every run
 against office1-2's map gets its fixes in the first 2 s of 37 s (stereo map
-and VIO included; one monocular run got 26 fixes up to 10.5 s). The rest of
-the walk leaves what the map covers. Its 13 to 50 cm come from that, and
-more of the map, or images that still localize there
-([openloris_map_localization.md](openloris_map_localization.md)), is what
-would help.
+and VIO included; one monocular run got 26 fixes up to 10.5 s). It does not
+leave the map: its ground truth stays within 0.35 m of office1-2's path,
+facing the same way (within 9°). Its furniture was moved, and its images
+stop matching: after the first 2 s a median of 11 to 21 matches and 4 to 11
+inliers per try, against 42 to 66 and 30 to 48 on office1-6. Its 13 to 50 cm
+come from that.
 
 ## What was adopted
 
