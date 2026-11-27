@@ -90,7 +90,7 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `image_qos_depth`, `imu_qos_depth` | `5`, `400` | subscription history depth |
 | `urgent_keyframes` | `true` | the demo's urgent-keyframe defaults |
 | `imu_seed_klt` | `false` | `config.optical_flow_imu_seed_rotation` |
-| `max_iterations` | `3` | LM iterations per frame, overriding `config.vio_max_iterations` (`0` keeps the config's); see the replay results below |
+| `max_iterations` | `3`; `0` with `mono` | LM iterations per frame, overriding `config.vio_max_iterations` (`0` keeps the config's); see the replay results below |
 | `mapper` | `false` | run the online mapper and publish `map_frame -> odom_frame`, `map_pose`, `map_path` |
 | `map_frame` | `map` | with `mapper` |
 | `mapper_queue` | `64` | mapper packets waiting for the mapper; when full, new packets are dropped (counted as `mapper_dropped`) |
@@ -286,8 +286,10 @@ truth:
   `odom -> imu_link` 2,912 times each.
 - **Shutdown.** The final optimization took 15.7 s (stereo) and 24.6 s
   (mono) after SIGINT, and both runs wrote their trajectory file.
-- **Mono uses the one-sample initial tilt.** `config.vio_init_accel_average_s`
-  is a EuRoC-reader option, and the node does not read it. Mono's mean
+- **Mono's initial tilt.** These runs predate the node reading
+  `config.vio_init_accel_average_s`, so mono started from one IMU sample.
+  The node now starts as the EuRoC reader does
+  ([below](#map-fixes-and-wheel-speed-inside-the-vio)). Mono's mean
   frontend / estimator time was 4.1 / 6.8 ms per frame.
 - **Python version.** Jazzy's Python packages are built for Python 3.12. On a
   machine whose `/usr/bin/python3` is another version, run the tools as
@@ -557,14 +559,35 @@ runs in `docs/odometry_fusion.md`:
 |---|---|---|
 | office1-6 → office1-1 | 99.8%, 2.25 / 3.5 cm | 99.8%, **1.66 / 2.6 cm** |
 | office1-7 → office1-2 | 99.3%, 6.38 / 12.7 cm | 99.7%, **4.50 / 9.8 cm** |
-| office1-6 → office1-1, `mono:=true`, mono map | 99.7%, 57.8 / 92.2 cm | 99.7%, **1.88 / 4.9 cm** |
-| office1-7 → office1-2, `mono:=true`, mono map | 99.5%, 60.3 / 113.4 cm | 99.5%, **7.89 / 17.6 cm** |
+| office1-6 → office1-1, `mono:=true`, mono map | 98.2%, 7.87 / 28.3 cm | 98.2%, **1.30 / 2.1 cm** |
+| office1-7 → office1-2, `mono:=true`, mono map (before the two changes below) | 99.5%, 60.3 / 113.4 cm | 99.5%, **7.89 / 17.6 cm** |
 
 With `mono:=true` (and, for a robot that starts still,
 `configs/basalt/variants/official_euroc_ds/euroc_config_mono_static_start.json`) the maps were built by `basalt_euroc_online_slam_demo
 --mono --save-map`, so the robot has one camera throughout. A monocular
 VIO on a ground robot barely sees its scale; the wheel velocity is what
 holds it.
+
+Two things made `mono:=true` match the offline demo
+(`basalt_euroc_localize_demo --vio --mono`, office1-6 on the mono map:
+7.66 cm without the map prior or wheels):
+
+- **The averaged initial tilt.** With `config.vio_init_accel_average_s`
+  (the static-start config sets 0.5 s), the node starts the stream that
+  long after its first frame and levels it with the mean IMU sample over
+  the span, as the EuRoC reader does. It used to take one sample. Offline,
+  one sample makes the monocular VIO diverge on office1-6 (199 m); through
+  the node it was 57.8 cm. After a reset the node re-initializes from one
+  sample, as before.
+- **The config's LM iterations.** `max_iterations` defaults to `3` for
+  stereo, to stay real time on 4 cores, and now to `0` (the config's 5)
+  with `mono`, whose estimator is cheaper: 11.0 ms on average and 20 ms at
+  most per frame here. With 3 iterations office1-6 is 14.4 cm; with 5,
+  7.87 cm.
+
+office1-6 went from 57.8 to 7.87 cm (default) and from 1.88 to 1.30 cm
+(`map_prior` + `wheel_velocity`). Each replay was run once; a repeat of the
+3-iteration case gave the same 14.43 cm. office1-7 was not rerun.
 
 ```sh
 # Replay a converted sequence over DDS and record map_pose (no ROS 2 needed)

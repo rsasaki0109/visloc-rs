@@ -329,6 +329,13 @@ Their fixes are the poorest of those bent: a median reported accuracy of 8.6 to
 picked now would be picked on the test scores. The training sequences have no
 case of either kind to set one on.
 
+Weighing each fix by its own reported accuracy does not separate them either.
+The median of residual over reported accuracy (fixes up to 10 m, accuracy
+floored at 3 m) is 0.45 to 0.70 on the clean training monos. On the three
+that lost it is 0.75 to 0.85; on the ten that gained it is 0.92 to 1.72, but
+sequence_2_3 sits at 0.58. So the submission keeps the 4 m gate as set on the
+training sequences.
+
 ## Reproduce
 
 ```bash
