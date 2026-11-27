@@ -342,10 +342,10 @@ def words(option: str) -> list[str]:
     return option.replace(",", " ").split()
 
 
-def share_ba_inputs(source, target, features):
-    """Reuse the completed online pass and the inputs of the first batch solve."""
+def share_ba_inputs(source, target, features, online=True):
+    """Reuse the completed online pass (unless `online` is false) and the inputs of the first batch solve."""
     inputs = ["features.npz", "matches.npz", "match.done", "loops.npz"]
-    paths = [source / name for name in [*inputs, "online.tum", "online.done"]]
+    paths = [source / name for name in [*inputs, *(["online.tum", "online.done"] if online else [])]]
     if features:
         paths.extend(pass_work(source, features) / name for name in inputs)
     for path in paths:
@@ -643,6 +643,9 @@ def main() -> int:
                         help="the submitted chain only: how the pass's own keypoints are matched (see --ba-pass-match)")
     parser.add_argument("--ba-experiment-pass-loop-args", default="",
                         help="the submitted chain only: options of the pass's revisit search (e.g. \"--max-dist,25\")")
+    parser.add_argument("--ba-experiment-online-args", default="",
+                        help="the submitted chain only: options of its online windows, which it then solves itself "
+                             "(e.g. \"--gyro-rw-warmup,1\")")
     parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
                         help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
                              "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
@@ -736,7 +739,8 @@ def main() -> int:
                                 and (args.ba_stereo_reference is not None or args.ba_est_gyro_m or args.ba_pass_args
                                      or args.ba_fisheye_model or args.ba_est_time_offsets
                                      or args.ba_fuse_accelerometers or args.ba_experiment_pass_features
-                                     or args.ba_experiment_pass_match or args.ba_experiment_pass_loop_args)):
+                                     or args.ba_experiment_pass_match or args.ba_experiment_pass_loop_args
+                                     or args.ba_experiment_online_args)):
         parser.error("--ba-compare requires --ba-chain, --log-dir and an experimental batch option")
     if args.ba_compare_camera_gyro and not (
             args.ba_compare and args.ba_stereo_reference is not None and args.ba_est_gyro_m
@@ -947,12 +951,15 @@ def main() -> int:
                         # an experiment's own pass keypoints are made afresh, not the default chain's reused
                         own = args.ba_experiment_pass_features or args.ba_experiment_pass_match \
                             or args.ba_experiment_pass_loop_args
-                        share_ba_inputs(baseline_work, ba_work, None if low_light or own else learned)
+                        share_ba_inputs(baseline_work, ba_work, None if low_light or own else learned,
+                                        online=not args.ba_experiment_online_args)
                     main_options = dict(chain_options)
                     if args.ba_experiment_pass_match:
                         main_options["pass_match"] = args.ba_experiment_pass_match
                     if args.ba_experiment_pass_loop_args:
                         main_options["pass_loop_args"] = words(args.ba_experiment_pass_loop_args)
+                    if args.ba_experiment_online_args:
+                        main_options["online_args"] = words(args.ba_experiment_online_args)
                     if args.ba_experiment_pass_features:  # keypoints of their own for this chain's pass
                         log(f"{seq}: {args.ba_experiment_pass_features} keypoints of their own in the pass "
                             f"({args.ba_experiment_pass_feature_args or 'default options'})")
