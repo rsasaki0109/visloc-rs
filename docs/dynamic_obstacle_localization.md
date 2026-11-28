@@ -1140,6 +1140,43 @@ Map pose RMSE (max), before 35 s / from 35 s on:
   start is the warm-up's weak start (up to 0.9 m for about 8 s), which the
   cap cannot catch: that VIO is not running away.
 
+### No map pose before a full fix (`map_pose_needs_full`)
+
+The warm-up's weak start was the last metre-scale error: without people,
+13 weak fixes seen off the map's path agreed on a pose 56 cm off. They
+started the correction at 19.7 s, and the strong fixes only reset it at
+27.5 s. The correction cannot tell such a group from a good one. With
+people ahead, the weak start at 27.3 s was right, and the full fixes,
+judged against the runaway VIO, never agree among themselves.
+
+- **Requiring a full fix to start the correction does not work.** With
+  people ahead, it never started (no map pose at all), because the full
+  fixes never agree under a runaway VIO.
+- **Publishing only once a full fix is used does.** The correction still
+  starts from weak fixes and steers the projection search. The map pose is
+  only published once the correction or the fusion has used a full fix:
+  `map_pose_needs_full` (node, on in `profile:=dynamic_indoor`) or
+  `--map-pose-needs-full` (demo). In the demo, the map pose also steers the
+  search, so only its output is held back.
+
+Map pose RMSE (max):
+
+| Run | Before | With it |
+| --- | --- | --- |
+| RNE outdoors, no people, nodes (profile) | 18.8 (92) cm | **1.7 (3.4) cm** |
+| RNE outdoors, people ahead, nodes, no wheel velocity | 12.2 (58) cm | **2.1 (4.2) cm** |
+| RNE outdoors, people ahead, nodes, + `wheel_velocity` | 2.8 (12) cm | 2.4 (8.8) cm |
+| RNE outdoors, no people, demo (recommended) | 20.4 (90) cm | **1.7 (6.1) cm** |
+| RNE outdoors, people ahead, demo (recommended) | 5.2 (42) cm | **2.1 (4.1) cm** |
+| OpenLORIS office1-7, demo | 1.77 (3.4) cm | 1.77 (3.4) cm |
+| RNE indoors q0 / a4 / a2, demo | 1.05 / 2.26 / 1.91 cm | the same |
+| RNE indoors q0 / a4 / a2, nodes, one core | 1.1 / 1.9 / 1.2 cm | 1.0 / 2.2 / 1.2 cm |
+
+- **The cost is a later first map pose.** With people ahead it comes at
+  33.1 s instead of 27.3 s (938 map poses instead of 1054). Without them it
+  comes at 27.5 s instead of 19.7 s, when the other settings start too.
+- Each run was made once.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon

@@ -42,6 +42,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `visloc_map_localize_node`'s `map_pose_needs_full` (on in `profile:=dynamic_indoor`)
+  and `basalt_euroc_localize_demo --map-pose-needs-full`: no map pose until a full fix
+  has been used. A correction started from weak fixes still steers the search. RNE
+  outdoors through the nodes: 18.8 -> 1.7 cm without people, 12.2 -> 2.1 cm with
+  people ahead and no wheel velocity. Office1-7 and RNE indoors unchanged.
 - docs: why the OpenLORIS market map keeps about a metre: market1-1's end does
   not see its start (no fix from its last 35 s on a map of its first 40 s), so
   no loop can close it; `--loop-closure-factors` gives 112 -> 108 cm.
