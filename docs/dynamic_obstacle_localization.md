@@ -903,6 +903,34 @@ map's error still decides the localization, about a metre at every
 setting. Showing what the parts for people do in this crowd needs a
 better map, which is a mapping problem, not a localization one.
 
+### Why the market map keeps its last metre: no loop to close
+
+market1-1 is one large loop, 58 x 29 m. It ends 3 m from where it started,
+facing the same way (168 deg against 166 deg). It passes near its own path
+once more, at 142 s, where it was at 122 s. The SLAM's accepted loops are at
+about 41, 67 and 136 s. None of them closes the end onto the start, so the
+map's error is the VIO's drift: Sim3 ATE about 1 m, mostly heading rather
+than scale.
+
+- **Loop-pose factors help a little:** with `--loop-closure-factors` (off
+  by default) the map is 108 cm instead of 112 cm. With `--match-top-k 15`
+  too, the mapper accepts 104 loops instead of 17, but none near the end,
+  and the map is 115 cm.
+- **The end does not see the start.** A map of the first 40 s alone takes
+  every fix from those 40 s (309 inliers median). From the last 35 s it
+  takes none (at most 5 inliers), although the robot is within 3 m of
+  where it started. The views do not overlap, so no loop detector can
+  close this loop.
+- **Wheel velocity in the VIO does not help here:** 133 cm against 114 cm
+  for the VIO alone (shipped calibration: 123 cm). The heading drift is
+  the wheels' too.
+
+So this map cannot be brought under about a metre from this session alone.
+That would take a map that sees the same places twice, for example built
+from more than one market session, or a session that closes its loop
+facing the same views. The crowd's effect on localization on real data
+stays unmeasured at the centimetre level.
+
 ## A map built with people walking about (F3)
 
 RNE example 113 rendered the mapping run again with six walkers wandering

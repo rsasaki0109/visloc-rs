@@ -42,6 +42,9 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: why the OpenLORIS market map keeps about a metre: market1-1's end does
+  not see its start (no fix from its last 35 s on a map of its first 40 s), so
+  no loop can close it; `--loop-closure-factors` gives 112 -> 108 cm.
 - `MapFusionConfig::max_speed_m_s` (`basalt_euroc_localize_demo
   --fusion-max-speed`, `visloc_map_localize_node` `fusion_max_speed_m_s`, 2 in
   `profile:=dynamic_indoor`): a source moving faster than the robot can is left
