@@ -925,6 +925,32 @@ than scale.
   for the VIO alone (shipped calibration: 123 cm). The heading drift is
   the wheels' too.
 
+**The ground truth's clock is off, by a different amount per session.**
+Over 20 s windows, the VIO fits the ground truth best when the ground truth
+is moved by -1.06 s on market1-1 and -0.34 s on market1-2 (window SE3
+residual 17 / 14 cm, against 32 / 17 cm unshifted). On office1-1 the best
+shift is +0.1 s (2.2 cm either way) and on cafe1-1 -0.2 s. At market's
+0.85 m/s, a second is nearly a metre. With each session's ground truth
+moved by its own offset (scored on the shifted copies, the data unchanged):
+
+| | Ground truth as shipped | Shifted per session |
+| --- | --- | --- |
+| market1-1 map: SLAM ATE | 112 cm | **59.6 cm** |
+| VIO + map, fixed / local (median) | 174 / 96 cm | 131 / 42 cm |
+| wheels + map | 247 / 98 cm | 247 / 47 cm |
+| VIO + wheels + source check | 152 / 94 cm | 102 / 43 cm |
+| recommended | 153 / 98 cm | 102 / 45 cm |
+
+("Local" fits the map to the ground truth within 5 m of each pose, so the
+map's own drift drops out; median given.)
+
+The offsets halve the map's error again, but about 40 cm remains, even
+around each pose. The market VIO itself drifts 14–17 cm over 20 s windows,
+where office's drifts 2.2 cm. So these market sessions still do not
+resolve centimetres. The settings rank as before: fusing the wheels helps,
+the wheels alone are worst, and the parts for people neither help nor hurt
+here.
+
 So this map cannot be brought under about a metre from this session alone.
 That would take a map that sees the same places twice, for example built
 from more than one market session, or a session that closes its loop

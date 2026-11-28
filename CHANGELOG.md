@@ -42,6 +42,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: OpenLORIS market's ground truth is off in time by a different amount per
+  session (-1.06 s on market1-1, -0.34 s on market1-2; office about 0.1 s). Shifted,
+  the market map's ATE is 60 cm instead of 112 cm, and localization around each
+  pose about 43 cm instead of 95 cm (median): still not centimetres.
 - `visloc_map_localize_node`'s `map_pose_needs_full` (on in `profile:=dynamic_indoor`)
   and `basalt_euroc_localize_demo --map-pose-needs-full`: no map pose until a full fix
   has been used. A correction started from weak fixes still steers the search. RNE
