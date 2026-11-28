@@ -2321,7 +2321,11 @@ pub fn extract_mapper_features_with(
     config: OfflineMapperConfig,
     quality_level: f32,
 ) -> Result<MapperImageFeatures, FeaturePipelineError> {
-    let corners = detect_keypoints_mapping_with(image, config.max_points, quality_level);
+    let mut corners = detect_keypoints_mapping_with(image, config.max_points, quality_level);
+    // A wide fisheye can have corners outside the Double Sphere model's valid
+    // region (e.g. an image edge past its fitted field of view); drop them
+    // instead of failing the frame. On EuRoC-style lenses none are dropped.
+    corners.retain(|corner| camera.unproject(corner).is_some());
     let corner_angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &corner_angles)?;
     let rays = unproject_rays(camera, &corners)?;

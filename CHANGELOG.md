@@ -6,6 +6,20 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- `visloc_map_localize_node` with `fusion:=true`: three faults that kept a
+  runaway VIO in the map pose (RNE outdoors with people ahead, through the
+  nodes: 1756 m to 2.2 cm after the start):
+  - the fusion never started when the correction had started from weak
+    fixes and then rejected every full fix against the VIO; it now starts
+    from three fixes that agree under one odometry;
+  - `MapFusion`'s source check cleared a runaway source's verdict at the
+    first fix after a gap longer than its window, and at a fix that every
+    source disagreed with; such checks now leave the verdicts as they were.
+- The mapper drops detector corners that the Double Sphere model cannot
+  unproject instead of failing the map (OpenLORIS market's right fisheye).
+- `scripts/openloris_to_euroc.py`: the Double Sphere fit keeps only the
+  Kannala-Brandt rays that invert cleanly and holds alpha below 1 (market's
+  right lens: 159 px to 0.149 px RMS).
 - `visloc_map_localize_node` with `fusion:=true`: a fusion carried more
   than 15 cm off (fixes missing while the VIO ran off) never took a fix
   again. It now restarts from three consecutive rejected fixes that move as
@@ -21,6 +35,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: an outdoor run in RNE (Tanks and Temples truck street, people
+  walking just ahead). The walkers make the VIO run off (all fixes then
+  rejected); with `--vio-wheel-velocity` the recommended setting holds at
+  2.5 cm.
 - `visloc_map_localize_node`'s `recover_after` and `visloc_vio_node`'s
   `map_recover` (opt-in): after that many full fixes in a row are rejected
   without agreeing among themselves, the map node bumps `vio_recover` and
@@ -28,7 +46,6 @@ All notable changes to `visloc-rs` will be documented here.
   monocular VIO without wheels, OpenLORIS-Scene office1-1 replayed over DDS
   goes from 437 m to 15.1 cm and office1-3 from 145 cm to 9.17 cm; it does
   not fire on the three replays that held. See `docs/odometry_fusion.md`.
-
 - `basalt_euroc_localize_demo --vio-recover N`: after N full fixes in a row
   are rejected, without agreeing among themselves, the VIO is rebuilt and
   the correction starts over. With `--vio-static-hold` and the map prior on

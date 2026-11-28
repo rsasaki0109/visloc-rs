@@ -824,8 +824,47 @@ pose RMSE (max), fixed alignment:
   better than these.
 - With people about (cafe, above) all settings stay within 17.6–21 cm, the
   map's own error. So the gains measured in RNE (people right in front of
-  the robot) are not yet shown on real data. That needs a real crowded run
-  with a better map (OpenLORIS market, 41.5 GB, did not fit here).
+  the robot) are not yet shown on real data. The crowded market (below)
+  does not show them either, for want of a good map.
+
+## OpenLORIS market: a crowded supermarket (map-limited)
+
+market1-1 and market1-2 were fetched alone out of the 41.5 GB archive (HTTP
+ranges) and converted with `scripts/openloris_to_euroc.py`. Its Double
+Sphere fit now keeps only the Kannala-Brandt rays that invert cleanly and
+holds alpha below 1: market's right lens had fitted to alpha 2.0 at 159 px
+RMS, and now fits at 0.149 px. The mapper drops a corner that the fitted
+model cannot unproject (one at the edge of market's right image failed the
+whole map before).
+
+The map is market1-1 (153 m around the aisles, same mapping flags as
+office): SLAM ATE 222 cm, worse than its own VIO (164 cm). Both overestimate
+the scale by 5–8 % (Sim3 scale 0.92–0.95; office and cafe: 0.98). That error
+is not the ground truth's: the wheels measure a shorter path than it, the
+VIO a longer one. The cause is not found yet. market1-2 (218 m, crowded) was
+localized against it with fixes every 5th frame. The camera mount differs
+from office: `--imu-from-body
+-0.061520,-0.326334,-1.055358,-0.410897,-0.391417,-0.563650,0.600212`.
+
+| Setting | Map pose RMSE, fixed alignment | Sim3-aligned alone | Fixes used / attempts |
+| --- | --- | --- | --- |
+| VIO + map (`--vio`) | 311 cm | 88 cm | 386 / 2255 |
+| wheels + map (`--odometry`) | 276 | 240 | 272 / 2254 (31 resets) |
+| VIO + wheels + source check | 244 | 93 | 386 / 2255 |
+| recommended (+ map prior, warm-up, seed 3) | **243** | **86** | 375 / 2325 |
+| (VIO alone, no map) | — | 72 | — |
+
+- **The map's error decides the result.** Every setting is metres off,
+  about the map's own 2.2 m and its scale error. Aligned with a Sim3 on
+  its own, the localized path is no better than the VIO alone (86–93 cm
+  against 72). This run cannot show what the parts for people do.
+- **Nothing broke among the crowd.** With the VIO, 7–8 of about 400 fixes
+  were rejected and the correction reset 3 times (recommended: 2 and 1).
+  Wheels alone reset 31 times and are the worst by far.
+- **Wheel fusion helps here, as on office1-7:** 311 to 244 cm. The
+  recommended setting adds nothing to that (243).
+- What this needs is a map without the scale error, i.e. finding the
+  market VIO's scale bias first.
 
 ## A map built with people walking about (F3)
 
@@ -873,6 +912,95 @@ map for the same positions: about 150 landmarks (3 %) on the people.
 space, are outvoted in the RANSAC by the background around them. Six
 people standing at the side of a room is the case measured; a map made
 mostly of people (a crowded hall) is not.
+
+## Outdoors: RNE street scene with people just ahead
+
+RNE example 113 now renders other splat scenes (`RNE_SPLAT_MANIFEST`,
+`RNE_WAYPOINTS`, `RNE_MAX_STEPS`). RNE's `tools/prepare_voxel51_truck_3dgs.py`
+turns the Voxel51 Tanks and Temples truck into a street scene: a parking lot
+before a café and buildings, trees, far facades. The ground plane is fitted
+by RANSAC and put at y = 0. The metric scale is assumed from the truck
+(about 6.6 m long); nothing in the capture measures it. The route is a
+10.8 x 4.2 m loop around the truck, with the camera 0.35 m up.
+
+The map run (90 s, no people) gave a map with SLAM ATE 2.2 cm (its VIO
+alone: 5.6 cm). Two 80 s queries were run. Both start at the far corner
+and drive about 20 s off the map's path before joining it. In one, four
+walkers keep 0.8–2.2 m ahead of the robot all the way (`RNE_WALKER_MODE=ahead`);
+the other has none. Fixes were taken every 2nd frame. Map pose RMSE (max)
+after 27.5 s, when every setting has joined the path:
+
+| Setting | No people | People ahead |
+| --- | --- | --- |
+| VIO + map (`--vio`) | 4.0 (35) cm | 1965 m: the VIO runs off |
+| wheels + map (`--odometry`) | **2.1 (4.3)** | 3.1 (12) |
+| VIO + wheels + source check | 2.4 (28.5) | 15.5 m (46 m) |
+| recommended (+ map prior, warm-up, seed 3) | 1.7 (5.9) | 13.8 m (42 m) |
+| ... + `--vio-recover 3` | 1.7 (5.9) | 36.6 cm (276) |
+| ... + `--vio-wheel-velocity` | 1.8 (3.7) | **2.5 (7.5)** |
+| VIO + map + `--vio-recover 3` | 8.6 (74) | 5.9 m (38 m) |
+
+- **The walkers break the VIO outdoors.** With nobody about, it holds
+  (4.0 cm). With people ahead, its visual tracking fails about 27 s in and
+  it accelerates away on the IMU alone. From then on every fix disagrees
+  with it, so all of them are rejected (402 of 402). Neither the source
+  check nor seeding can help, because the fusion's own odometry is the one
+  running off. Indoors (Dr Johnson, a4) the same walkers cost the VIO
+  70 cm. Here, the near ground is blurred and most texture is far away,
+  so they leave it far less to track.
+- **Wheel speed in the VIO prevents the runaway (2.5 cm, max 7.5).** Only
+  2 fixes were rejected. `--vio-recover` restarts the VIO after the fact,
+  so it is off by metres until it does (median 2.3 cm, max 2.8 m).
+- **For an outdoor robot with wheels, the recommended setting should
+  include `--vio-wheel-velocity`.** It costs nothing without people
+  (1.7 to 1.8 cm). On OpenLORIS office it also helped (1.88 to 1.30 cm
+  through ROS 2).
+- **A weakness of the warm-up start:** without people, the recommended
+  setting starts 8 s earlier, from a weak fix off the map's path, and is
+  56 cm (max 90) off until the strong fixes take over. The other settings
+  wait for the path. Every setting was run once.
+- The ~27 s without a map pose at the start comes from the route (the
+  query starts off the map's path), not from the people: it is there
+  without them too.
+
+### Through the ROS 2 nodes: three fusion faults
+
+Replayed over DDS in real time (`euroc_dds_replay` at 1.0x, the nodes on
+three cores), with `profile:=dynamic_indoor`, `fusion:=true` and the VIO's
+`map_prior:=true`. The people run then showed three faults the offline runs
+had hidden (the offline demo's fusion only takes the fixes its correction
+used). Map pose RMSE (max), split at 35 s:
+
+| Run | Before 35 s | From 35 s on |
+| --- | --- | --- |
+| people, as merged | 30.5 m (67 m) | 1756 m (4314 m) |
+| people, fixed | 20.6 m (52 m) | **2.2 (4.4) cm** |
+| people, fixed, + VIO `wheel_velocity:=true` | 37.4 (105) cm | 2.4 (7.5) |
+| no people, fixed | 28.7 (81) cm | 1.8 (3.6) |
+| no people, fixed, + `wheel_velocity` | 29.0 (87) cm | 1.8 (3.6) |
+
+- **The fusion never started.** The correction started from weak fixes,
+  which do not start the fusion. Then it rejected every full fix against
+  the runaway VIO, so no fix ever started the fusion either. Now, once the
+  correction is set, fixes that the fusion lacks or rejects go to its
+  restart: three in a row that move as one odometry (here the wheels) did.
+- **A gap in the fixes handed the prediction back to the VIO.** After more
+  than the check window without fixes (people in front of the camera), the
+  first fix found no earlier one to check the VIO against. The VIO then
+  counted as sound again, and the prediction followed it, 37 m off within
+  a second. Now a source that cannot be checked keeps its verdict.
+- **So did one fix that every source disagreed with.** A wrong fix that the
+  wheels contradict too says nothing about the sources. It used to clear
+  the VIO's verdict as well (46 m spikes); now the verdicts stand.
+- **The start remains.** For the first seconds the fusion has a single
+  fix and cannot tell a runaway VIO from the wheels, so it is metres off
+  until the source check has a second fix to compare. With `wheel_velocity`
+  the VIO never runs away and the start stays within a metre.
+- Indoors (RNE a4 / a2 / q0, one core, as for seeding above) the fixed nodes
+  give 2.1 / 1.3 / 1.2 cm against 1.86 / 1.17 / 1.07 before, one run each.
+- The early start without people (from 19.7 s, up to 81 cm off) is the
+  warm-up's weak start described above. A run of the unfixed nodes that
+  happened to start at 27.4 s gave 2.5 (10.2) cm before 35 s.
 
 ## Compute budget (towards a Jetson)
 
