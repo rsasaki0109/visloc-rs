@@ -49,6 +49,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `scripts/aria_vrs_to_euroc.py`: Project Aria recordings (InCrowd-VI) to EuRoC, with
+  Double Sphere resampling and MPS ground truth at the IMU. The crowded InCrowd-VI
+  evaluation is not done: Google Drive's download quota and two non-overlapping
+  sequences stopped it (docs/dynamic_obstacle_localization.md).
+- docs: OpenLORIS market's ground truth is off in time by a different amount per
+  session (-1.06 s on market1-1, -0.34 s on market1-2; office about 0.1 s). Shifted,
+  the market map's ATE is 60 cm instead of 112 cm, and localization around each
+  pose about 43 cm instead of 95 cm (median): still not centimetres.
+- `visloc_map_localize_node`'s `map_pose_needs_full` (on in `profile:=dynamic_indoor`)
+  and `basalt_euroc_localize_demo --map-pose-needs-full`: no map pose until a full fix
+  has been used. A correction started from weak fixes still steers the search. RNE
+  outdoors through the nodes: 18.8 -> 1.7 cm without people, 12.2 -> 2.1 cm with
+  people ahead and no wheel velocity. Office1-7 and RNE indoors unchanged.
 - docs: why the OpenLORIS market map keeps about a metre: market1-1's end does
   not see its start (no fix from its last 35 s on a map of its first 40 s), so
   no loop can close it; `--loop-closure-factors` gives 112 -> 108 cm.

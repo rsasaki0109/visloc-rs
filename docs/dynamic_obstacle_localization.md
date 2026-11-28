@@ -925,6 +925,32 @@ than scale.
   for the VIO alone (shipped calibration: 123 cm). The heading drift is
   the wheels' too.
 
+**The ground truth's clock is off, by a different amount per session.**
+Over 20 s windows, the VIO fits the ground truth best when the ground truth
+is moved by -1.06 s on market1-1 and -0.34 s on market1-2 (window SE3
+residual 17 / 14 cm, against 32 / 17 cm unshifted). On office1-1 the best
+shift is +0.1 s (2.2 cm either way) and on cafe1-1 -0.2 s. At market's
+0.85 m/s, a second is nearly a metre. With each session's ground truth
+moved by its own offset (scored on the shifted copies, the data unchanged):
+
+| | Ground truth as shipped | Shifted per session |
+| --- | --- | --- |
+| market1-1 map: SLAM ATE | 112 cm | **59.6 cm** |
+| VIO + map, fixed / local (median) | 174 / 96 cm | 131 / 42 cm |
+| wheels + map | 247 / 98 cm | 247 / 47 cm |
+| VIO + wheels + source check | 152 / 94 cm | 102 / 43 cm |
+| recommended | 153 / 98 cm | 102 / 45 cm |
+
+("Local" fits the map to the ground truth within 5 m of each pose, so the
+map's own drift drops out; median given.)
+
+The offsets halve the map's error again, but about 40 cm remains, even
+around each pose. The market VIO itself drifts 14–17 cm over 20 s windows,
+where office's drifts 2.2 cm. So these market sessions still do not
+resolve centimetres. The settings rank as before: fusing the wheels helps,
+the wheels alone are worst, and the parts for people neither help nor hurt
+here.
+
 So this map cannot be brought under about a metre from this session alone.
 That would take a map that sees the same places twice, for example built
 from more than one market session, or a session that closes its loop
@@ -1139,6 +1165,71 @@ Map pose RMSE (max), before 35 s / from 35 s on:
   gives 1.77 / 1.84 cm. The run without people is unchanged after 35 s. Its
   start is the warm-up's weak start (up to 0.9 m for about 8 s), which the
   cap cannot catch: that VIO is not running away.
+
+### No map pose before a full fix (`map_pose_needs_full`)
+
+The warm-up's weak start was the last metre-scale error: without people,
+13 weak fixes seen off the map's path agreed on a pose 56 cm off. They
+started the correction at 19.7 s, and the strong fixes only reset it at
+27.5 s. The correction cannot tell such a group from a good one. With
+people ahead, the weak start at 27.3 s was right, and the full fixes,
+judged against the runaway VIO, never agree among themselves.
+
+- **Requiring a full fix to start the correction does not work.** With
+  people ahead, it never started (no map pose at all), because the full
+  fixes never agree under a runaway VIO.
+- **Publishing only once a full fix is used does.** The correction still
+  starts from weak fixes and steers the projection search. The map pose is
+  only published once the correction or the fusion has used a full fix:
+  `map_pose_needs_full` (node, on in `profile:=dynamic_indoor`) or
+  `--map-pose-needs-full` (demo). In the demo, the map pose also steers the
+  search, so only its output is held back.
+
+Map pose RMSE (max):
+
+| Run | Before | With it |
+| --- | --- | --- |
+| RNE outdoors, no people, nodes (profile) | 18.8 (92) cm | **1.7 (3.4) cm** |
+| RNE outdoors, people ahead, nodes, no wheel velocity | 12.2 (58) cm | **2.1 (4.2) cm** |
+| RNE outdoors, people ahead, nodes, + `wheel_velocity` | 2.8 (12) cm | 2.4 (8.8) cm |
+| RNE outdoors, no people, demo (recommended) | 20.4 (90) cm | **1.7 (6.1) cm** |
+| RNE outdoors, people ahead, demo (recommended) | 5.2 (42) cm | **2.1 (4.1) cm** |
+| OpenLORIS office1-7, demo | 1.77 (3.4) cm | 1.77 (3.4) cm |
+| RNE indoors q0 / a4 / a2, demo | 1.05 / 2.26 / 1.91 cm | the same |
+| RNE indoors q0 / a4 / a2, nodes, one core | 1.1 / 1.9 / 1.2 cm | 1.0 / 2.2 / 1.2 cm |
+
+- **The cost is a later first map pose.** With people ahead it comes at
+  33.1 s instead of 27.3 s (938 map poses instead of 1054). Without them it
+  comes at 27.5 s instead of 19.7 s, when the other settings start too.
+- Each run was made once.
+
+## InCrowd-VI: real crowds with 2 cm ground truth (not measured)
+
+InCrowd-VI (https://github.com/banafshebamdad/InCrowd-VI) records stations,
+an airport and malls with Meta Aria glasses: 58 sequences, 20 of them with
+more than 10 pedestrians per frame. Its ground truth is Aria MPS SLAM, about
+2 cm. `scripts/aria_vrs_to_euroc.py` converts a recording:
+
+- the two SLAM cameras are resampled into a fitted Double Sphere model;
+- the rectified IMU is written as it is;
+- MPS's closed-loop trajectory, at device time and moved to that IMU, is
+  the ground truth.
+
+The pipeline runs on it. A map of Winterthur HB "G6 loop" (104 m, crowded)
+localizes its own images every time (151 of 151). The crowds weigh on the
+VIO: on "G6 exit" (61 m) it is 174 cm off (Sim3 135 cm, scale 1.09).
+
+It was not measured, for two reasons:
+
+- **The data.** The recordings are on one public Google Drive folder, and
+  its download quota stopped this session twice, after about 3 GB and
+  after 0.5 GB. Ranges of 10 MB work until the quota is spent.
+- **The overlap.** Each recording has its own ground-truth frame, and the
+  two downloaded (G6 loop, G6 exit) do not share any place: no fix
+  in 1,480 attempts. Neither revisits its own path. A pair that overlaps
+  (likely Zurich airport "ramp checkin2" with "checkin2 large loop",
+  8.6 GB) is the next step. Since the ground-truth frames differ, it would
+  be scored after one rigid fit over the whole query.
 
 ## Compute budget (towards a Jetson)
 
