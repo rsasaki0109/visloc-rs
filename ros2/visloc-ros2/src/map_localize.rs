@@ -40,10 +40,10 @@ use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureRea
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
-    apply_inlier_spread_gate, fixes_agree_under_a_source, AllLandmarksSelector,
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid, LocalizationConfig,
-    LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
-    OdometryNoise, PackedDescriptors,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, fixes_move_as_one_source,
+    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid,
+    LocalizationConfig, LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection,
+    OdomCorrectionConfig, OdometryNoise, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -1310,9 +1310,10 @@ impl OdomCorrector {
                                             .drain(..self.fusion_rejected.len() - needed);
                                     }
                                     if self.fusion_rejected.len() == needed
-                                        && fixes_agree_under_an_odometry(
+                                        && fixes_move_as_one_source(
                                             &self.fusion_rejected,
                                             self.options.correction.agreement_m,
+                                            3.0,
                                         )
                                     {
                                         fusion.reset();
@@ -1354,25 +1355,6 @@ impl OdomCorrector {
         }
         events
     }
-}
-
-/// Whether each pair of consecutive `fixes` moved as one odometry did
-/// between them (the same odometry for all pairs): within `tolerance_m`
-/// and 3 deg.
-fn fixes_agree_under_an_odometry(fixes: &[(i64, SE3, [Option<SE3>; 2])], tolerance_m: f64) -> bool {
-    (0..2).any(|source| {
-        fixes.windows(2).all(|pair| {
-            let (_, fix_a, sources_a) = &pair[0];
-            let (_, fix_b, sources_b) = &pair[1];
-            let (Some(odom_a), Some(odom_b)) = (&sources_a[source], &sources_b[source]) else {
-                return false;
-            };
-            let fix_motion = fix_a.inverse().compose(fix_b);
-            let odom_motion = odom_a.inverse().compose(odom_b);
-            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
-                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= 3f64.to_radians()
-        })
-    })
 }
 
 /// Which received images to localize: every `every`-th once the odometry

@@ -1005,8 +1005,8 @@ after 27.5 s, when every setting has joined the path:
 Replayed over DDS in real time (`euroc_dds_replay` at 1.0x, the nodes on
 three cores), with `profile:=dynamic_indoor`, `fusion:=true` and the VIO's
 `map_prior:=true`. The people run then showed three faults the offline runs
-had hidden (the offline demo's fusion only takes the fixes its correction
-used). Map pose RMSE (max), split at 35 s:
+had hidden (the offline demo's fusion then only took the fixes its correction
+used; it now works as the node, below). Map pose RMSE (max), split at 35 s:
 
 | Run | Before 35 s | From 35 s on |
 | --- | --- | --- |
@@ -1038,6 +1038,35 @@ used). Map pose RMSE (max), split at 35 s:
 - The early start without people (from 19.7 s, up to 81 cm off) is the
   warm-up's weak start described above. A run of the unfixed nodes that
   happened to start at 27.4 s gave 2.5 (10.2) cm before 35 s.
+
+### The offline demo's fusion now works as the node's
+
+`basalt_euroc_localize_demo --fusion` used to feed its fusion only the fixes
+its correction accepted. A VIO that the correction rejects every fix
+against therefore kept the fusion from ever taking one: the outdoor people
+run gave 15.5 m (fusion + source check) and 13.8 m (recommended), where the
+node gave 2.2 cm. It now does what `visloc_map_localize_node` does:
+
+- the fusion starts (and restarts) with the correction;
+- once running, it gates full fixes on its own prediction (15 cm, 3 deg);
+- rejected fixes that move as one odometry did restart it, also when the
+  correction started from weak fixes and the fusion has not;
+- weak fixes stay out of it;
+- until it has a pose, the correction's is the map pose.
+
+The check for the restart, `fixes_move_as_one_source`, is now shared by
+both. Offline, map pose RMSE (max), split at 35 s:
+
+| Run | Setting | Before 35 s | From 35 s on |
+| --- | --- | --- | --- |
+| people | fusion + source check | 15.8 m (39 m) | **2.2 (4.3) cm** |
+| people | recommended | 12.8 m (31 m) | **2.2 (4.3) cm** |
+| no people | fusion + source check | 4.9 (26) cm | 1.8 (3.3) |
+| no people | recommended | 32.0 (82) cm | 1.8 (3.6) |
+
+OpenLORIS office1-7 is unchanged: 1.77 cm recommended, 1.83 cm with fusion
+and the source check (1.84 before). The start without wheel velocity
+remains, as through the nodes.
 
 ## Compute budget (towards a Jetson)
 

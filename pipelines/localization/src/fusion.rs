@@ -691,6 +691,39 @@ pub fn fixes_agree_under_a_source(
     })
 }
 
+/// Whether consecutive `fixes` (stamp, map pose, the odometries' poses)
+/// all moved as one and the same odometry did between them: within
+/// `tolerance_m` and `tolerance_deg` per pair. A caller that gates fixes on
+/// a fusion's prediction restarts it from such a run of rejected fixes, so
+/// a fusion carried off by a runaway odometry takes fixes again.
+pub fn fixes_move_as_one_source<S: AsRef<[Option<SE3>]>>(
+    fixes: &[(i64, SE3, S)],
+    tolerance_m: f64,
+    tolerance_deg: f64,
+) -> bool {
+    let sources = fixes
+        .iter()
+        .map(|(_, _, s)| s.as_ref().len())
+        .max()
+        .unwrap_or(0);
+    (0..sources).any(|source| {
+        fixes.windows(2).all(|pair| {
+            let (_, fix_a, sources_a) = &pair[0];
+            let (_, fix_b, sources_b) = &pair[1];
+            let (Some(Some(odom_a)), Some(Some(odom_b))) = (
+                sources_a.as_ref().get(source),
+                sources_b.as_ref().get(source),
+            ) else {
+                return false;
+            };
+            let fix_motion = fix_a.inverse().compose(fix_b);
+            let odom_motion = odom_a.inverse().compose(odom_b);
+            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
+                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= tolerance_deg.to_radians()
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,6 +916,33 @@ mod tests {
         let (worst, fusion) = runaway_vio(1.0, 0..0, Some(200));
         assert!(worst < 0.05, "after the outlier: {worst}");
         assert_eq!(fusion.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn fixes_move_as_one_source_needs_one_source_for_every_pair() {
+        // The fixes walk 0.1 m per step; source 0 runs off (0.3 m per step),
+        // source 1 follows them; a source with no pose cannot vouch.
+        let fix = |i: usize| pose(0.1 * i as f64, 0.0, 0.0, 0.0);
+        let odom = |i: usize, step: f64| pose(step * i as f64, 1.0, 0.0, 0.0);
+        let fixes: Vec<(i64, SE3, Vec<Option<SE3>>)> = (0..3)
+            .map(|i| {
+                (
+                    i as i64,
+                    fix(i),
+                    vec![Some(odom(i, 0.3)), Some(odom(i, 0.1))],
+                )
+            })
+            .collect();
+        assert!(fixes_move_as_one_source(&fixes, 0.05, 3.0));
+        let mut runaway_only = fixes.clone();
+        for (_, _, sources) in &mut runaway_only {
+            sources[1] = None;
+        }
+        assert!(!fixes_move_as_one_source(&runaway_only, 0.05, 3.0));
+        // One fix 1 m off breaks the run for every source.
+        let mut outlier = fixes;
+        outlier[1].1.translation.y += 1.0;
+        assert!(!fixes_move_as_one_source(&outlier, 0.05, 3.0));
     }
 
     #[test]

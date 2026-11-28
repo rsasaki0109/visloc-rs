@@ -6,6 +6,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- `basalt_euroc_localize_demo --fusion` now feeds its fusion as
+  `visloc_map_localize_node` does (gated on its own prediction, restarted
+  from fixes that move as one odometry, weak fixes left out, the
+  correction's pose until it has one). It used to take only the fixes the
+  correction accepted, so a runaway VIO kept it from every fix: RNE outdoors
+  with people ahead, 15.5 m -> 2.2 cm after the start. Office1-7 unchanged.
+  `visloc_localization::fixes_move_as_one_source` is shared by both.
 - `visloc_map_localize_node` with `fusion:=true`: three faults that kept a
   runaway VIO in the map pose (RNE outdoors with people ahead, through the
   nodes: 1756 m to 2.2 cm after the start):
