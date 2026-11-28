@@ -838,6 +838,9 @@ pub struct FusionOptions {
     /// full fixes of the last this many seconds that agree with that fix
     /// under one odometry's motion, not that fix alone (0: off).
     pub seed_s: f64,
+    /// `MapFusionConfig::max_speed_m_s`: leave out an odometry moving faster
+    /// than this (m/s) while the other moves slower (0: off).
+    pub max_speed_m_s: f64,
 }
 
 impl Default for FusionOptions {
@@ -848,6 +851,7 @@ impl Default for FusionOptions {
             body_from_second_body: SE3::identity(),
             source_check_window_s: 0.0,
             seed_s: 0.0,
+            max_speed_m_s: 0.0,
         }
     }
 }
@@ -960,6 +964,7 @@ impl OdomCorrector {
                 MapFusion::new(MapFusionConfig {
                     sources: vec![fusion.noise, fusion.second_noise],
                     source_check_window_s: fusion.source_check_window_s,
+                    max_speed_m_s: fusion.max_speed_m_s,
                     ..MapFusionConfig::default()
                 })
             }),
@@ -1189,9 +1194,10 @@ impl OdomCorrector {
         let (fix_ns, fix_position) = self.correction.last_fix()?;
         // With fusion, its pose; map -> odom follows from it, so the
         // published transform and pose agree.
-        if let Some(fused) = self.fusion.as_ref().and_then(|fusion| {
-            fusion.map_from_body(&self.fusion_sources(*stamp_ns, odom_from_body))
-        }) {
+        // A running fusion that gives no pose (with max_speed_m_s, only a
+        // source moving faster than the robot can) gives no map pose either.
+        if let Some(fusion) = self.fusion.as_ref().filter(|fusion| fusion.is_set()) {
+            let fused = fusion.map_from_body(&self.fusion_sources(*stamp_ns, odom_from_body))?;
             map_from_odom = fused.compose(&odom_from_body.inverse());
         }
         Some(MapPose {
@@ -1231,14 +1237,19 @@ impl OdomCorrector {
                             score,
                         )
                     };
-                    if !weak && self.fusion.is_some() {
+                    // A weak fix that starts (or restarts) the correction
+                    // starts the fusion too, so a runaway odometry can be
+                    // left out from the first map pose on (`max_speed_m_s`);
+                    // other weak fixes stay out of it.
+                    let starts = matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset);
+                    if (!weak || starts) && self.fusion.is_some() {
                         let sources = self.fusion_sources(stamp_ns, &odom_from_body);
                         let seed_ns = self
                             .options
                             .fusion
                             .as_ref()
                             .map_or(0, |fusion| (fusion.seed_s * 1e9) as i64);
-                        if seed_ns > 0 {
+                        if seed_ns > 0 && !weak {
                             self.recent_fixes
                                 .retain(|(stamp, _, _)| stamp_ns - stamp <= seed_ns);
                             self.recent_fixes.push_back((
@@ -1698,6 +1709,35 @@ mod tests {
             8.0,
         );
         assert!(fused < 0.05, "fused after the gap: {fused}");
+    }
+
+    #[test]
+    fn weak_fixes_that_start_the_correction_start_the_fusion() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions {
+            fusion: Some(FusionOptions::default()),
+            ..MapLocalizeOptions::default()
+        });
+        let odom = |i: i64| pose(i as f64 * 0.05, 0.0);
+        let mut started = false;
+        for i in 0..20 {
+            core.add_second_odom(i * 50 * MS, odom(i));
+            core.add_odom(i * 50 * MS, odom(i));
+            let events = core.add_weak_fix(i * 50 * MS, offset().compose(&odom(i)));
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    FixEvent::Applied {
+                        outcome: FixOutcome::Initialized,
+                        ..
+                    }
+                )
+            }) {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the weak fixes start the correction");
+        assert!(core.fusion.as_ref().is_some_and(MapFusion::is_set));
     }
 
     #[test]
