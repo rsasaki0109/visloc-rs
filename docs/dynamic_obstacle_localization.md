@@ -913,6 +913,56 @@ space, are outvoted in the RANSAC by the background around them. Six
 people standing at the side of a room is the case measured; a map made
 mostly of people (a crowded hall) is not.
 
+## Outdoors: RNE street scene with people just ahead
+
+RNE example 113 now renders other splat scenes (`RNE_SPLAT_MANIFEST`,
+`RNE_WAYPOINTS`, `RNE_MAX_STEPS`). RNE's `tools/prepare_voxel51_truck_3dgs.py`
+turns the Voxel51 Tanks and Temples truck into a street scene: a parking lot
+before a café and buildings, trees, far facades. The ground plane is fitted
+by RANSAC and put at y = 0. The metric scale is assumed from the truck
+(about 6.6 m long); nothing in the capture measures it. The route is a
+10.8 x 4.2 m loop around the truck, with the camera 0.35 m up.
+
+The map run (90 s, no people) gave a map with SLAM ATE 2.2 cm (its VIO
+alone: 5.6 cm). Two 80 s queries were run. Both start at the far corner
+and drive about 20 s off the map's path before joining it. In one, four
+walkers keep 0.8–2.2 m ahead of the robot all the way (`RNE_WALKER_MODE=ahead`);
+the other has none. Fixes were taken every 2nd frame. Map pose RMSE (max)
+after 27.5 s, when every setting has joined the path:
+
+| Setting | No people | People ahead |
+| --- | --- | --- |
+| VIO + map (`--vio`) | 4.0 (35) cm | 1965 m: the VIO runs off |
+| wheels + map (`--odometry`) | **2.1 (4.3)** | 3.1 (12) |
+| VIO + wheels + source check | 2.4 (28.5) | 15.5 m (46 m) |
+| recommended (+ map prior, warm-up, seed 3) | 1.7 (5.9) | 13.8 m (42 m) |
+| ... + `--vio-recover 3` | 1.7 (5.9) | 36.6 cm (276) |
+| ... + `--vio-wheel-velocity` | 1.8 (3.7) | **2.5 (7.5)** |
+| VIO + map + `--vio-recover 3` | 8.6 (74) | 5.9 m (38 m) |
+
+- **The walkers break the VIO outdoors.** With nobody about, it holds
+  (4.0 cm). With people ahead, its visual tracking fails about 27 s in and
+  it accelerates away on the IMU alone. From then on every fix disagrees
+  with it, so all of them are rejected (402 of 402). Neither the source
+  check nor seeding can help, because the fusion's own odometry is the one
+  running off. Indoors (Dr Johnson, a4) the same walkers cost the VIO
+  70 cm. Here, the near ground is blurred and most texture is far away,
+  so they leave it far less to track.
+- **Wheel speed in the VIO prevents the runaway (2.5 cm, max 7.5).** Only
+  2 fixes were rejected. `--vio-recover` restarts the VIO after the fact,
+  so it is off by metres until it does (median 2.3 cm, max 2.8 m).
+- **For an outdoor robot with wheels, the recommended setting should
+  include `--vio-wheel-velocity`.** It costs nothing without people
+  (1.7 to 1.8 cm). On OpenLORIS office it also helped (1.88 to 1.30 cm
+  through ROS 2).
+- **A weakness of the warm-up start:** without people, the recommended
+  setting starts 8 s earlier, from a weak fix off the map's path, and is
+  56 cm (max 90) off until the strong fixes take over. The other settings
+  wait for the path. Every setting was run once.
+- The ~27 s without a map pose at the start comes from the route (the
+  query starts off the map's path), not from the people: it is there
+  without them too.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon

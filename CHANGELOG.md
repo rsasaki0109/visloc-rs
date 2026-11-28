@@ -26,6 +26,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: an outdoor run in RNE (Tanks and Temples truck street, people
+  walking just ahead). The walkers make the VIO run off (all fixes then
+  rejected); with `--vio-wheel-velocity` the recommended setting holds at
+  2.5 cm.
 - `basalt_euroc_localize_demo --vio-recover N`: after N full fixes in a row
   are rejected, without agreeing among themselves, the VIO is rebuilt and
   the correction starts over. With `--vio-static-hold` and the map prior on
