@@ -212,6 +212,17 @@ pub struct OnlineMapperConfig {
     /// *match itself*, which always feeds the global problem. A single
     /// ungated false loop was measured to destroy the V2_03 estimate.
     pub loop_match_max_rotation_error_deg: f64,
+    /// Minimum path length (metres, along the current map's keyframe poses)
+    /// between the two keyframes of a loop match. A pair past the
+    /// `loop_gap_keyframes` rank gap but closer than this along the path is
+    /// discarded (`reject-short`) instead of being inserted as a loop.
+    ///
+    /// On long, straight forest trails (FoMo magenta) a forward camera keeps
+    /// seeing the same trail 30+ keyframes later; with loose BoW thresholds
+    /// hundreds of such near-sequential pairs (median 26 m apart) were
+    /// accepted as loops. They add no global information, pull in local
+    /// drift, and slow down the global optimisation. `0` (the default) disables the gate.
+    pub loop_min_travelled_m: f64,
     /// Candidates considered per new keyframe query in
     /// `match_new_keyframe`, i.e. the `num_results` truncation passed to
     /// `query_bow_candidates` -- independent of (and by default smaller
@@ -327,6 +338,7 @@ impl Default for OnlineMapperConfig {
             loop_gap_keyframes: 30,
             loop_matching: true,
             loop_match_max_rotation_error_deg: 30.0,
+            loop_min_travelled_m: 0.0,
             match_top_k: 5,
             headless: NfrMapperHeadlessConfig::default(),
             projection_rematch: false,
@@ -1144,7 +1156,18 @@ impl OnlineNfrMapper {
             }
             if is_loop {
                 let rotation_error = self.loop_match_rotation_error_deg(left_id, right_id, &t_i_j);
-                let verdict = if self.config.loop_match_max_rotation_error_deg < 180.0
+                let geometry = if self.config.loop_min_travelled_m > 0.0 || loop_log_enabled() {
+                    self.loop_match_geometry(left_id, right_id)
+                } else {
+                    None
+                };
+                let too_short = self.config.loop_min_travelled_m > 0.0
+                    && geometry.is_some_and(|(_, travelled, _)| {
+                        travelled < self.config.loop_min_travelled_m
+                    });
+                let verdict = if too_short {
+                    "reject-short"
+                } else if self.config.loop_match_max_rotation_error_deg < 180.0
                     && rotation_error
                         .is_some_and(|angle| angle > self.config.loop_match_max_rotation_error_deg)
                 {
@@ -1153,9 +1176,8 @@ impl OnlineNfrMapper {
                     "accept"
                 };
                 if loop_log_enabled() {
-                    let (distance, travelled, seconds) = self
-                        .loop_match_geometry(left_id, right_id)
-                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+                    let (distance, travelled, seconds) =
+                        geometry.unwrap_or((f64::NAN, f64::NAN, f64::NAN));
                     let timestamp = |id: TimeCamId| {
                         self.mapper
                             .frame_timestamps
