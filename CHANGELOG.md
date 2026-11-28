@@ -42,6 +42,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `scripts/aria_vrs_to_euroc.py`: Project Aria recordings (InCrowd-VI) to EuRoC, with
+  Double Sphere resampling and MPS ground truth at the IMU. The crowded InCrowd-VI
+  evaluation is not done: Google Drive's download quota and two non-overlapping
+  sequences stopped it (docs/dynamic_obstacle_localization.md).
 - docs: OpenLORIS market's ground truth is off in time by a different amount per
   session (-1.06 s on market1-1, -0.34 s on market1-2; office about 0.1 s). Shifted,
   the market map's ATE is 60 cm instead of 112 cm, and localization around each

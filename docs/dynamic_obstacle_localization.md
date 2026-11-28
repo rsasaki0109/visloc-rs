@@ -1203,6 +1203,34 @@ Map pose RMSE (max):
   comes at 27.5 s instead of 19.7 s, when the other settings start too.
 - Each run was made once.
 
+## InCrowd-VI: real crowds with 2 cm ground truth (not measured)
+
+InCrowd-VI (https://github.com/banafshebamdad/InCrowd-VI) records stations,
+an airport and malls with Meta Aria glasses: 58 sequences, 20 of them with
+more than 10 pedestrians per frame. Its ground truth is Aria MPS SLAM, about
+2 cm. `scripts/aria_vrs_to_euroc.py` converts a recording:
+
+- the two SLAM cameras are resampled into a fitted Double Sphere model;
+- the rectified IMU is written as it is;
+- MPS's closed-loop trajectory, at device time and moved to that IMU, is
+  the ground truth.
+
+The pipeline runs on it. A map of Winterthur HB "G6 loop" (104 m, crowded)
+localizes its own images every time (151 of 151). The crowds weigh on the
+VIO: on "G6 exit" (61 m) it is 174 cm off (Sim3 135 cm, scale 1.09).
+
+It was not measured, for two reasons:
+
+- **The data.** The recordings are on one public Google Drive folder, and
+  its download quota stopped this session twice, after about 3 GB and
+  after 0.5 GB. Ranges of 10 MB work until the quota is spent.
+- **The overlap.** Each recording has its own ground-truth frame, and the
+  two downloaded (G6 loop, G6 exit) do not share any place: no fix
+  in 1,480 attempts. Neither revisits its own path. A pair that overlaps
+  (likely Zurich airport "ramp checkin2" with "checkin2 large loop",
+  8.6 GB) is the next step. Since the ground-truth frames differ, it would
+  be scored after one rigid fit over the whole query.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon
