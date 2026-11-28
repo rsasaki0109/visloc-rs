@@ -42,6 +42,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `OdomCorrectionConfig::settle_gate_per_m` (`basalt_euroc_localize_demo
+  --settle-gate-per-m`, `visloc_map_localize_node`'s `settle_gate_per_m`,
+  opt-in): right after the correction is set or replaced, until two fixes
+  are accepted, its gate widens by this much per metre of travel. A
+  monocular VIO back on the map after 50 s off it runs 30% long; through
+  ROS 2 its fixes were all rejected and the VIO ran away. OpenLORIS
+  corridor1-1 replayed over DDS with `weak_reset_after:=3`: 11.6 to 6.2 cm
+  median, VIO resets 11 to 0; offline runs unchanged.
 - `OdomCorrectionConfig::weak_reset_after` (`basalt_euroc_localize_demo
   --weak-reset-after N`, `visloc_map_localize_node`'s `weak_reset_after`,
   opt-in): N consecutive fixes the correction rejects, weak ones among

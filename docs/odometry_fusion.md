@@ -490,11 +490,41 @@ pose. N = 3, as for the first offset (median of the local error in cm):
   | `weak_reset_after:=3` | **11.6** | 4.8 | 391 | **79.2** | **22.9** | **10.0** |
 
   It helps through ROS 2 too, but both replays are worse than offline
-  around 205–220 s: there the map node asks the VIO to reset 11–12 times
-  (offline: once, or not at all), each time three full fixes in a row are
-  rejected right after the correction is set again. This is not from the
-  weak reset (the replay without it does the same, 211–249 s) and is not
-  explained yet.
+  around 205–220 s, where the map node asks the VIO to reset 11–12 times
+  (offline: once, or not at all). The replay without it does the same
+  (211–249 s), so the weak reset does not cause it.
+
+### A wider gate while the correction settles
+
+Why the replays break there: after 50 s off the map the monocular VIO runs
+20–35% long, offline and through ROS 2 alike (the free VIOs match). When
+the correction is set again, offline happened to get fixes every 0.17 s
+by projection, all accepted, and the map prior pulled the VIO's scale back
+within a second. Through ROS 2 slightly different images localized; the
+fixes came every 0.5–1 s, by then 15–30 cm off a VIO running 30% long,
+beyond the gate (15 cm + 5 cm per metre), so none was accepted, nothing
+corrected the VIO, the correction was replaced every second, and the VIO
+ran away (5–12 m/s). Without the map prior there is no run-away (78.5 cm
+median), and feeding the prior only from accepted fixes does not help
+(42.1 cm, 26 VIO resets).
+
+`settle_gate_per_m` (`--settle-gate-per-m`, `visloc_map_localize_node -p
+settle_gate_per_m:=M`, off by default): right after the correction is set
+or replaced, until `init_fixes` (2) fixes are accepted, its gate widens by
+M per metre of travel instead of 5 cm. M = 0.15, the scale error measured
+on office1-6 (about 1.15, above), not tuned on the corridor. Through ROS 2
+(median of the local error in cm; VIO resets asked for):
+
+| | all | 60–120 s | 160–180 s | 180–200 s | 200–240 s | 240–272 s | resets |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `recover_after:=3` | 271 | 4.3 | 302 | 355 | 286 | 458 | 12 |
+| + `weak_reset_after:=3` | 11.6 | 4.8 | 391 | 79.2 | 22.9 | 10.0 | 11 |
+| + `settle_gate_per_m:=0.15` | **6.2** | 4.1 | 266 | **7.3** | **4.6** | 27.1 | **0** |
+
+The replay now matches the offline run (7.0 cm; 18.1 and 4.5 cm in
+180–200 and 200–240 s). Offline, the corridor runs and the 28 office runs
+are identical with and without it: there the fixes after each reset were
+already accepted.
 
 ## What was adopted
 
@@ -576,8 +606,9 @@ target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
   are short (6 m), and the map's own error is a large part of every number.
 - On the corridor the matches are too sparse for a monocular VIO without
   wheels: where not even weak fixes come it drifts metres (see the
-  corridor section). Through ROS 2 the corridor replays ask the VIO to
-  reset 11–12 times around 205–220 s, which the offline runs do not.
+  corridor section). Through ROS 2 the corridor needs
+  `settle_gate_per_m` to hold where the VIO comes back onto the map with
+  its scale drifted.
 - The legged odometry is synthetic.
 - A's pose priors leave with their frame. They are not carried into the
   VIO's marginal prior.
