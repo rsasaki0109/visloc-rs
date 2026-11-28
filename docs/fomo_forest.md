@@ -116,10 +116,48 @@ A run is faster than real time on 4 CPU cores (August: 160 s for 350 s).
 Each converted run is 2.5-3.5 GB of grey PNGs. The dataset images stay
 outside the repository and remain under FoMo's CC BY 4.0 terms.
 
+## Online mapper / loop closure
+
+`basalt_euroc_online_slam_demo` (VIO + online NFR mapper + pose-graph loop
+closure), `--optimize-every-k 100 --periodic-iterations 4`, scoring
+`trajectory_online.tum`. Online ATE SE(3) in m, accepted loops in brackets.
+
+| Sequence | Baseline | Forest | Baseline + loose loops | **Forest + loose loops** |
+|---|---:|---:|---:|---:|
+| 2025-01-30 snow | 3.03 (32) | 0.99 (33) | 2.95 (98) | **0.95** (98) |
+| 2025-08-20 summer | 1.27 (0) | 1.49 (0) | 1.27 (6) | **1.38** (7) |
+| 2025-03-10 snow | 1.14 (4) | 1.68 (4) | 1.10 (9) | **1.66** (5) |
+| 2025-10-14 autumn | 0.72 (0) | 0.92 (0) | 0.49 (24) | **0.70** (13) |
+| mean | 1.54 | 1.27 | 1.45 | **1.17** |
+
+- **Loose loops** = `configs/basalt/variants/fomo/fomo_config_forest_loop.json`
+  plus `--match-top-k 15`. Over the forest config it changes the mapper:
+  - `mapper_frames_to_match_threshold` 0.04 -> 0.01 (BoW score),
+  - `mapper_min_matches` 20 -> 15,
+  - `mapper_detection_num_points` 800 -> 1500.
+- The default thresholds close **no** loop in August or October. On those
+  runs the robot comes back to the start only in the last 4-7 s, so there
+  are only a few revisit keyframes, and their BoW scores and match counts
+  fall just under the defaults. `--match-top-k 15` alone does not help.
+- The loose thresholds found no false loop: across the eight runs, 2 of 262
+  geometrically verified candidates were rejected, and every run is equal or
+  better than with the default thresholds. End-point drift is 0.03-0.15% on three runs (March with
+  the forest config: 0.57%).
+- Forest + loose loops is the best single setting (mean 1.17 m, worst
+  1.66 m). Per season, the baseline config with loose loops is better
+  on March (1.10 m) and October (0.49 m), so the snow/no-snow choice is not
+  clean once the mapper runs.
+
+```bash
+cargo build --release --example basalt_euroc_online_slam_demo --features basalt-lm-workspace-reuse
+target/release/examples/basalt_euroc_online_slam_demo --euroc-dir $S --calibration $S/calibration.json \
+  --config configs/basalt/variants/fomo/fomo_config_forest_loop.json --match-top-k 15 \
+  --optimize-every-k 100 --periodic-iterations 4 --out-dir target/fomo_winter_slam
+python3 scripts/fomo_eval.py --sequence $S --estimate target/fomo_winter_slam/trajectory_online.tum
+```
+
 ## Open
 
-- **Online mapper / loop closure:** blue is a loop, so the online mapper
-  (`basalt_euroc_online_slam_demo`) should close it. Not measured yet.
 - **Startup run-away:** on a 10 s slice from rest, the VIO's speed overshoots
   by up to 2x in the first seconds of hard acceleration. Over the whole run
   it does not show, but `StaticHold` (only wired into
