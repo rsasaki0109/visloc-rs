@@ -329,8 +329,11 @@ struct Args {
     /// `OdomCorrectionConfig::init_warmup_s`: wait this long, then start the
     /// correction from the strongest fixes (by inliers) that agree (0: off).
     init_warmup_s: f64,
-    /// `OdomCorrectionConfig::init_warmup_needs_full`.
-    init_warmup_needs_full: bool,
+    /// `--map-pose-needs-full`: no map pose until a full fix has been used
+    /// (by the correction or the fusion). A correction started from weak
+    /// fixes still steers the localization meanwhile; weak fixes from views
+    /// off the map's path can agree on a wrong pose.
+    map_pose_needs_full: bool,
     /// With `--vio`: camera-0 boxes of possibly moving objects per frame
     /// (`visloc_basalt::dynamic_objects::read_object_boxes_csv`), for the
     /// VIO's moving-object filter. Off by default.
@@ -366,7 +369,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] [--weak-reset-after N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S [--init-warmup-needs-full]] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--map-pose-needs-full] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
             .into()
     }
 
@@ -443,7 +446,7 @@ impl Args {
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_warmup_s: 0.0,
-            init_warmup_needs_full: false,
+            map_pose_needs_full: false,
             object_boxes: None,
             fusion_source_check_s: 0.0,
             fusion_max_speed: 0.0,
@@ -593,7 +596,7 @@ impl Args {
                 }
                 "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
                 "--init-warmup-s" => args.init_warmup_s = number(&option, value()?)?,
-                "--init-warmup-needs-full" => args.init_warmup_needs_full = true,
+                "--map-pose-needs-full" => args.map_pose_needs_full = true,
                 "--object-boxes" => args.object_boxes = Some(PathBuf::from(value()?)),
                 "--fusion-source-check-s" => {
                     args.fusion_source_check_s = number(&option, value()?)?;
@@ -1397,6 +1400,10 @@ struct CorrectedRun {
     recent_fixes: VecDeque<(i64, SE3, Vec<Option<SE3>>)>,
     /// Fixes the correction accepted or initialized from, and the newest.
     fixes_used: usize,
+    /// With `--map-pose-needs-full`: whether a full fix has been used yet,
+    /// and whether that is required before a map pose is written.
+    full_fix_used: bool,
+    map_pose_needs_full: bool,
     last_used_fix: Option<(i64, SE3)>,
     /// Localize every `localize_every`-th frame once the odometry has a map
     /// pose, every `initial_every`-th before, within `initial_window_ns` of
@@ -1450,11 +1457,12 @@ impl CorrectedRun {
                     init_min_travel_m: args.init_min_travel_m,
                     init_min_turn_deg: args.init_min_turn_deg,
                     init_warmup_s: args.init_warmup_s,
-                    init_warmup_needs_full: args.init_warmup_needs_full,
                     ..defaults
                 }
             }),
             fixes_used: 0,
+            full_fix_used: false,
+            map_pose_needs_full: args.map_pose_needs_full,
             last_used_fix: None,
             fusion_rejected: Vec::new(),
             fusion_restart_after: args
@@ -1536,6 +1544,9 @@ impl CorrectedRun {
     fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
         // The fusion's pose once it has one; until then (it starts on a full
         // fix) the correction's, as `visloc_map_localize_node` publishes.
+        if self.map_pose_needs_full && !self.full_fix_used {
+            return None;
+        }
         match &self.fusion {
             Some(fusion) if fusion.is_set() => fusion.map_from_body(sources),
             _ => self.correction.map_from_body(odom_from_imu?),
@@ -1690,6 +1701,7 @@ impl CorrectedRun {
         ) {
             self.fixes_used += 1;
             self.last_used_fix = Some((timestamp_ns, map_from_imu.clone()));
+            self.full_fix_used |= !weak;
         }
         // A weak fix that starts (or restarts) the correction starts the
         // fusion too, so that a runaway odometry can be left out from the
@@ -1737,6 +1749,7 @@ impl CorrectedRun {
             if close {
                 fusion.add_fix(timestamp_ns, map_from_imu, sources);
                 self.fusion_rejected.clear();
+                self.full_fix_used = true;
             } else {
                 let needed = self.fusion_restart_after;
                 self.fusion_rejected
@@ -1756,6 +1769,7 @@ impl CorrectedRun {
                     for (stamp, fix, fix_sources) in self.fusion_rejected.drain(..) {
                         fusion.add_fix(stamp, &fix, &fix_sources);
                     }
+                    self.full_fix_used = true;
                 }
             }
         }
