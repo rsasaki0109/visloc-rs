@@ -120,6 +120,11 @@ pub struct OdomCorrectionConfig {
     /// weaker than the fixes of a clear view. 0, the default: the first
     /// agreeing consecutive fixes.
     pub init_warmup_s: f64,
+    /// With `init_warmup_s`: a group of weak fixes alone does not set the
+    /// offset; it needs a full fix among them. Weak fixes from views far off
+    /// the map's path can agree with each other on a wrong pose. Off by
+    /// default.
+    pub init_warmup_needs_full: bool,
 }
 
 impl Default for OdomCorrectionConfig {
@@ -141,6 +146,7 @@ impl Default for OdomCorrectionConfig {
             init_min_turn_deg: 0.0,
             init_window_s: 10.0,
             init_warmup_s: 0.0,
+            init_warmup_needs_full: false,
         }
     }
 }
@@ -589,7 +595,9 @@ impl OdomCorrection {
                 } else {
                     strong
                 };
-                if group.len() < needed {
+                if group.len() < needed
+                    || (self.config.init_warmup_needs_full && group.iter().all(|fix| fix.weak))
+                {
                     break;
                 }
                 if self.agree(&group) {

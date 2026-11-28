@@ -329,6 +329,8 @@ struct Args {
     /// `OdomCorrectionConfig::init_warmup_s`: wait this long, then start the
     /// correction from the strongest fixes (by inliers) that agree (0: off).
     init_warmup_s: f64,
+    /// `OdomCorrectionConfig::init_warmup_needs_full`.
+    init_warmup_needs_full: bool,
     /// With `--vio`: camera-0 boxes of possibly moving objects per frame
     /// (`visloc_basalt::dynamic_objects::read_object_boxes_csv`), for the
     /// VIO's moving-object filter. Off by default.
@@ -364,7 +366,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] [--weak-reset-after N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S [--init-warmup-needs-full]] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
             .into()
     }
 
@@ -441,6 +443,7 @@ impl Args {
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_warmup_s: 0.0,
+            init_warmup_needs_full: false,
             object_boxes: None,
             fusion_source_check_s: 0.0,
             fusion_max_speed: 0.0,
@@ -590,6 +593,7 @@ impl Args {
                 }
                 "--init-min-turn-deg" => args.init_min_turn_deg = number(&option, value()?)?,
                 "--init-warmup-s" => args.init_warmup_s = number(&option, value()?)?,
+                "--init-warmup-needs-full" => args.init_warmup_needs_full = true,
                 "--object-boxes" => args.object_boxes = Some(PathBuf::from(value()?)),
                 "--fusion-source-check-s" => {
                     args.fusion_source_check_s = number(&option, value()?)?;
@@ -1446,6 +1450,7 @@ impl CorrectedRun {
                     init_min_travel_m: args.init_min_travel_m,
                     init_min_turn_deg: args.init_min_turn_deg,
                     init_warmup_s: args.init_warmup_s,
+                    init_warmup_needs_full: args.init_warmup_needs_full,
                     ..defaults
                 }
             }),
