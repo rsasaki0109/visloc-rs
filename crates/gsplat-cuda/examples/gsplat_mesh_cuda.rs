@@ -103,7 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for v in &all {
             let (w, h) = (v.camera.camera.width, v.camera.camera.height);
             match read_depth_map(&dir.join(format!("{}.bin", v.name)), w, h) {
-                Some(m) => {
+                Some(mut m) => {
+                    // Camera z on file; a fisheye view fuses distances.
+                    v.camera.camera.depth_z_to_render(&mut m, w, h);
                     found += 1;
                     maps.extend(m);
                 }
