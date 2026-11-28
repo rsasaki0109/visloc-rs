@@ -816,15 +816,23 @@ impl Trainer {
     /// (width and height `u32`, then camera-z `f32` depths row by row, 0
     /// where there is none; `visloc-mvs --save-fused-depth`'s layout, which
     /// gsplat-cuda's trainer reads too). A map of another size is resampled
-    /// to the view's by nearest neighbour; a view without a readable file
-    /// gets no prior. Train them with [`TrainConfig::depth_weight`]. Returns
+    /// to the view's by nearest neighbour, and a fisheye view's is turned
+    /// into distances, its depth channel
+    /// ([`PinholeCamera::depth_z_to_render`]); a view without a
+    /// readable file gets no prior. Train them with
+    /// [`TrainConfig::depth_weight`]. Returns
     /// the number of views with one.
     pub fn load_depth_priors(&mut self, dir: &std::path::Path) -> usize {
         let (w, h) = (self.width, self.height);
         self.depth_host = self
             .views
             .iter()
-            .map(|v| read_depth_map(&dir.join(format!("{}.bin", v.name)), w, h))
+            .map(|v| {
+                // Camera z on file; a fisheye view renders distances.
+                let mut map = read_depth_map(&dir.join(format!("{}.bin", v.name)), w, h)?;
+                v.camera.camera.depth_z_to_render(&mut map, w, h);
+                Some(map)
+            })
             .collect();
         self.depth_host.iter().filter(|d| d.is_some()).count()
     }
