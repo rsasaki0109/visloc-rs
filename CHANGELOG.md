@@ -14,6 +14,13 @@ All notable changes to `visloc-rs` will be documented here.
   turned into distances when it is read
   (`PinholeCamera::depth_z_to_render`); pinhole views are unchanged.
 
+- `basalt_euroc_localize_demo --fusion` now feeds its fusion as
+  `visloc_map_localize_node` does (gated on its own prediction, restarted
+  from fixes that move as one odometry, weak fixes left out, the
+  correction's pose until it has one). It used to take only the fixes the
+  correction accepted, so a runaway VIO kept it from every fix: RNE outdoors
+  with people ahead, 15.5 m -> 2.2 cm after the start. Office1-7 unchanged.
+  `visloc_localization::fixes_move_as_one_source` is shared by both.
 - `visloc_map_localize_node` with `fusion:=true`: three faults that kept a
   runaway VIO in the map pose (RNE outdoors with people ahead, through the
   nodes: 1756 m to 2.2 cm after the start):
@@ -43,6 +50,29 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: why the OpenLORIS market map keeps about a metre: market1-1's end does
+  not see its start (no fix from its last 35 s on a map of its first 40 s), so
+  no loop can close it; `--loop-closure-factors` gives 112 -> 108 cm.
+- `MapFusionConfig::max_speed_m_s` (`basalt_euroc_localize_demo
+  --fusion-max-speed`, `visloc_map_localize_node` `fusion_max_speed_m_s`, 2 in
+  `profile:=dynamic_indoor`): a source moving faster than the robot can is left
+  out at once while another moves slower, and no pose comes from it alone. A weak
+  fix that starts or resets the correction now starts the fusion too. RNE outdoors
+  with people ahead and no wheel velocity, through the nodes: the first seconds go
+  from 20.6 m to 32 cm, the run from 7.85 m to 12.2 cm. Indoors unchanged.
+- `OdomCorrectionConfig::weak_reset_after` (`basalt_euroc_localize_demo
+  --weak-reset-after N`, `visloc_map_localize_node`'s `weak_reset_after`,
+  opt-in): N consecutive fixes the correction rejects, weak ones among
+  them, replace its offset when they agree and the odometry moved farther
+  than they agree within. For a VIO that drifted beyond every gate while
+  only weak fixes came. OpenLORIS corridor1-1 against a corridor1-5 map,
+  monocular VIO without wheels: 20.1 to 7.0 cm median; the office matrix
+  is unchanged except office1-7 on the old mono map (32.3 to 20.0 cm). See
+  docs/odometry_fusion.md.
+- docs: the OpenLORIS market VIO's 6 % scale error comes from that session's
+  shipped stereo calibration (the ground truth and wheels agree). Corrected from
+  the wheels (baseline x 0.9185), the market map's ATE halves (222 to 112 cm),
+  and localization with the wheels fused goes from 244 to 152 cm.
 - docs: an outdoor run in RNE (Tanks and Temples truck street, people
   walking just ahead). The walkers make the VIO run off (all fixes then
   rejected); with `--vio-wheel-velocity` the recommended setting holds at

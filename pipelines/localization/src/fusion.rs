@@ -143,6 +143,11 @@ pub struct MapFusionConfig {
     pub source_check_tolerance_per_m: f64,
     /// ... or past this yaw error (deg).
     pub source_check_tolerance_yaw_deg: f64,
+    /// When positive, a source whose motion between two nodes is faster than
+    /// this (m/s) is left out as by the source check, while another source
+    /// moves slower: a runaway VIO is caught before any second fix can show
+    /// it. 0 turns it off.
+    pub max_speed_m_s: f64,
 }
 
 impl Default for MapFusionConfig {
@@ -161,9 +166,14 @@ impl Default for MapFusionConfig {
             source_check_tolerance_m: 0.05,
             source_check_tolerance_per_m: 0.1,
             source_check_tolerance_yaw_deg: 3.0,
+            max_speed_m_s: 0.0,
         }
     }
 }
+
+/// `max_speed_m_s` measures speeds over at least this span (s), so the
+/// odometry's noise over a few milliseconds does not read as a runaway.
+const MIN_SPEED_SPAN_S: f64 = 0.1;
 
 /// Position and yaw of the body in the map.
 type State = Vector4<f64>;
@@ -221,6 +231,8 @@ pub struct MapFusion {
     prior: Option<Prior>,
     /// Per source: whether the newest check found it disagreeing.
     suspect: Vec<bool>,
+    /// Stamp of the newest odometry poses passed in (`observe`, `add_fix`).
+    newest_odometry_ns: Option<i64>,
     /// Per source: edges left out so far.
     excluded_edges: Vec<u64>,
 }
@@ -233,6 +245,7 @@ impl MapFusion {
             nodes: VecDeque::new(),
             prior: None,
             suspect: vec![false; sources],
+            newest_odometry_ns: None,
             excluded_edges: vec![0; sources],
         }
     }
@@ -266,6 +279,7 @@ impl MapFusion {
     /// at this stamp). Adds a node once `node_interval_s` has passed since
     /// the newest.
     pub fn observe(&mut self, timestamp_ns: i64, odometry: &[Option<SE3>]) {
+        self.newest_odometry_ns = Some(timestamp_ns);
         let Some(last) = self.nodes.back() else {
             return;
         };
@@ -277,6 +291,10 @@ impl MapFusion {
     /// A map fix of the body at `timestamp_ns`, with each source's pose at
     /// the same instant.
     pub fn add_fix(&mut self, timestamp_ns: i64, map_from_body: &SE3, odometry: &[Option<SE3>]) {
+        self.newest_odometry_ns = Some(
+            self.newest_odometry_ns
+                .map_or(timestamp_ns, |t| t.max(timestamp_ns)),
+        );
         let fix = Vector4::new(
             map_from_body.translation.x,
             map_from_body.translation.y,
@@ -400,9 +418,30 @@ impl MapFusion {
                     |(source, (then, now))| Some((source, then.as_ref()?, now.as_ref()?)),
                 )
             };
+        // With max_speed_m_s, a source moving faster than that since the
+        // node is passed over now, before the next node marks it.
+        let dt = self
+            .newest_odometry_ns
+            .map_or(0.0, |now_ns| (now_ns - node.timestamp_ns) as f64 * 1e-9)
+            .max(0.0);
+        let capped = self.config.max_speed_m_s > 0.0;
+        let too_fast = |then: &SE3, now: &SE3| {
+            capped
+                && (now.translation - then.translation).norm() / dt.max(MIN_SPEED_SPAN_S)
+                    > self.config.max_speed_m_s
+        };
+        let sound = |source: usize| !self.suspect.get(source).copied().unwrap_or(false);
         let (_, then, now) = pairs()
-            .find(|(source, _, _)| !self.suspect.get(*source).copied().unwrap_or(false))
-            .or_else(|| pairs().next())?;
+            .find(|(source, then, now)| sound(*source) && !too_fast(then, now))
+            .or_else(|| pairs().find(|(_, then, now)| !too_fast(then, now)))
+            // With the cap on, no pose beats one from a source moving faster
+            // than the robot can (e.g. the other's newest pose not in yet).
+            .or_else(|| {
+                (!capped)
+                    .then(|| pairs().find(|(source, _, _)| sound(*source)))
+                    .flatten()
+            })
+            .or_else(|| (!capped).then(|| pairs().next()).flatten())?;
         // map <- odom of this source, as the node's state puts it.
         let yaw = node.state[3] - yaw_of(&then.rotation);
         let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw);
@@ -413,6 +452,7 @@ impl MapFusion {
     fn push(&mut self, timestamp_ns: i64, odometry: &[Option<SE3>], fix: Option<State>) {
         let mut odometry = odometry.to_vec();
         odometry.resize(self.config.sources.len(), None);
+        self.check_speeds(timestamp_ns, &odometry);
         let state = match (self.nodes.back(), fix) {
             (None, Some(fix)) => fix,
             (None, None) => return,
@@ -463,6 +503,41 @@ impl MapFusion {
             self.marginalize_oldest();
         }
         self.optimize();
+    }
+
+    /// With `max_speed_m_s`: leaves out a source that moved faster than that
+    /// since the newest node, while another moved slower. It stays out until
+    /// a source check finds it agreeing with the fixes again.
+    fn check_speeds(&mut self, timestamp_ns: i64, odometry: &[Option<SE3>]) {
+        let Some(last) = self.nodes.back() else {
+            return;
+        };
+        let dt = (timestamp_ns - last.timestamp_ns) as f64 * 1e-9;
+        if self.config.max_speed_m_s <= 0.0 || dt < 0.0 {
+            return;
+        }
+        let fast: Vec<Option<bool>> = last
+            .odometry
+            .iter()
+            .zip(odometry)
+            .map(|(then, now)| {
+                let (Some(then), Some(now)) = (then, now) else {
+                    return None;
+                };
+                Some(
+                    (now.translation - then.translation).norm() / dt.max(MIN_SPEED_SPAN_S)
+                        > self.config.max_speed_m_s,
+                )
+            })
+            .collect();
+        if !fast.contains(&Some(false)) {
+            return; // every source too fast (or none to compare): say nothing
+        }
+        for (source, too_fast) in fast.iter().enumerate() {
+            if *too_fast == Some(true) {
+                self.suspect[source] = true;
+            }
+        }
     }
 
     /// The edges between consecutive nodes `i` and `i + 1`: one per source
@@ -691,6 +766,39 @@ pub fn fixes_agree_under_a_source(
     })
 }
 
+/// Whether consecutive `fixes` (stamp, map pose, the odometries' poses)
+/// all moved as one and the same odometry did between them: within
+/// `tolerance_m` and `tolerance_deg` per pair. A caller that gates fixes on
+/// a fusion's prediction restarts it from such a run of rejected fixes, so
+/// a fusion carried off by a runaway odometry takes fixes again.
+pub fn fixes_move_as_one_source<S: AsRef<[Option<SE3>]>>(
+    fixes: &[(i64, SE3, S)],
+    tolerance_m: f64,
+    tolerance_deg: f64,
+) -> bool {
+    let sources = fixes
+        .iter()
+        .map(|(_, _, s)| s.as_ref().len())
+        .max()
+        .unwrap_or(0);
+    (0..sources).any(|source| {
+        fixes.windows(2).all(|pair| {
+            let (_, fix_a, sources_a) = &pair[0];
+            let (_, fix_b, sources_b) = &pair[1];
+            let (Some(Some(odom_a)), Some(Some(odom_b))) = (
+                sources_a.as_ref().get(source),
+                sources_b.as_ref().get(source),
+            ) else {
+                return false;
+            };
+            let fix_motion = fix_a.inverse().compose(fix_b);
+            let odom_motion = odom_a.inverse().compose(odom_b);
+            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
+                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= tolerance_deg.to_radians()
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,6 +991,72 @@ mod tests {
         let (worst, fusion) = runaway_vio(1.0, 0..0, Some(200));
         assert!(worst < 0.05, "after the outlier: {worst}");
         assert_eq!(fusion.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn fixes_move_as_one_source_needs_one_source_for_every_pair() {
+        // The fixes walk 0.1 m per step; source 0 runs off (0.3 m per step),
+        // source 1 follows them; a source with no pose cannot vouch.
+        let fix = |i: usize| pose(0.1 * i as f64, 0.0, 0.0, 0.0);
+        let odom = |i: usize, step: f64| pose(step * i as f64, 1.0, 0.0, 0.0);
+        let fixes: Vec<(i64, SE3, Vec<Option<SE3>>)> = (0..3)
+            .map(|i| {
+                (
+                    i as i64,
+                    fix(i),
+                    vec![Some(odom(i, 0.3)), Some(odom(i, 0.1))],
+                )
+            })
+            .collect();
+        assert!(fixes_move_as_one_source(&fixes, 0.05, 3.0));
+        let mut runaway_only = fixes.clone();
+        for (_, _, sources) in &mut runaway_only {
+            sources[1] = None;
+        }
+        assert!(!fixes_move_as_one_source(&runaway_only, 0.05, 3.0));
+        // One fix 1 m off breaks the run for every source.
+        let mut outlier = fixes;
+        outlier[1].1.translation.y += 1.0;
+        assert!(!fixes_move_as_one_source(&outlier, 0.05, 3.0));
+    }
+
+    #[test]
+    fn a_speed_cap_leaves_out_a_runaway_source_before_a_second_fix() {
+        // One fix at the start; the body drives at 0.5 m/s; from 5 s the VIO
+        // reports 10 m/s. No second fix can show it, but the cap can.
+        let worst = |max_speed_m_s: f64| {
+            let mut fusion = MapFusion::new(MapFusionConfig {
+                sources: vec![OdometryNoise::VIO, OdometryNoise::WHEEL],
+                source_check_window_s: 1.0,
+                max_speed_m_s,
+                ..MapFusionConfig::default()
+            });
+            let truth = |t: f64| pose(0.5 * t, 0.0, 0.0, 0.0);
+            let wheel_frame = pose(-3.0, 4.0, 0.0, -1.2);
+            let vio_x = |t: f64| 0.5 * t.min(5.0) + 10.0 * (t - 5.0).max(0.0);
+            let mut worst: f64 = 0.0;
+            for index in 0..200 {
+                let t = index as f64 * 0.05;
+                let poses = [
+                    Some(pose(vio_x(t), 0.0, 0.0, 0.0)),
+                    Some(wheel_frame.compose(&truth(t))),
+                ];
+                let stamp = index as i64 * 50_000_000;
+                if index == 0 {
+                    fusion.add_fix(stamp, &truth(t), &poses);
+                } else {
+                    fusion.observe(stamp, &poses);
+                }
+                let estimate = fusion.map_from_body(&poses).expect("set");
+                worst = worst.max((estimate.translation - truth(t).translation).norm());
+            }
+            (worst, fusion.suspect_sources().to_vec())
+        };
+        let (without, _) = worst(0.0);
+        let (with, suspect) = worst(2.0);
+        assert!(without > 1.0, "without the cap: {without}");
+        assert!(with < 0.05, "with the cap: {with}");
+        assert_eq!(suspect, vec![true, false]);
     }
 
     #[test]

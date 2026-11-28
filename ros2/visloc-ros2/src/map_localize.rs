@@ -40,10 +40,10 @@ use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureRea
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
-    apply_inlier_spread_gate, fixes_agree_under_a_source, AllLandmarksSelector,
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid, LocalizationConfig,
-    LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
-    OdometryNoise, PackedDescriptors,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, fixes_move_as_one_source,
+    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid,
+    LocalizationConfig, LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection,
+    OdomCorrectionConfig, OdometryNoise, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -838,6 +838,9 @@ pub struct FusionOptions {
     /// full fixes of the last this many seconds that agree with that fix
     /// under one odometry's motion, not that fix alone (0: off).
     pub seed_s: f64,
+    /// `MapFusionConfig::max_speed_m_s`: leave out an odometry moving faster
+    /// than this (m/s) while the other moves slower (0: off).
+    pub max_speed_m_s: f64,
 }
 
 impl Default for FusionOptions {
@@ -848,6 +851,7 @@ impl Default for FusionOptions {
             body_from_second_body: SE3::identity(),
             source_check_window_s: 0.0,
             seed_s: 0.0,
+            max_speed_m_s: 0.0,
         }
     }
 }
@@ -960,6 +964,7 @@ impl OdomCorrector {
                 MapFusion::new(MapFusionConfig {
                     sources: vec![fusion.noise, fusion.second_noise],
                     source_check_window_s: fusion.source_check_window_s,
+                    max_speed_m_s: fusion.max_speed_m_s,
                     ..MapFusionConfig::default()
                 })
             }),
@@ -1189,9 +1194,10 @@ impl OdomCorrector {
         let (fix_ns, fix_position) = self.correction.last_fix()?;
         // With fusion, its pose; map -> odom follows from it, so the
         // published transform and pose agree.
-        if let Some(fused) = self.fusion.as_ref().and_then(|fusion| {
-            fusion.map_from_body(&self.fusion_sources(*stamp_ns, odom_from_body))
-        }) {
+        // A running fusion that gives no pose (with max_speed_m_s, only a
+        // source moving faster than the robot can) gives no map pose either.
+        if let Some(fusion) = self.fusion.as_ref().filter(|fusion| fusion.is_set()) {
+            let fused = fusion.map_from_body(&self.fusion_sources(*stamp_ns, odom_from_body))?;
             map_from_odom = fused.compose(&odom_from_body.inverse());
         }
         Some(MapPose {
@@ -1231,14 +1237,19 @@ impl OdomCorrector {
                             score,
                         )
                     };
-                    if !weak && self.fusion.is_some() {
+                    // A weak fix that starts (or restarts) the correction
+                    // starts the fusion too, so a runaway odometry can be
+                    // left out from the first map pose on (`max_speed_m_s`);
+                    // other weak fixes stay out of it.
+                    let starts = matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset);
+                    if (!weak || starts) && self.fusion.is_some() {
                         let sources = self.fusion_sources(stamp_ns, &odom_from_body);
                         let seed_ns = self
                             .options
                             .fusion
                             .as_ref()
                             .map_or(0, |fusion| (fusion.seed_s * 1e9) as i64);
-                        if seed_ns > 0 {
+                        if seed_ns > 0 && !weak {
                             self.recent_fixes
                                 .retain(|(stamp, _, _)| stamp_ns - stamp <= seed_ns);
                             self.recent_fixes.push_back((
@@ -1310,9 +1321,10 @@ impl OdomCorrector {
                                             .drain(..self.fusion_rejected.len() - needed);
                                     }
                                     if self.fusion_rejected.len() == needed
-                                        && fixes_agree_under_an_odometry(
+                                        && fixes_move_as_one_source(
                                             &self.fusion_rejected,
                                             self.options.correction.agreement_m,
+                                            3.0,
                                         )
                                     {
                                         fusion.reset();
@@ -1334,6 +1346,11 @@ impl OdomCorrector {
                                 .push((stamp_ns, map_from_odom.inverse().compose(&map_from_body)));
                         }
                     }
+                    // A weak reset (`weak_reset_after`) puts the odometry
+                    // back on the map, like a full one.
+                    if weak && outcome == FixOutcome::Reset {
+                        self.rejected_in_a_row = 0;
+                    }
                     if !weak && self.options.recover_after > 0 {
                         match outcome {
                             FixOutcome::Rejected => self.rejected_in_a_row += 1,
@@ -1354,25 +1371,6 @@ impl OdomCorrector {
         }
         events
     }
-}
-
-/// Whether each pair of consecutive `fixes` moved as one odometry did
-/// between them (the same odometry for all pairs): within `tolerance_m`
-/// and 3 deg.
-fn fixes_agree_under_an_odometry(fixes: &[(i64, SE3, [Option<SE3>; 2])], tolerance_m: f64) -> bool {
-    (0..2).any(|source| {
-        fixes.windows(2).all(|pair| {
-            let (_, fix_a, sources_a) = &pair[0];
-            let (_, fix_b, sources_b) = &pair[1];
-            let (Some(odom_a), Some(odom_b)) = (&sources_a[source], &sources_b[source]) else {
-                return false;
-            };
-            let fix_motion = fix_a.inverse().compose(fix_b);
-            let odom_motion = odom_a.inverse().compose(odom_b);
-            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
-                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= 3f64.to_radians()
-        })
-    })
 }
 
 /// Which received images to localize: every `every`-th once the odometry
@@ -1719,6 +1717,35 @@ mod tests {
     }
 
     #[test]
+    fn weak_fixes_that_start_the_correction_start_the_fusion() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions {
+            fusion: Some(FusionOptions::default()),
+            ..MapLocalizeOptions::default()
+        });
+        let odom = |i: i64| pose(i as f64 * 0.05, 0.0);
+        let mut started = false;
+        for i in 0..20 {
+            core.add_second_odom(i * 50 * MS, odom(i));
+            core.add_odom(i * 50 * MS, odom(i));
+            let events = core.add_weak_fix(i * 50 * MS, offset().compose(&odom(i)));
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    FixEvent::Applied {
+                        outcome: FixOutcome::Initialized,
+                        ..
+                    }
+                )
+            }) {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the weak fixes start the correction");
+        assert!(core.fusion.as_ref().is_some_and(MapFusion::is_set));
+    }
+
+    #[test]
     fn a_fusion_never_started_starts_from_agreeing_fixes() {
         // Weak fixes start the correction (no fusion yet: it starts on a
         // used full fix); then the VIO runs off and the correction rejects
@@ -1926,6 +1953,40 @@ mod tests {
             quiet.add_fix(i * 100 * MS, offset().compose(&still));
         }
         assert_eq!(quiet.recovery_requests(), 0);
+    }
+
+    #[test]
+    fn agreeing_weak_fixes_replace_a_drifted_correction_with_weak_reset_after() {
+        let run = |weak_reset_after: usize| {
+            let mut options = MapLocalizeOptions::default();
+            options.correction.weak_reset_after = weak_reset_after;
+            let mut core = OdomCorrector::new(&options);
+            for i in 0..3_i64 {
+                let odom = pose(0.2 * i as f64, 0.0);
+                core.add_odom(i * 100 * MS, odom.clone());
+                core.add_fix(i * 100 * MS, offset().compose(&odom));
+            }
+            assert!(core.is_set());
+            // The odometry drifted 2 m while no full fix came; the weak
+            // fixes see the robot where it is, 20 cm apart.
+            let drift = SE3::new(UnitQuaternion::identity(), Vector3::new(2.0, 0.0, 0.0));
+            let mut outcomes = Vec::new();
+            for i in 3..6_i64 {
+                let truth = pose(0.2 * i as f64, 0.0);
+                core.add_odom(i * 100 * MS, drift.compose(&truth));
+                for event in core.add_weak_fix(i * 100 * MS, offset().compose(&truth)) {
+                    if let FixEvent::Applied { outcome, .. } = event {
+                        outcomes.push(outcome);
+                    }
+                }
+            }
+            outcomes
+        };
+        assert_eq!(run(0), [FixOutcome::Unused; 3]);
+        assert_eq!(
+            run(3),
+            [FixOutcome::Unused, FixOutcome::Unused, FixOutcome::Reset]
+        );
     }
 
     #[test]

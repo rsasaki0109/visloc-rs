@@ -479,6 +479,7 @@ measurements behind the defaults.
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `weak_min_inliers` | `15` | a map-wide localization with at least this many inliers, but fewer than `min_inliers`, is a *weak fix*: it counts only toward the first map pose, which then needs three agreeing fixes instead of two (`>= min_inliers`: off) |
 | `weak_gate_m` | `0` (off) | once the odometry has a map pose, a weak localization (also one matched by projection) within this many metres and 2 deg of the corrected odometry is used as a fix too; helps where images rarely reach `min_inliers` (OpenLORIS-Scene office1-7: 6.9 to 3.4 cm), costs a little where they often do (EuRoC: up to +0.5 cm) |
+| `weak_reset_after` | `0` (off) | once the odometry has a map pose, this many consecutive weak or rejected localizations that agree with each other, while the odometry moves farther than they agree within (`agreement_m`, 10 cm, or 3 deg of turn), replace its correction; for a monocular VIO that drifted metres while only weak localizations came (OpenLORIS-Scene corridor1-1, offline: 20.1 to 7.0 cm median) |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
 | `p3p_solver` | `grunert` | the P3P solver in RANSAC: `grunert`, or `lambda-twist` (Persson & Nordberg), which is more accurate when most landmarks in view are on walls (a room, a corridor, a building front) |
@@ -491,7 +492,7 @@ measurements behind the defaults.
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
-| `profile` | `default` | `dynamic_indoor`: the defaults measured with people about (`docs/dynamic_obstacle_localization.md`): `init_warmup_s` 3 and, with `fusion:=true`, `fusion_source_check_s` 1 and `fusion_seed_s` 3. Parameters given explicitly still win; the node logs the values it uses |
+| `profile` | `default` | `dynamic_indoor`: the defaults measured with people about (`docs/dynamic_obstacle_localization.md`): `init_warmup_s` 3 and, with `fusion:=true`, `fusion_source_check_s` 1, `fusion_seed_s` 3 and `fusion_max_speed_m_s` 2. Parameters given explicitly still win; the node logs the values it uses |
 | `fusion` | `false` | also fuse `odom2` with `odom` and the fixes in `visloc_localization::fusion::MapFusion` (a sliding-window pose graph); `map_pose` and `map -> odom` follow the fusion. A fix is used if the correction initializes or resets from it, or once the fusion has a pose, if it lies within 15 cm / 3 deg of the fusion's prediction |
 | `odom_noise`, `odom2_noise` | `vio`, `wheel` | drift models of the two odometries: `vio`, `wheel` or `legged` |
 | `odom2_body_offset` | identity | `odom2`'s body in `odom`'s body frame (`T_body_body2`), `tx,ty,tz,qx,qy,qz,qw`, e.g. a VIO's IMU <- `base_link` |

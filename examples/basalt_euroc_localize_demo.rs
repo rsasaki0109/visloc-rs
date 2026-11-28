@@ -55,6 +55,9 @@
 //! `--weak-gate-cm N`, a weak fix (also one matched by projection) within N
 //! cm of where the correction puts the odometry pose is used afterwards too,
 //! for robots whose images rarely reach `--min-inliers` against the map.
+//! With `--weak-reset-after N`, N consecutive weak or rejected fixes that
+//! agree with each other replace the correction's offset, for an odometry
+//! that drifted beyond any gate while only weak fixes came.
 //! Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
@@ -175,10 +178,10 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    apply_inlier_spread_gate, fixes_agree_under_a_source, view_diagnostics, BinaryLandmarkIndex,
-    BinaryMatchGates, ExpectedVisibility, FixOutcome, ImageGrid, KeyframeRetrieval, MapFusion,
-    MapFusionConfig, OdomCorrection, OdomCorrectionConfig, OdometryNoise, ViewDiagnostics,
-    VisibilityGates, VIEW_GRID_MAX,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, fixes_move_as_one_source,
+    view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates, ExpectedVisibility, FixOutcome,
+    ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
+    OdometryNoise, ViewDiagnostics, VisibilityGates, VIEW_GRID_MAX,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -281,6 +284,9 @@ struct Args {
     /// Once the correction is set, a weak fix (map-wide or by projection)
     /// this close to the corrected odometry is used too (0: never).
     weak_gate_m: f64,
+    /// With `--weak-reset-after N`: N consecutive weak or rejected fixes
+    /// that agree replace the correction's offset.
+    weak_reset_after: usize,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -330,6 +336,9 @@ struct Args {
     /// With `--fusion`: `MapFusionConfig::source_check_window_s` (0: off), so
     /// an odometry that disagrees with the fixes is left out while it does.
     fusion_source_check_s: f64,
+    /// With `--fusion`: `MapFusionConfig::max_speed_m_s` (0: off), so an
+    /// odometry moving faster than a robot can is left out at once.
+    fusion_max_speed: f64,
     /// With `--fusion`: when the correction initializes or resets, start the
     /// fusion from the full fixes of the last this many seconds that agree
     /// with that fix under one odometry's motion, not that fix alone, so the
@@ -353,9 +362,9 @@ impl Args {
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
-         [--weak-gate-cm CM] \
+         [--weak-gate-cm CM] [--weak-reset-after N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
             .into()
     }
 
@@ -369,6 +378,7 @@ impl Args {
         let mut initial_window_s = None::<f64>;
         let mut weak_min_inliers = None::<usize>;
         let mut weak_gate_cm = None::<f64>;
+        let mut weak_reset_after = None::<usize>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -414,6 +424,7 @@ impl Args {
             initial_window_s: 30.0,
             weak_min_inliers: 15,
             weak_gate_m: 0.0,
+            weak_reset_after: 0,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -432,6 +443,7 @@ impl Args {
             init_warmup_s: 0.0,
             object_boxes: None,
             fusion_source_check_s: 0.0,
+            fusion_max_speed: 0.0,
             fusion_seed_s: 0.0,
         };
         let mut arguments = arguments.into_iter();
@@ -553,6 +565,7 @@ impl Args {
                 "--initial-window-s" => initial_window_s = Some(number(&option, value()?)?),
                 "--weak-min-inliers" => weak_min_inliers = Some(number(&option, value()?)?),
                 "--weak-gate-cm" => weak_gate_cm = Some(number::<f64>(&option, value()?)?),
+                "--weak-reset-after" => weak_reset_after = Some(number(&option, value()?)?),
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -582,6 +595,7 @@ impl Args {
                     args.fusion_source_check_s = number(&option, value()?)?;
                 }
                 "--fusion-seed-s" => args.fusion_seed_s = number(&option, value()?)?,
+                "--fusion-max-speed" => args.fusion_max_speed = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -642,6 +656,12 @@ impl Args {
         if args.fusion_seed_s != 0.0 && !args.fusion {
             return Err("--fusion-seed-s needs --fusion".into());
         }
+        if args.fusion_max_speed != 0.0 && !args.fusion {
+            return Err("--fusion-max-speed needs --fusion".into());
+        }
+        if !(args.fusion_max_speed >= 0.0 && args.fusion_max_speed.is_finite()) {
+            return Err("--fusion-max-speed must be a non-negative number".into());
+        }
         if !(args.fusion_seed_s >= 0.0 && args.fusion_seed_s.is_finite()) {
             return Err("--fusion-seed-s must be a non-negative number".into());
         }
@@ -672,6 +692,9 @@ impl Args {
             if let Some(weak) = weak_min_inliers {
                 args.weak_min_inliers = weak;
             }
+            if let Some(n) = weak_reset_after {
+                args.weak_reset_after = n;
+            }
             if let Some(gate) = weak_gate_cm {
                 if !(gate >= 0.0 && gate.is_finite()) {
                     return Err("--weak-gate-cm must be a non-negative number".into());
@@ -683,11 +706,13 @@ impl Args {
             || initial_window_s.is_some()
             || weak_min_inliers.is_some()
             || weak_gate_cm.is_some()
+            || weak_reset_after.is_some()
             || projection_radius_px.is_some()
         {
             return Err(
                 "--localize-every, --initial-localize-every, --initial-window-s, \
-                 --weak-min-inliers, --weak-gate-cm and --projection-radius-px need --vio \
+                 --weak-min-inliers, --weak-gate-cm, --weak-reset-after and \
+                 --projection-radius-px need --vio \
                  or --odometry"
                     .into(),
             );
@@ -1343,14 +1368,25 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 const SEED_AGREEMENT_M: f64 = 0.10;
 const SEED_AGREEMENT_PER_M: f64 = 0.10;
 const SEED_AGREEMENT_DEG: f64 = 3.0;
+/// With `--fusion`: a full fix is used if it lies within this of the
+/// fusion's prediction (as `visloc_map_localize_node`).
+const FUSION_GATE_M: f64 = 0.15;
+const FUSION_GATE_DEG: f64 = 3.0;
 
 /// Odometry corrected into the map frame, frame by frame: the fixes, the
 /// correction and every output file of `--vio` / `--odometry`.
 struct CorrectedRun {
     correction: OdomCorrection,
-    /// With `--fusion`: the fused map pose, fed the fixes the correction
-    /// accepts.
+    /// With `--fusion`: the fused map pose. It starts (and restarts) with
+    /// the correction, then gates full fixes on its own prediction, as
+    /// `visloc_map_localize_node` does.
     fusion: Option<MapFusion>,
+    /// Full fixes the fusion rejected in a row (stamp, map pose, odometry
+    /// poses); `fusion_restart_after` of them that move as one odometry did
+    /// restart it. Fixes agree within `fusion_agreement_m`.
+    fusion_rejected: Vec<(i64, SE3, Vec<Option<SE3>>)>,
+    fusion_restart_after: usize,
+    fusion_agreement_m: f64,
     /// With `--fusion-seed-s`: that span, and the full fixes within it of the
     /// newest (stamp, map pose, odometry poses).
     fusion_seed_ns: i64,
@@ -1401,6 +1437,7 @@ impl CorrectedRun {
                 let defaults = OdomCorrectionConfig::default();
                 OdomCorrectionConfig {
                     weak_gate_m: args.weak_gate_m,
+                    weak_reset_after: args.weak_reset_after,
                     init_fixes: args.init_fixes.unwrap_or(defaults.init_fixes),
                     init_fixes_weak: args.init_fixes.map_or(defaults.init_fixes_weak, |n| {
                         n.max(defaults.init_fixes_weak)
@@ -1414,6 +1451,12 @@ impl CorrectedRun {
             }),
             fixes_used: 0,
             last_used_fix: None,
+            fusion_rejected: Vec::new(),
+            fusion_restart_after: args
+                .reset_after
+                .unwrap_or(OdomCorrectionConfig::default().reset_after)
+                .max(2),
+            fusion_agreement_m: OdomCorrectionConfig::default().agreement_m,
             fusion_seed_ns: (args.fusion_seed_s * 1e9) as i64,
             recent_fixes: VecDeque::new(),
             fusion: args.fusion.then(|| {
@@ -1427,6 +1470,7 @@ impl CorrectedRun {
                 MapFusion::new(MapFusionConfig {
                     sources,
                     source_check_window_s: args.fusion_source_check_s,
+                    max_speed_m_s: args.fusion_max_speed,
                     ..MapFusionConfig::default()
                 })
             }),
@@ -1482,12 +1526,14 @@ impl CorrectedRun {
 
     /// One frame: the odometry's IMU pose and, on a frame to localize, its
     /// image.
-    /// The map pose of the IMU now: the fusion's with `--fusion`, else the
-    /// correction's.
+    /// The map pose of the IMU now: the fusion's with `--fusion` once it has
+    /// one, else the correction's.
     fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
+        // The fusion's pose once it has one; until then (it starts on a full
+        // fix) the correction's, as `visloc_map_localize_node` publishes.
         match &self.fusion {
-            Some(fusion) => fusion.map_from_body(sources),
-            None => self.correction.map_from_body(odom_from_imu?),
+            Some(fusion) if fusion.is_set() => fusion.map_from_body(sources),
+            _ => self.correction.map_from_body(odom_from_imu?),
         }
     }
 
@@ -1575,6 +1621,7 @@ impl CorrectedRun {
                         FixOutcome::Pending => "weak-pending",
                         FixOutcome::Initialized => "weak-initialized",
                         FixOutcome::Accepted => "weak-accepted",
+                        FixOutcome::Reset => "weak-reset",
                         _ => "weak-unused",
                     }
                 }
@@ -1616,8 +1663,14 @@ impl CorrectedRun {
         Ok(())
     }
 
-    /// Passes a fix the correction used on to the fusion: a reset restarts
-    /// the fusion from it.
+    /// Passes a full fix on to the fusion, as `visloc_map_localize_node`
+    /// does. The fusion starts (and restarts) when the correction does, from
+    /// this fix and, with `--fusion-seed-s`, the earlier ones that agree with
+    /// it under some odometry. Once running, it takes a fix within 15 cm and
+    /// 3 deg of its own prediction, not the correction's verdict, which a
+    /// runaway first odometry turns against good fixes. Rejected fixes that
+    /// move as one odometry did restart it. Weak fixes stay out, but for one
+    /// that starts or restarts the correction.
     fn fuse(
         &mut self,
         timestamp_ns: i64,
@@ -1633,6 +1686,12 @@ impl CorrectedRun {
             self.fixes_used += 1;
             self.last_used_fix = Some((timestamp_ns, map_from_imu.clone()));
         }
+        // A weak fix that starts (or restarts) the correction starts the
+        // fusion too, so that a runaway odometry can be left out from the
+        // first map pose on; other weak fixes stay out of it.
+        if weak && !matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset) {
+            return;
+        }
         let Some(fusion) = &mut self.fusion else {
             return;
         };
@@ -1642,32 +1701,58 @@ impl CorrectedRun {
             self.recent_fixes
                 .push_back((timestamp_ns, map_from_imu.clone(), sources.to_vec()));
         }
-        match outcome {
-            FixOutcome::Initialized | FixOutcome::Reset => {
-                fusion.reset();
-                if self.fusion_seed_ns > 0 {
-                    // The earlier fixes that agree with this one under some
-                    // odometry, oldest first, then this one.
-                    for (stamp, fix, fix_sources) in &self.recent_fixes {
-                        if *stamp < timestamp_ns
-                            && fixes_agree_under_a_source(
-                                fix,
-                                fix_sources,
-                                map_from_imu,
-                                sources,
-                                SEED_AGREEMENT_M,
-                                SEED_AGREEMENT_PER_M,
-                                SEED_AGREEMENT_DEG,
-                            )
-                        {
-                            fusion.add_fix(*stamp, fix, fix_sources);
-                        }
+        if matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset)
+            || (!fusion.is_set() && outcome == FixOutcome::Accepted)
+        {
+            fusion.reset();
+            // The earlier fixes that agree with this one under some odometry,
+            // oldest first, then this one.
+            for (stamp, fix, fix_sources) in &self.recent_fixes {
+                if *stamp < timestamp_ns
+                    && fixes_agree_under_a_source(
+                        fix,
+                        fix_sources,
+                        map_from_imu,
+                        sources,
+                        SEED_AGREEMENT_M,
+                        SEED_AGREEMENT_PER_M,
+                        SEED_AGREEMENT_DEG,
+                    )
+                {
+                    fusion.add_fix(*stamp, fix, fix_sources);
+                }
+            }
+            fusion.add_fix(timestamp_ns, map_from_imu, sources);
+            self.fusion_rejected.clear();
+        } else if fusion.is_set() || self.correction.map_from_odom().is_some() {
+            let close = fusion.map_from_body(sources).is_some_and(|p| {
+                (p.translation - map_from_imu.translation).norm() <= FUSION_GATE_M
+                    && p.rotation.angle_to(&map_from_imu.rotation) <= FUSION_GATE_DEG.to_radians()
+            });
+            if close {
+                fusion.add_fix(timestamp_ns, map_from_imu, sources);
+                self.fusion_rejected.clear();
+            } else {
+                let needed = self.fusion_restart_after;
+                self.fusion_rejected
+                    .push((timestamp_ns, map_from_imu.clone(), sources.to_vec()));
+                if self.fusion_rejected.len() > needed {
+                    self.fusion_rejected
+                        .drain(..self.fusion_rejected.len() - needed);
+                }
+                if self.fusion_rejected.len() == needed
+                    && fixes_move_as_one_source(
+                        &self.fusion_rejected,
+                        self.fusion_agreement_m,
+                        FUSION_GATE_DEG,
+                    )
+                {
+                    fusion.reset();
+                    for (stamp, fix, fix_sources) in self.fusion_rejected.drain(..) {
+                        fusion.add_fix(stamp, &fix, &fix_sources);
                     }
                 }
-                fusion.add_fix(timestamp_ns, map_from_imu, sources);
             }
-            FixOutcome::Accepted => fusion.add_fix(timestamp_ns, map_from_imu, sources),
-            _ => {}
         }
     }
 
@@ -1880,7 +1965,9 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         if args.vio_recover > 0 {
             match run.last_outcome {
                 Some("rejected") => rejected_in_a_row += 1,
-                Some("accepted" | "initialized" | "reset" | "pending") => rejected_in_a_row = 0,
+                Some("accepted" | "initialized" | "reset" | "weak-reset" | "pending") => {
+                    rejected_in_a_row = 0
+                }
                 _ => {}
             }
             if rejected_in_a_row >= args.vio_recover {
@@ -2183,6 +2270,13 @@ mod tests {
         assert!(with(&["--initial-window-s", "30"]).is_err());
         assert!(with(&["--weak-min-inliers", "15"]).is_err());
         assert!(with(&["--weak-gate-cm", "5"]).is_err());
+        assert!(with(&["--weak-reset-after", "3"]).is_err());
+        assert_eq!(
+            with(&[&vio[..], &["--weak-reset-after", "3"]].concat())
+                .expect("parses")
+                .weak_reset_after,
+            3
+        );
         assert!(with(&[&vio[..], &["--weak-gate-cm", "-1"]].concat()).is_err());
         assert_eq!(
             with(&[&vio[..], &["--weak-gate-cm", "5"]].concat())

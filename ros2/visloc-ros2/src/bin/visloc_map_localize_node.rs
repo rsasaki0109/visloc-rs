@@ -45,7 +45,8 @@ USAGE:
 PARAMETERS (--name value  or  -p name:=value):
   profile                default, or dynamic_indoor: the defaults measured with people
                          about (docs/dynamic_obstacle_localization.md): init_warmup_s 3
-                         and, with fusion, fusion_source_check_s 1 and fusion_seed_s 3;
+                         and, with fusion, fusion_source_check_s 1, fusion_seed_s 3 and
+                         fusion_max_speed_m_s 2;
                          parameters given explicitly still win                [default]
   map                    saved map directory (map.json, sparse/, landmark_descriptors.txt) [required]
   camera                 Basalt camera index of the image topic                       [0]
@@ -69,6 +70,10 @@ PARAMETERS (--name value  or  -p name:=value):
   weak_gate_m            once the odometry has a map pose, a weak localization (also by
                          projection) this close (m) to the corrected odometry is used
                          too; for robots whose images rarely reach min_inliers     [0: off]
+  weak_reset_after       once the odometry has a map pose, this many consecutive weak or
+                         rejected localizations that agree, over more travel than they
+                         agree within, replace its correction (an odometry that drifted
+                         metres while only weak localizations came)               [0: off]
   min_inlier_cells       turn down a localization whose inliers occupy fewer cells of a
                          4x4 image grid (bunched on one patch, e.g. the rest of the view
                          hidden by people); 6 was measured on TUM walking          [0: off]
@@ -89,6 +94,9 @@ PARAMETERS (--name value  or  -p name:=value):
                          the fixes of the last this many seconds that agree with that
                          fix under one odometry, so the source check judges the VIO
                          from the start; 3 (with init_warmup_s 3) measured in RNE [0: off]
+  fusion_max_speed_m_s   leave out an odometry moving faster than this (m/s) while
+                         the other moves slower: a runaway VIO before a second fix
+                         can show it                                             [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -206,6 +214,8 @@ fn run() -> Result<(), String> {
     if !(options.correction.weak_gate_m >= 0.0 && options.correction.weak_gate_m.is_finite()) {
         return Err("weak_gate_m must be a non-negative number".into());
     }
+    options.correction.weak_reset_after =
+        args.parsed_or("weak_reset_after", options.correction.weak_reset_after)?;
     options.min_inlier_cells = args.parsed_or("min_inlier_cells", options.min_inlier_cells)?;
     if options.min_inlier_cells > 16 {
         return Err("min_inlier_cells must be between 0 and 16".into());
@@ -220,6 +230,7 @@ fn run() -> Result<(), String> {
         if dynamic_indoor {
             fusion.source_check_window_s = 1.0;
             fusion.seed_s = 3.0;
+            fusion.max_speed_m_s = 2.0;
         }
         if let Some(name) = args.string("odom_noise") {
             fusion.noise = odometry_noise_by_name(&name).map_err(|e| format!("odom_noise: {e}"))?;
@@ -241,6 +252,10 @@ fn run() -> Result<(), String> {
         if !(fusion.seed_s >= 0.0 && fusion.seed_s.is_finite()) {
             return Err("fusion_seed_s must be a non-negative number".into());
         }
+        fusion.max_speed_m_s = args.parsed_or("fusion_max_speed_m_s", fusion.max_speed_m_s)?;
+        if !(fusion.max_speed_m_s >= 0.0 && fusion.max_speed_m_s.is_finite()) {
+            return Err("fusion_max_speed_m_s must be a non-negative number".into());
+        }
         options.fusion = Some(fusion);
     } else {
         for key in [
@@ -249,6 +264,7 @@ fn run() -> Result<(), String> {
             "odom2_body_offset",
             "fusion_source_check_s",
             "fusion_seed_s",
+            "fusion_max_speed_m_s",
         ] {
             if args.string(key).is_some() {
                 return Err(format!("{key} needs fusion:=true"));
@@ -262,8 +278,8 @@ fn run() -> Result<(), String> {
             options.fusion.as_ref().map_or_else(
                 || ", no fusion (set fusion:=true with a wheel odometry on odom2)".to_owned(),
                 |f| format!(
-                    ", fusion_source_check_s {}, fusion_seed_s {}",
-                    f.source_check_window_s, f.seed_s
+                    ", fusion_source_check_s {}, fusion_seed_s {}, fusion_max_speed_m_s {}",
+                    f.source_check_window_s, f.seed_s, f.max_speed_m_s
                 ),
             ),
         );
