@@ -70,6 +70,10 @@ PARAMETERS (--name value  or  -p name:=value):
   weak_gate_m            once the odometry has a map pose, a weak localization (also by
                          projection) this close (m) to the corrected odometry is used
                          too; for robots whose images rarely reach min_inliers     [0: off]
+  weak_reset_after       once the odometry has a map pose, this many consecutive weak or
+                         rejected localizations that agree, over more travel than they
+                         agree within, replace its correction (an odometry that drifted
+                         metres while only weak localizations came)               [0: off]
   min_inlier_cells       turn down a localization whose inliers occupy fewer cells of a
                          4x4 image grid (bunched on one patch, e.g. the rest of the view
                          hidden by people); 6 was measured on TUM walking          [0: off]
@@ -210,6 +214,8 @@ fn run() -> Result<(), String> {
     if !(options.correction.weak_gate_m >= 0.0 && options.correction.weak_gate_m.is_finite()) {
         return Err("weak_gate_m must be a non-negative number".into());
     }
+    options.correction.weak_reset_after =
+        args.parsed_or("weak_reset_after", options.correction.weak_reset_after)?;
     options.min_inlier_cells = args.parsed_or("min_inlier_cells", options.min_inlier_cells)?;
     if options.min_inlier_cells > 16 {
         return Err("min_inlier_cells must be between 0 and 16".into());

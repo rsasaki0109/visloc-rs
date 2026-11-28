@@ -55,6 +55,9 @@
 //! `--weak-gate-cm N`, a weak fix (also one matched by projection) within N
 //! cm of where the correction puts the odometry pose is used afterwards too,
 //! for robots whose images rarely reach `--min-inliers` against the map.
+//! With `--weak-reset-after N`, N consecutive weak or rejected fixes that
+//! agree with each other replace the correction's offset, for an odometry
+//! that drifted beyond any gate while only weak fixes came.
 //! Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
@@ -281,6 +284,9 @@ struct Args {
     /// Once the correction is set, a weak fix (map-wide or by projection)
     /// this close to the corrected odometry is used too (0: never).
     weak_gate_m: f64,
+    /// With `--weak-reset-after N`: N consecutive weak or rejected fixes
+    /// that agree replace the correction's offset.
+    weak_reset_after: usize,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -356,7 +362,7 @@ impl Args {
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
-         [--weak-gate-cm CM] \
+         [--weak-gate-cm CM] [--weak-reset-after N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
             .into()
@@ -372,6 +378,7 @@ impl Args {
         let mut initial_window_s = None::<f64>;
         let mut weak_min_inliers = None::<usize>;
         let mut weak_gate_cm = None::<f64>;
+        let mut weak_reset_after = None::<usize>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -417,6 +424,7 @@ impl Args {
             initial_window_s: 30.0,
             weak_min_inliers: 15,
             weak_gate_m: 0.0,
+            weak_reset_after: 0,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -557,6 +565,7 @@ impl Args {
                 "--initial-window-s" => initial_window_s = Some(number(&option, value()?)?),
                 "--weak-min-inliers" => weak_min_inliers = Some(number(&option, value()?)?),
                 "--weak-gate-cm" => weak_gate_cm = Some(number::<f64>(&option, value()?)?),
+                "--weak-reset-after" => weak_reset_after = Some(number(&option, value()?)?),
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -683,6 +692,9 @@ impl Args {
             if let Some(weak) = weak_min_inliers {
                 args.weak_min_inliers = weak;
             }
+            if let Some(n) = weak_reset_after {
+                args.weak_reset_after = n;
+            }
             if let Some(gate) = weak_gate_cm {
                 if !(gate >= 0.0 && gate.is_finite()) {
                     return Err("--weak-gate-cm must be a non-negative number".into());
@@ -694,11 +706,13 @@ impl Args {
             || initial_window_s.is_some()
             || weak_min_inliers.is_some()
             || weak_gate_cm.is_some()
+            || weak_reset_after.is_some()
             || projection_radius_px.is_some()
         {
             return Err(
                 "--localize-every, --initial-localize-every, --initial-window-s, \
-                 --weak-min-inliers, --weak-gate-cm and --projection-radius-px need --vio \
+                 --weak-min-inliers, --weak-gate-cm, --weak-reset-after and \
+                 --projection-radius-px need --vio \
                  or --odometry"
                     .into(),
             );
@@ -1423,6 +1437,7 @@ impl CorrectedRun {
                 let defaults = OdomCorrectionConfig::default();
                 OdomCorrectionConfig {
                     weak_gate_m: args.weak_gate_m,
+                    weak_reset_after: args.weak_reset_after,
                     init_fixes: args.init_fixes.unwrap_or(defaults.init_fixes),
                     init_fixes_weak: args.init_fixes.map_or(defaults.init_fixes_weak, |n| {
                         n.max(defaults.init_fixes_weak)
@@ -1606,6 +1621,7 @@ impl CorrectedRun {
                         FixOutcome::Pending => "weak-pending",
                         FixOutcome::Initialized => "weak-initialized",
                         FixOutcome::Accepted => "weak-accepted",
+                        FixOutcome::Reset => "weak-reset",
                         _ => "weak-unused",
                     }
                 }
@@ -1949,7 +1965,9 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         if args.vio_recover > 0 {
             match run.last_outcome {
                 Some("rejected") => rejected_in_a_row += 1,
-                Some("accepted" | "initialized" | "reset" | "pending") => rejected_in_a_row = 0,
+                Some("accepted" | "initialized" | "reset" | "weak-reset" | "pending") => {
+                    rejected_in_a_row = 0
+                }
                 _ => {}
             }
             if rejected_in_a_row >= args.vio_recover {
@@ -2252,6 +2270,13 @@ mod tests {
         assert!(with(&["--initial-window-s", "30"]).is_err());
         assert!(with(&["--weak-min-inliers", "15"]).is_err());
         assert!(with(&["--weak-gate-cm", "5"]).is_err());
+        assert!(with(&["--weak-reset-after", "3"]).is_err());
+        assert_eq!(
+            with(&[&vio[..], &["--weak-reset-after", "3"]].concat())
+                .expect("parses")
+                .weak_reset_after,
+            3
+        );
         assert!(with(&[&vio[..], &["--weak-gate-cm", "-1"]].concat()).is_err());
         assert_eq!(
             with(&[&vio[..], &["--weak-gate-cm", "5"]].concat())

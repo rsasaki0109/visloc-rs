@@ -452,6 +452,35 @@ On the stereo map (median of the local error in cm):
 - With the monocular map the recovery also fires once (213 s), but the
   map itself is wrong and the run stays at metres.
 
+### Weak fixes that agree replace a drifted correction
+
+In 180–200 s the VIO is metres off, and the images match with 15–29
+inliers only: weak fixes. They are right (map-wide, scored alone: median
+7.3 cm, at most 12 cm over 33 of them), but they fall outside every gate
+and are left unused. `--weak-reset-after N` (`OdomCorrectionConfig::
+weak_reset_after`, `visloc_map_localize_node -p weak_reset_after:=N`) lets
+N consecutive fixes the correction rejects, weak ones among them, replace
+its offset when they agree with each other, as three agreeing weak fixes
+already set the first offset. The odometry must move farther than they
+agree within (`agreement_m`, 10 cm, or turn more than `gate_yaw_deg`, 3°)
+between two of them: weak fixes from one viewpoint can agree on a wrong
+pose. N = 3, as for the first offset (median of the local error in cm):
+
+| | all | 60–120 s | 160–180 s | 180–200 s | 200–240 s | 240–272 s |
+|---|---:|---:|---:|---:|---:|---:|
+| A + hold + recovery | 20.1 | 4.3 | 347 | 554 | 43.0 | 189 |
+| ... + weak reset | **7.0** | 4.3 | 347 | **18.1** | **4.5** | **23.0** |
+| ... + weak gate + weak reset | **5.8** | 3.9 | 335 | 19.1 | 4.5 | 9.8 |
+
+- It replaces the offset at 189.5 s and the run stays on the map; 514
+  fixes are accepted instead of 342, and the VIO recovery no longer fires.
+- 160–180 s is unchanged: there not even weak fixes come.
+- On the office matrix of the recovery section (28 runs) it fires on two,
+  both office1-7 on the old mono map, after the robot moves: every 3rd
+  image 32.3 → **20.0 cm**, every 10th 31.8 → 30.9 cm. The other 26 are
+  identical. Without the travel condition it fired there on three weak
+  fixes from a standstill (2 cm, 0.2°) and went to 58 cm.
+
 ## What was adopted
 
 - **A and C** stay as options of `basalt_euroc_localize_demo`
@@ -531,7 +560,9 @@ target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
 - One office scene, one corridor pair and one EuRoC pair. The office paths
   are short (6 m), and the map's own error is a large part of every number.
 - On the corridor the matches are too sparse for a monocular VIO without
-  wheels: between fixes it drifts metres (see the corridor section).
+  wheels: where not even weak fixes come it drifts metres (see the
+  corridor section). The weak reset was measured offline, not replayed
+  through ROS 2.
 - The legged odometry is synthetic.
 - A's pose priors leave with their frame. They are not carried into the
   VIO's marginal prior.
