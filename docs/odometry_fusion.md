@@ -393,9 +393,64 @@ With the static hold, the same matrix (RMSE in cm; recoveries in brackets):
 - **It needs fixes to see the run-away.** On office1-7 with the old mono map
   the fixes stop after 2 s, the recovery never fires, and the map prior
   stays at about 32 cm.
-- **The ROS 2 nodes do not have it yet.** There the rejections happen in
-  `visloc_map_localize_node` and the VIO in `visloc_vio_node`, so the map
-  node would have to ask the VIO node to reset.
+- **Through ROS 2**, `visloc_map_localize_node -p recover_after:=3` counts
+  the rejections and bumps `vio_recover` (`std_msgs/Int32`);
+  `visloc_vio_node -p map_recover:=true` resets on each bump through its
+  lost-tracking reset path, which publishes `odom_reset` as before, so the
+  map node's correction starts over too. DDS replays at 0.2x, `map_prior`
+  and `static_hold` on (RMSE; recoveries in brackets):
+
+  | | without recovery | with recovery |
+  |---|---:|---:|
+  | office1-1 → 1-6 map | 317–437 m | **15.1 cm (4)** |
+  | office1-3 → 1-1 map | 145 cm | **9.17 cm (1)** |
+  | office1-7 → 1-2 map | 2.88 cm | 2.22 cm (0) |
+  | office1-6 → 1-1 map | 1.93 cm | 1.85 cm (0) |
+  | office1-2 → 1-7 map | 3.43 cm | 3.31 cm (0) |
+
+  It fires only on the two that ran away (office1-3 runs away through ROS 2
+  but not offline: the node localizes the frames it gets through, not every
+  5th), and no replay diverges. The others differ by replay-to-replay
+  variation; no recovery fired there.
+
+## A long run: OpenLORIS corridor
+
+corridor1-1 (272 s, 232 m, laps of the corridor) against a map of
+corridor1-5 (146 s, 127 m), monocular VIO without wheels, every 5th image,
+on the blurred dense map recipe (`--smooth-features 1.5 --detector-quality
+0.001`, 2000 points). Scored in local mode (`--align-radius-m 5`), as the
+corridor's laser ground truth and the map disagree by metres over the whole
+loop; only the poses within reach of the map are scored.
+
+**The map has to come from a stereo SLAM.** The monocular SLAM shrinks
+corridor1-5 to 52 m of its 127 m, by 0.2–0.65x depending on the stretch,
+and the queries against it localize 77 times out of 2423. The query's own
+monocular VIO keeps its scale (204 m of 232 m). Built from both cameras of
+the same session the map is 126 m long, and the same queries are then
+accepted 311–342 times. The robot still runs monocular; the map is made
+once, so it can use the better sensor.
+
+On the stereo map (median of the local error in cm):
+
+| | all | 60–120 s | 120–160 s | 160–200 s | 200–240 s | 240–272 s |
+|---|---:|---:|---:|---:|---:|---:|
+| no map prior | 309 | 87.5 | 277 | 476 | 52.5 | 1525 |
+| A | 186 | 4.1 | 10.7 | 452 | 43.3 | 530 |
+| A + hold + recovery | **20.1** | 4.3 | 10.8 | 466 | 43.0 | 189 |
+| A + weak gate + hold + recovery | 19.6 | 3.9 | 11.0 | 452 | 43.6 | 196 |
+
+- **Where the fixes arrive, A holds a few centimetres** (60–160 s: 221
+  accepted fixes in 60–120 s, 4 cm).
+- **Without fixes the monocular VIO drifts metres.** For the first 60 s
+  the robot runs the mapped stretch the other way round and nothing
+  matches; in 130–200 s the matches stay at 4–20 inliers, under the full
+  fix threshold, so the VIO runs alone for 70 s and is 4.5 m off.
+- **The recovery fires once in 272 s, at 262 s**, when three fixes in a
+  row disagree with a VIO that drifted away, and the last stretch goes from
+  5.3 m to 1.9 m. The hold ends at 2.2 s, at the first motion. Neither
+  fires falsely on the long run.
+- With the monocular map the recovery also fires once (213 s), but the
+  map itself is wrong and the run stays at metres.
 
 ## What was adopted
 
@@ -473,8 +528,10 @@ target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
 
 ## Limits
 
-- One office scene and one EuRoC pair. The office paths are short (6 m),
-  and the map's own error is a large part of every number.
+- One office scene, one corridor pair and one EuRoC pair. The office paths
+  are short (6 m), and the map's own error is a large part of every number.
+- On the corridor the matches are too sparse for a monocular VIO without
+  wheels: between fixes it drifts metres (see the corridor section).
 - The legged odometry is synthetic.
 - A's pose priors leave with their frame. They are not carried into the
   VIO's marginal prior.

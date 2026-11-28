@@ -39,6 +39,13 @@ All notable changes to `visloc-rs` will be documented here.
   walking just ahead). The walkers make the VIO run off (all fixes then
   rejected); with `--vio-wheel-velocity` the recommended setting holds at
   2.5 cm.
+- `visloc_map_localize_node`'s `recover_after` and `visloc_vio_node`'s
+  `map_recover` (opt-in): after that many full fixes in a row are rejected
+  without agreeing among themselves, the map node bumps `vio_recover` and
+  the VIO node resets its estimator. With `map_prior` and `static_hold` on a
+  monocular VIO without wheels, OpenLORIS-Scene office1-1 replayed over DDS
+  goes from 437 m to 15.1 cm and office1-3 from 145 cm to 9.17 cm; it does
+  not fire on the three replays that held. See `docs/odometry_fusion.md`.
 - `basalt_euroc_localize_demo --vio-recover N`: after N full fixes in a row
   are rejected, without agreeing among themselves, the VIO is rebuilt and
   the correction starts over. With `--vio-static-hold` and the map prior on
