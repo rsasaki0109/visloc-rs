@@ -43,8 +43,9 @@
 //! offset puts the odometry pose is accepted, which keeps the offset
 //! following the odometry's drift where full fixes are rare. It counts
 //! toward a reset only with `weak_reset_after` set: that many consecutive
-//! weak or rejected fixes that agree with each other replace the offset,
-//! as weak fixes set the first one (an odometry that drifted metres while
+//! weak or rejected fixes that agree with each other, over more odometry
+//! travel than they agree within, replace the offset, as weak fixes set the
+//! first one (an odometry that drifted metres while
 //! no full fix came leaves its weak fixes outside any gate).
 //!
 //! The offset is the mean over the accepted fixes of the last `window_s`
@@ -93,9 +94,11 @@ pub struct OdomCorrectionConfig {
     /// Yaw gate, in degrees, for accepting a weak fix (`weak_gate_m`).
     pub weak_gate_yaw_deg: f64,
     /// Once the offset is set, this many consecutive fixes that it rejects,
-    /// weak ones among them, replace it when they agree with each other
-    /// (rejected full fixes alone still need `reset_after`). 0, the default:
-    /// weak fixes never reset the offset.
+    /// weak ones among them, replace it when they agree with each other and
+    /// the odometry moved more than `agreement_m` (or turned more than
+    /// `gate_yaw_deg`) between two of them (rejected full fixes alone still
+    /// need `reset_after`). 0, the default: weak fixes never reset the
+    /// offset.
     pub weak_reset_after: usize,
     /// When either is positive, the fixes that set the first offset must
     /// span this much odometry travel (m) or turn (deg), between any two of
@@ -496,12 +499,26 @@ impl OdomCorrection {
                 continue;
             };
             let run = &self.candidates[start..];
-            if (!all_full || run.iter().all(|fix| !fix.weak)) && self.agree(run) {
+            let full = run.iter().all(|fix| !fix.weak);
+            if (full || (!all_full && self.moved_beyond_agreement(run))) && self.agree(run) {
                 self.candidates.drain(..start);
                 return true;
             }
         }
         false
+    }
+
+    /// Whether the odometry moved farther than `agreement_m`, or turned
+    /// more than `gate_yaw_deg`, between two of `fixes`: weak fixes from one
+    /// viewpoint can agree on a wrong pose, within the agreement tolerance.
+    fn moved_beyond_agreement(&self, fixes: &[Fix]) -> bool {
+        let turn = self.config.gate_yaw_deg.to_radians();
+        fixes.iter().enumerate().any(|(i, a)| {
+            fixes[i + 1..].iter().any(|b| {
+                (a.odom_position - b.odom_position).norm() > self.config.agreement_m
+                    || a.odom_rotation.angle_to(&b.odom_rotation) > turn
+            })
+        })
     }
 
     /// Appends to the candidate run, keeping only its last `needed` fixes,
@@ -1144,6 +1161,30 @@ mod tests {
                 assert!((moved - drifted).norm() < 1e-9, "{moved:?}");
             }
         }
+    }
+
+    #[test]
+    fn weak_fixes_from_a_standstill_do_not_reset_the_offset() {
+        // One viewpoint: the weak fixes agree on a pose 30 cm off, but the
+        // odometry did not move, so they may share a view-dependent bias.
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            weak_reset_after: 3,
+            ..OdomCorrectionConfig::default()
+        });
+        for index in 0..2 {
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
+        }
+        let still = odom(2);
+        let mut biased = truth().compose(&still);
+        biased.translation += Vector3::new(0.3, 0.0, 0.0);
+        for index in 2..6 {
+            let stamp = index as i64 * SECOND / 10;
+            assert_eq!(
+                correction.add_weak_fix(stamp, &biased, &still),
+                FixOutcome::Unused
+            );
+        }
+        assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
     }
 
     #[test]
