@@ -314,6 +314,13 @@ rises from 58.7 to 60.9, still sixth. The RootSIFT pass gains on every track it 
 moves by +2.4 from new VIO and chain runs alone. On the Moving platform track sequence_5_1 (43.4 → 36.5), 5_5
 (63.7 → 62.0) and 5_10 (32.8 → 21.1) again score below submission 10's estimates, as in submission 11.
 
+**Submission 14** (score pending). All 63 sequences on GitHub Actions at commit `9c22a67`
+([run](https://github.com/rsasaki0109/visloc-rs/actions/runs/46120489731)). Against submission 13, by day the
+pass's RootSIFT keypoints are detected at SIFT contrast threshold 0.006 and edge threshold 12, and the two cameras
+of each keyframe are matched within an 8 px band (SLAM Dunk's front end; [SLAM Dunk
+comparison](lamaria_slam_dunk_comparison.md)): 70.18 → 71.14 on the thirteen training recordings. The Moving
+platform track is bridged with the GPS as before (sequence_5_3, 5_8 and 5_10 without a step).
+
 ## Against GroundedSLAM, sequence by sequence
 
 GroundedSLAM's scores here are those before its upload of 2026-10-29.
