@@ -573,9 +573,10 @@ impl CudaTrainer {
     /// written by `visloc-mvs --save-fused-depth`: width and height `u32`,
     /// then camera-z `f32` depths, 0 where there is none), and train them
     /// with `weight`. A map of another size (e.g. depth estimated at half the
-    /// resolution) is resampled to the view's by nearest neighbour; a view
-    /// without a readable file gets no prior. Returns the number of views with
-    /// one.
+    /// resolution) is resampled to the view's by nearest neighbour, and a
+    /// fisheye view's is turned into distances, its depth channel
+    /// (`PinholeCamera::depth_z_to_render`); a view without a readable file
+    /// gets no prior. Returns the number of views with one.
     pub fn load_depth_priors(
         &mut self,
         dir: &std::path::Path,
@@ -588,7 +589,9 @@ impl CudaTrainer {
         let mut found = 0;
         for (k, view) in self.views.iter().enumerate() {
             let path = dir.join(format!("{}.bin", view.name));
-            if let Some(map) = crate::mesh::read_depth_map(&path, w, h) {
+            if let Some(mut map) = crate::mesh::read_depth_map(&path, w, h) {
+                // Camera z on file; a fisheye view renders distances.
+                view.camera.camera.depth_z_to_render(&mut map, w, h);
                 depths[k * per..(k + 1) * per].copy_from_slice(&map);
                 found += 1;
             }

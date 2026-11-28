@@ -60,6 +60,36 @@ impl PinholeCamera {
             z,
         )
     }
+
+    /// Convert a camera-z depth map of this camera (`w x h` pixels, row by
+    /// row, 0 where there is none) in place to the renderers' depth
+    /// convention: unchanged for a pinhole projection (distorted or not),
+    /// the distance from the camera centre for an equidistant (fisheye) one,
+    /// whose depth channel is `|p|` rather than `p.z`. Each pixel's ray is
+    /// taken through its centre; a pixel whose ray the lens cannot
+    /// unproject, or that looks sideways or back (`z <= 0`), loses its
+    /// depth.
+    pub fn depth_z_to_render(&self, map: &mut [f32], w: u32, h: u32) {
+        if self.lens.projection != Projection::Equidistant {
+            return;
+        }
+        let (sx, sy) = (self.width as f32 / w as f32, self.height as f32 / h as f32);
+        for (i, d) in map.iter_mut().enumerate() {
+            if *d <= 0.0 {
+                continue;
+            }
+            let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+            let m = [
+                (((x + 0.5) * sx - self.cx) / self.fx) as f64,
+                (((y + 0.5) * sy - self.cy) / self.fy) as f64,
+            ];
+            *d = match crate::lens::unproject(&self.lens, m) {
+                // A unit ray: the point at camera z `d` lies `d / ray.z` away.
+                Some(ray) if ray[2] > 1e-6 => (*d as f64 / ray[2]) as f32,
+                _ => 0.0,
+            };
+        }
+    }
 }
 
 /// A camera pose as a world-to-camera rigid transform with its intrinsics.
@@ -126,6 +156,27 @@ impl CameraView {
 mod tests {
     use super::*;
     use nalgebra::Matrix3;
+
+    #[test]
+    fn fisheye_depth_map_becomes_distance() {
+        let lens = Lens::new(Projection::Equidistant, [0.0; crate::lens::LENS_COEFFS]);
+        let cam = PinholeCamera::new(100, 100, 50.0, 50.0, 50.0, 50.0).with_lens(lens);
+        // Pixel (x, 49) at half the size: centre u = 2 x + 1, 45° off axis
+        // where (u - 50) / 50 = pi / 4.
+        let u = 50.0 + 50.0 * std::f32::consts::FRAC_PI_4;
+        let x = ((u - 1.0) / 2.0).round() as u32;
+        let mut map = vec![0.0f32; 50 * 50];
+        map[25 * 50 + x as usize] = 2.0;
+        map[25 * 50 + 25] = 3.0;
+        cam.depth_z_to_render(&mut map, 50, 50);
+        let theta = ((2.0 * x as f32 + 1.0 - 50.0) / 50.0).hypot((51.0 - 50.0) / 50.0);
+        assert!((map[25 * 50 + x as usize] - 2.0 / theta.cos()).abs() < 1e-4);
+        assert!((map[25 * 50 + 25] - 3.0 / (2f32.sqrt() / 50.0).cos()).abs() < 1e-4);
+        // A pinhole (distorted or not) keeps camera z.
+        let mut flat = vec![0.0, 2.0];
+        PinholeCamera::new(2, 1, 1.0, 1.0, 1.0, 0.5).depth_z_to_render(&mut flat, 2, 1);
+        assert_eq!(flat, vec![0.0, 2.0]);
+    }
 
     #[test]
     fn project_center_ray() {

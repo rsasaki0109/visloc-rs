@@ -6,6 +6,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- `gsplat_train --depth-prior`, `gsplat_train_cuda --depth-prior` and
+  `gsplat_mesh_cuda --depth-maps` on a fisheye (`OPENCV_FISHEYE` and the
+  other equidistant models): the depth files hold camera z, but a fisheye
+  view's depth channel is the distance from the camera centre, so the prior
+  pulled the depth short by `cos θ` off the axis. A fisheye view's map is now
+  turned into distances when it is read
+  (`PinholeCamera::depth_z_to_render`); pinhole views are unchanged.
+
 - `visloc_map_localize_node` with `fusion:=true`: three faults that kept a
   runaway VIO in the map pose (RNE outdoors with people ahead, through the
   nodes: 1756 m to 2.2 cm after the start):
