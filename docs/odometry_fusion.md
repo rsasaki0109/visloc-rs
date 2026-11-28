@@ -480,6 +480,21 @@ pose. N = 3, as for the first offset (median of the local error in cm):
   image 32.3 → **20.0 cm**, every 10th 31.8 → 30.9 cm. The other 26 are
   identical. Without the travel condition it fired there on three weak
   fixes from a standstill (2 cm, 0.2°) and went to 58 cm.
+- **Through ROS 2** (DDS replay at 0.2x; `visloc_vio_node` with `mono`,
+  `map_prior`, `static_hold`, `map_recover`; `visloc_map_localize_node`
+  with `recover_after:=3`), median of the local error in cm:
+
+  | | all | 60–120 s | 160–180 s | 180–200 s | 200–240 s | 240–272 s |
+  |---|---:|---:|---:|---:|---:|---:|
+  | without `weak_reset_after` | 271 | 4.3 | 302 | 355 | 286 | 458 |
+  | `weak_reset_after:=3` | **11.6** | 4.8 | 391 | **79.2** | **22.9** | **10.0** |
+
+  It helps through ROS 2 too, but both replays are worse than offline
+  around 205–220 s: there the map node asks the VIO to reset 11–12 times
+  (offline: once, or not at all), each time three full fixes in a row are
+  rejected right after the correction is set again. This is not from the
+  weak reset (the replay without it does the same, 211–249 s) and is not
+  explained yet.
 
 ## What was adopted
 
@@ -561,8 +576,8 @@ target/release/examples/basalt_euroc_localize_demo --map runs/mo11_map \
   are short (6 m), and the map's own error is a large part of every number.
 - On the corridor the matches are too sparse for a monocular VIO without
   wheels: where not even weak fixes come it drifts metres (see the
-  corridor section). The weak reset was measured offline, not replayed
-  through ROS 2.
+  corridor section). Through ROS 2 the corridor replays ask the VIO to
+  reset 11–12 times around 205–220 s, which the offline runs do not.
 - The legged odometry is synthetic.
 - A's pose priors leave with their frame. They are not carried into the
   VIO's marginal prior.
