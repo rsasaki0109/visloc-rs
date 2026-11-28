@@ -49,6 +49,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `gsplat_render_server --camera "OPENCV_FISHEYE W H FX FY CX CY K1 K2 K3 K4"`:
+  a splat trained through a fisheye rendered through the same projection,
+  its `--depth` the distance from the camera centre (the trainer's depth
+  channel). A fisheye-trained splat rendered as a wide pinhole view gives a
+  much shorter depth near the image centre than through its own camera, so
+  its depth is measured through the fisheye.
+
 - docs: why the OpenLORIS market map keeps about a metre: market1-1's end does
   not see its start (no fix from its last 35 s on a map of its first 40 s), so
   no loop can close it; `--loop-closure-factors` gives 112 -> 108 cm.

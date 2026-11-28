@@ -8,15 +8,19 @@
 //! ```
 //!
 //! `--camera` is a COLMAP camera row without its id: `PINHOLE`, `OPENCV`
-//! (`k1 k2 p1 p2`) or `FULL_OPENCV` with its rational `k4..k6` at 0, so the
-//! image can carry a real lens's distortion.
+//! (`k1 k2 p1 p2`), `FULL_OPENCV` with its rational `k4..k6` at 0 or
+//! `OPENCV_FISHEYE` (`k1 k2 k3 k4`, equidistant), so the image can carry a
+//! real lens's distortion and a model trained through a fisheye can be
+//! rendered through the same projection.
 //!
 //! Each request is one line of 12 numbers, the world-to-camera rotation
 //! (row-major) and translation of the splat's frame, in COLMAP's convention
 //! (`x_cam = R x_world + t`, camera x right, y down, z forward). The reply is
 //! `width * height * 3` bytes of 8-bit RGB, row by row, with nothing else;
 //! with `--depth`, followed by `width * height` little-endian f32 median
-//! depths (camera z in the splat's units, 0 where nothing is hit).
+//! depths (camera z in the splat's units, 0 where nothing is hit; for
+//! `OPENCV_FISHEYE` the distance from the camera centre, as the trainer's
+//! depth channel).
 //! Diagnostics go to stderr. The process ends at the end of stdin.
 //!
 //! Moving objects (people, bicycles) can be splats too: `--dynamic N`
@@ -84,12 +88,14 @@ fn parse_camera(spec: &str) -> Result<PinholeCamera, String> {
         "PINHOLE" => 7,
         "OPENCV" => 11,
         "FULL_OPENCV" => 15,
+        "OPENCV_FISHEYE" => 11,
         _ => 0,
     };
     if want == 0 || parts.len() != want {
         return Err(format!(
-            "--camera wants \"PINHOLE W H FX FY CX CY\", \"OPENCV ... K1 K2 P1 P2\" or \
-             \"FULL_OPENCV ... K1 K2 P1 P2 K3 K4 K5 K6\", got {spec:?}"
+            "--camera wants \"PINHOLE W H FX FY CX CY\", \"OPENCV ... K1 K2 P1 P2\", \
+             \"FULL_OPENCV ... K1 K2 P1 P2 K3 K4 K5 K6\" or \
+             \"OPENCV_FISHEYE ... K1 K2 K3 K4\", got {spec:?}"
         ));
     }
     let n = |i: usize| -> Result<f32, String> {
@@ -100,6 +106,11 @@ fn parse_camera(spec: &str) -> Result<PinholeCamera, String> {
     let camera = PinholeCamera::new(n(1)? as u32, n(2)? as u32, n(3)?, n(4)?, n(5)?, n(6)?);
     if model == "PINHOLE" {
         return Ok(camera);
+    }
+    if model == "OPENCV_FISHEYE" {
+        // Kannala-Brandt k1..k4, as `colmap_scene::lens_of` reads them.
+        let coeffs = [n(7)?, n(8)?, n(9)?, n(10)?, 0.0, 0.0, 0.0, 0.0];
+        return Ok(camera.with_lens(Lens::new(Projection::Equidistant, coeffs)));
     }
     // COLMAP's order (k1 k2 p1 p2 [k3 k4 k5 k6]) into the lens's
     // [k1, k2, k3, k4, p1, p2, sx1, sy1]; the rational k4..k6 are not modelled.
@@ -141,10 +152,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let ply = ply.ok_or("--ply <path> is required")?;
-    let camera = parse_camera(
-        &camera
-            .ok_or("--camera \"PINHOLE W H FX FY CX CY\" (or OPENCV, FULL_OPENCV) is required")?,
-    )?;
+    let camera = parse_camera(&camera.ok_or(
+        "--camera \"PINHOLE W H FX FY CX CY\" (or OPENCV, FULL_OPENCV, OPENCV_FISHEYE) is required",
+    )?)?;
     let mut scene = load_ply(&ply)?;
     let first_dynamic = scene.len();
     let sh_degree_scene = scene.sh_degree;
