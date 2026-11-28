@@ -863,8 +863,45 @@ from office: `--imu-from-body
   Wheels alone reset 31 times and are the worst by far.
 - **Wheel fusion helps here, as on office1-7:** 311 to 244 cm. The
   recommended setting adds nothing to that (243).
-- What this needs is a map without the scale error, i.e. finding the
-  market VIO's scale bias first.
+
+### The market VIO's scale: the shipped calibration
+
+The scale error is the VIO's, and it comes from the stereo geometry:
+
+- **The ground truth is right.** Over 3 s windows, wheels / ground truth
+  is 0.995, 0.974 and 0.983 on office1-1, cafe1-1 and market1-1. The VIO /
+  ground truth is 1.021, 1.015 and **1.064**.
+- **The stereo geometry sets it.** On the first 2500 frames of market1-1,
+  the baseline × 0.94 takes the VIO from 1.067 to 1.003 of the ground
+  truth's scale. Its shape stays the same: Sim3 ATE 0.67 m either way. The
+  monocular VIO, which would take its scale from the IMU alone, diverges
+  here (2.0x).
+- **It is the session's calibration, not one error for the camera.**
+  Turning the right camera by -0.2 deg about its y axis fixes market as
+  well (0.994), but overshoots office (0.956) and cafe (0.939), which need
+  about -0.05 deg. The dataset ships a calibration per scene, and market's
+  differs slightly from office's.
+
+So market is corrected as office was ([OpenLORIS map
+localization](openloris_map_localization.md#correcting-the-scale)), from
+the wheels and without the ground truth. `scripts/calibrate_wheel_offset.py`
+gives a VIO scale of 1.0887 against the wheels for the market1-1 SLAM. The
+baseline × 0.9185 (`scripts/scale_stereo_baseline.py`) goes to both
+sessions, and the map is rebuilt:
+
+| Setting | Shipped calibration | Baseline × 0.9185 |
+| --- | --- | --- |
+| map: SLAM ATE (its VIO) | 222 (164) cm | 112 (114) cm |
+| VIO + map | 311 | 174 |
+| wheels + map | 276 | 247 |
+| VIO + wheels + source check | 244 | **152** |
+| recommended | 243 | **153** |
+
+The map's error halves, and every setting with it. 1.1 m is left over
+153 m (0.7 %). The 8 loop merges no longer improve on the VIO, so the
+map's error still decides the localization, about a metre at every
+setting. Showing what the parts for people do in this crowd needs a
+better map, which is a mapping problem, not a localization one.
 
 ## A map built with people walking about (F3)
 
@@ -968,8 +1005,8 @@ after 27.5 s, when every setting has joined the path:
 Replayed over DDS in real time (`euroc_dds_replay` at 1.0x, the nodes on
 three cores), with `profile:=dynamic_indoor`, `fusion:=true` and the VIO's
 `map_prior:=true`. The people run then showed three faults the offline runs
-had hidden (the offline demo's fusion only takes the fixes its correction
-used). Map pose RMSE (max), split at 35 s:
+had hidden (the offline demo's fusion then only took the fixes its correction
+used; it now works as the node, below). Map pose RMSE (max), split at 35 s:
 
 | Run | Before 35 s | From 35 s on |
 | --- | --- | --- |
@@ -1001,6 +1038,35 @@ used). Map pose RMSE (max), split at 35 s:
 - The early start without people (from 19.7 s, up to 81 cm off) is the
   warm-up's weak start described above. A run of the unfixed nodes that
   happened to start at 27.4 s gave 2.5 (10.2) cm before 35 s.
+
+### The offline demo's fusion now works as the node's
+
+`basalt_euroc_localize_demo --fusion` used to feed its fusion only the fixes
+its correction accepted. A VIO that the correction rejects every fix
+against therefore kept the fusion from ever taking one: the outdoor people
+run gave 15.5 m (fusion + source check) and 13.8 m (recommended), where the
+node gave 2.2 cm. It now does what `visloc_map_localize_node` does:
+
+- the fusion starts (and restarts) with the correction;
+- once running, it gates full fixes on its own prediction (15 cm, 3 deg);
+- rejected fixes that move as one odometry did restart it, also when the
+  correction started from weak fixes and the fusion has not;
+- weak fixes stay out of it;
+- until it has a pose, the correction's is the map pose.
+
+The check for the restart, `fixes_move_as_one_source`, is now shared by
+both. Offline, map pose RMSE (max), split at 35 s:
+
+| Run | Setting | Before 35 s | From 35 s on |
+| --- | --- | --- | --- |
+| people | fusion + source check | 15.8 m (39 m) | **2.2 (4.3) cm** |
+| people | recommended | 12.8 m (31 m) | **2.2 (4.3) cm** |
+| no people | fusion + source check | 4.9 (26) cm | 1.8 (3.3) |
+| no people | recommended | 32.0 (82) cm | 1.8 (3.6) |
+
+OpenLORIS office1-7 is unchanged: 1.77 cm recommended, 1.83 cm with fusion
+and the source check (1.84 before). The start without wheel velocity
+remains, as through the nodes.
 
 ## Compute budget (towards a Jetson)
 

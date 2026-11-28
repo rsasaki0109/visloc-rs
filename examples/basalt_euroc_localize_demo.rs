@@ -175,10 +175,10 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    apply_inlier_spread_gate, fixes_agree_under_a_source, view_diagnostics, BinaryLandmarkIndex,
-    BinaryMatchGates, ExpectedVisibility, FixOutcome, ImageGrid, KeyframeRetrieval, MapFusion,
-    MapFusionConfig, OdomCorrection, OdomCorrectionConfig, OdometryNoise, ViewDiagnostics,
-    VisibilityGates, VIEW_GRID_MAX,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, fixes_move_as_one_source,
+    view_diagnostics, BinaryLandmarkIndex, BinaryMatchGates, ExpectedVisibility, FixOutcome,
+    ImageGrid, KeyframeRetrieval, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
+    OdometryNoise, ViewDiagnostics, VisibilityGates, VIEW_GRID_MAX,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -1343,14 +1343,25 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 const SEED_AGREEMENT_M: f64 = 0.10;
 const SEED_AGREEMENT_PER_M: f64 = 0.10;
 const SEED_AGREEMENT_DEG: f64 = 3.0;
+/// With `--fusion`: a full fix is used if it lies within this of the
+/// fusion's prediction (as `visloc_map_localize_node`).
+const FUSION_GATE_M: f64 = 0.15;
+const FUSION_GATE_DEG: f64 = 3.0;
 
 /// Odometry corrected into the map frame, frame by frame: the fixes, the
 /// correction and every output file of `--vio` / `--odometry`.
 struct CorrectedRun {
     correction: OdomCorrection,
-    /// With `--fusion`: the fused map pose, fed the fixes the correction
-    /// accepts.
+    /// With `--fusion`: the fused map pose. It starts (and restarts) with
+    /// the correction, then gates full fixes on its own prediction, as
+    /// `visloc_map_localize_node` does.
     fusion: Option<MapFusion>,
+    /// Full fixes the fusion rejected in a row (stamp, map pose, odometry
+    /// poses); `fusion_restart_after` of them that move as one odometry did
+    /// restart it. Fixes agree within `fusion_agreement_m`.
+    fusion_rejected: Vec<(i64, SE3, Vec<Option<SE3>>)>,
+    fusion_restart_after: usize,
+    fusion_agreement_m: f64,
     /// With `--fusion-seed-s`: that span, and the full fixes within it of the
     /// newest (stamp, map pose, odometry poses).
     fusion_seed_ns: i64,
@@ -1414,6 +1425,12 @@ impl CorrectedRun {
             }),
             fixes_used: 0,
             last_used_fix: None,
+            fusion_rejected: Vec::new(),
+            fusion_restart_after: args
+                .reset_after
+                .unwrap_or(OdomCorrectionConfig::default().reset_after)
+                .max(2),
+            fusion_agreement_m: OdomCorrectionConfig::default().agreement_m,
             fusion_seed_ns: (args.fusion_seed_s * 1e9) as i64,
             recent_fixes: VecDeque::new(),
             fusion: args.fusion.then(|| {
@@ -1482,13 +1499,15 @@ impl CorrectedRun {
 
     /// One frame: the odometry's IMU pose and, on a frame to localize, its
     /// image.
-    /// The map pose of the IMU now: the fusion's with `--fusion`, else the
-    /// correction's.
+    /// The map pose of the IMU now: the fusion's with `--fusion` once it has
+    /// one, else the correction's.
     fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
-        match &self.fusion {
-            Some(fusion) => fusion.map_from_body(sources),
-            None => self.correction.map_from_body(odom_from_imu?),
-        }
+        // The fusion's pose once it has one; until then (it starts on a full
+        // fix) the correction's, as `visloc_map_localize_node` publishes.
+        self.fusion
+            .as_ref()
+            .and_then(|fusion| fusion.map_from_body(sources))
+            .or_else(|| self.correction.map_from_body(odom_from_imu?))
     }
 
     /// One frame: each odometry source's IMU pose (`sources`; the first,
@@ -1616,8 +1635,14 @@ impl CorrectedRun {
         Ok(())
     }
 
-    /// Passes a fix the correction used on to the fusion: a reset restarts
-    /// the fusion from it.
+    /// Passes a full fix on to the fusion, as `visloc_map_localize_node`
+    /// does. The fusion starts (and restarts) when the correction does, from
+    /// this fix and, with `--fusion-seed-s`, the earlier ones that agree with
+    /// it under some odometry. Once running, it takes a fix within 15 cm and
+    /// 3 deg of its own prediction, not the correction's verdict, which a
+    /// runaway first odometry turns against good fixes. Rejected fixes that
+    /// move as one odometry did restart it (also when it has not started
+    /// although the correction has, from weak fixes). Weak fixes stay out.
     fn fuse(
         &mut self,
         timestamp_ns: i64,
@@ -1633,41 +1658,70 @@ impl CorrectedRun {
             self.fixes_used += 1;
             self.last_used_fix = Some((timestamp_ns, map_from_imu.clone()));
         }
+        if weak {
+            return;
+        }
         let Some(fusion) = &mut self.fusion else {
             return;
         };
-        if self.fusion_seed_ns > 0 && !weak {
+        if self.fusion_seed_ns > 0 {
             self.recent_fixes
                 .retain(|(stamp, _, _)| timestamp_ns - stamp <= self.fusion_seed_ns);
             self.recent_fixes
                 .push_back((timestamp_ns, map_from_imu.clone(), sources.to_vec()));
         }
-        match outcome {
-            FixOutcome::Initialized | FixOutcome::Reset => {
-                fusion.reset();
-                if self.fusion_seed_ns > 0 {
-                    // The earlier fixes that agree with this one under some
-                    // odometry, oldest first, then this one.
-                    for (stamp, fix, fix_sources) in &self.recent_fixes {
-                        if *stamp < timestamp_ns
-                            && fixes_agree_under_a_source(
-                                fix,
-                                fix_sources,
-                                map_from_imu,
-                                sources,
-                                SEED_AGREEMENT_M,
-                                SEED_AGREEMENT_PER_M,
-                                SEED_AGREEMENT_DEG,
-                            )
-                        {
-                            fusion.add_fix(*stamp, fix, fix_sources);
-                        }
+        if matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset)
+            || (!fusion.is_set() && outcome == FixOutcome::Accepted)
+        {
+            fusion.reset();
+            // The earlier fixes that agree with this one under some odometry,
+            // oldest first, then this one.
+            for (stamp, fix, fix_sources) in &self.recent_fixes {
+                if *stamp < timestamp_ns
+                    && fixes_agree_under_a_source(
+                        fix,
+                        fix_sources,
+                        map_from_imu,
+                        sources,
+                        SEED_AGREEMENT_M,
+                        SEED_AGREEMENT_PER_M,
+                        SEED_AGREEMENT_DEG,
+                    )
+                {
+                    fusion.add_fix(*stamp, fix, fix_sources);
+                }
+            }
+            fusion.add_fix(timestamp_ns, map_from_imu, sources);
+            self.fusion_rejected.clear();
+        } else if fusion.is_set() || self.correction.map_from_odom().is_some() {
+            let close = fusion.map_from_body(sources).is_some_and(|p| {
+                (p.translation - map_from_imu.translation).norm() <= FUSION_GATE_M
+                    && p.rotation.angle_to(&map_from_imu.rotation) <= FUSION_GATE_DEG.to_radians()
+            });
+            if close {
+                fusion.add_fix(timestamp_ns, map_from_imu, sources);
+                self.fusion_rejected.clear();
+            } else {
+                let needed = self.fusion_restart_after;
+                self.fusion_rejected
+                    .push((timestamp_ns, map_from_imu.clone(), sources.to_vec()));
+                if self.fusion_rejected.len() > needed {
+                    self.fusion_rejected
+                        .drain(..self.fusion_rejected.len() - needed);
+                }
+                if self.fusion_rejected.len() == needed
+                    && fixes_move_as_one_source(
+                        &self.fusion_rejected,
+                        self.fusion_agreement_m,
+                        FUSION_GATE_DEG,
+                    )
+                {
+                    fusion.reset();
+                    for (stamp, fix, fix_sources) in self.fusion_rejected.drain(..) {
+                        fusion.add_fix(stamp, &fix, &fix_sources);
                     }
                 }
-                fusion.add_fix(timestamp_ns, map_from_imu, sources);
             }
-            FixOutcome::Accepted => fusion.add_fix(timestamp_ns, map_from_imu, sources),
-            _ => {}
         }
     }
 
