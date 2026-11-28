@@ -6,6 +6,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- The mapper drops detector corners that the Double Sphere model cannot
+  unproject instead of failing the map (OpenLORIS market's right fisheye).
+- `scripts/openloris_to_euroc.py`: the Double Sphere fit keeps only the
+  Kannala-Brandt rays that invert cleanly and holds alpha below 1 (market's
+  right lens: 159 px to 0.149 px RMS).
 - `visloc_map_localize_node` with `fusion:=true`: a fusion carried more
   than 15 cm off (fixes missing while the VIO ran off) never took a fix
   again. It now restarts from three consecutive rejected fixes that move as

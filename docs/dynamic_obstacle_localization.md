@@ -824,8 +824,47 @@ pose RMSE (max), fixed alignment:
   better than these.
 - With people about (cafe, above) all settings stay within 17.6–21 cm, the
   map's own error. So the gains measured in RNE (people right in front of
-  the robot) are not yet shown on real data. That needs a real crowded run
-  with a better map (OpenLORIS market, 41.5 GB, did not fit here).
+  the robot) are not yet shown on real data. The crowded market (below)
+  does not show them either, for want of a good map.
+
+## OpenLORIS market: a crowded supermarket (map-limited)
+
+market1-1 and market1-2 were fetched alone out of the 41.5 GB archive (HTTP
+ranges) and converted with `scripts/openloris_to_euroc.py`. Its Double
+Sphere fit now keeps only the Kannala-Brandt rays that invert cleanly and
+holds alpha below 1: market's right lens had fitted to alpha 2.0 at 159 px
+RMS, and now fits at 0.149 px. The mapper drops a corner that the fitted
+model cannot unproject (one at the edge of market's right image failed the
+whole map before).
+
+The map is market1-1 (153 m around the aisles, same mapping flags as
+office): SLAM ATE 222 cm, worse than its own VIO (164 cm). Both overestimate
+the scale by 5–8 % (Sim3 scale 0.92–0.95; office and cafe: 0.98). That error
+is not the ground truth's: the wheels measure a shorter path than it, the
+VIO a longer one. The cause is not found yet. market1-2 (218 m, crowded) was
+localized against it with fixes every 5th frame. The camera mount differs
+from office: `--imu-from-body
+-0.061520,-0.326334,-1.055358,-0.410897,-0.391417,-0.563650,0.600212`.
+
+| Setting | Map pose RMSE, fixed alignment | Sim3-aligned alone | Fixes used / attempts |
+| --- | --- | --- | --- |
+| VIO + map (`--vio`) | 311 cm | 88 cm | 386 / 2255 |
+| wheels + map (`--odometry`) | 276 | 240 | 272 / 2254 (31 resets) |
+| VIO + wheels + source check | 244 | 93 | 386 / 2255 |
+| recommended (+ map prior, warm-up, seed 3) | **243** | **86** | 375 / 2325 |
+| (VIO alone, no map) | — | 72 | — |
+
+- **The map's error decides the result.** Every setting is metres off,
+  about the map's own 2.2 m and its scale error. Aligned with a Sim3 on
+  its own, the localized path is no better than the VIO alone (86–93 cm
+  against 72). This run cannot show what the parts for people do.
+- **Nothing broke among the crowd.** With the VIO, 7–8 of about 400 fixes
+  were rejected and the correction reset 3 times (recommended: 2 and 1).
+  Wheels alone reset 31 times and are the worst by far.
+- **Wheel fusion helps here, as on office1-7:** 311 to 244 cm. The
+  recommended setting adds nothing to that (243).
+- What this needs is a map without the scale error, i.e. finding the
+  market VIO's scale bias first.
 
 ## A map built with people walking about (F3)
 
