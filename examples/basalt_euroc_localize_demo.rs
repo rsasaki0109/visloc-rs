@@ -336,6 +336,9 @@ struct Args {
     /// With `--fusion`: `MapFusionConfig::source_check_window_s` (0: off), so
     /// an odometry that disagrees with the fixes is left out while it does.
     fusion_source_check_s: f64,
+    /// With `--fusion`: `MapFusionConfig::max_speed_m_s` (0: off), so an
+    /// odometry moving faster than a robot can is left out at once.
+    fusion_max_speed: f64,
     /// With `--fusion`: when the correction initializes or resets, start the
     /// fusion from the full fixes of the last this many seconds that agree
     /// with that fix under one odometry's motion, not that fix alone, so the
@@ -361,7 +364,7 @@ impl Args {
          [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] [--weak-reset-after N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
-         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S]"
+         [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S] [--fusion-max-speed M_S]"
             .into()
     }
 
@@ -440,6 +443,7 @@ impl Args {
             init_warmup_s: 0.0,
             object_boxes: None,
             fusion_source_check_s: 0.0,
+            fusion_max_speed: 0.0,
             fusion_seed_s: 0.0,
         };
         let mut arguments = arguments.into_iter();
@@ -591,6 +595,7 @@ impl Args {
                     args.fusion_source_check_s = number(&option, value()?)?;
                 }
                 "--fusion-seed-s" => args.fusion_seed_s = number(&option, value()?)?,
+                "--fusion-max-speed" => args.fusion_max_speed = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -650,6 +655,12 @@ impl Args {
         }
         if args.fusion_seed_s != 0.0 && !args.fusion {
             return Err("--fusion-seed-s needs --fusion".into());
+        }
+        if args.fusion_max_speed != 0.0 && !args.fusion {
+            return Err("--fusion-max-speed needs --fusion".into());
+        }
+        if !(args.fusion_max_speed >= 0.0 && args.fusion_max_speed.is_finite()) {
+            return Err("--fusion-max-speed must be a non-negative number".into());
         }
         if !(args.fusion_seed_s >= 0.0 && args.fusion_seed_s.is_finite()) {
             return Err("--fusion-seed-s must be a non-negative number".into());
@@ -1459,6 +1470,7 @@ impl CorrectedRun {
                 MapFusion::new(MapFusionConfig {
                     sources,
                     source_check_window_s: args.fusion_source_check_s,
+                    max_speed_m_s: args.fusion_max_speed,
                     ..MapFusionConfig::default()
                 })
             }),
@@ -1519,10 +1531,10 @@ impl CorrectedRun {
     fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
         // The fusion's pose once it has one; until then (it starts on a full
         // fix) the correction's, as `visloc_map_localize_node` publishes.
-        self.fusion
-            .as_ref()
-            .and_then(|fusion| fusion.map_from_body(sources))
-            .or_else(|| self.correction.map_from_body(odom_from_imu?))
+        match &self.fusion {
+            Some(fusion) if fusion.is_set() => fusion.map_from_body(sources),
+            _ => self.correction.map_from_body(odom_from_imu?),
+        }
     }
 
     /// One frame: each odometry source's IMU pose (`sources`; the first,
@@ -1657,8 +1669,8 @@ impl CorrectedRun {
     /// it under some odometry. Once running, it takes a fix within 15 cm and
     /// 3 deg of its own prediction, not the correction's verdict, which a
     /// runaway first odometry turns against good fixes. Rejected fixes that
-    /// move as one odometry did restart it (also when it has not started
-    /// although the correction has, from weak fixes). Weak fixes stay out.
+    /// move as one odometry did restart it. Weak fixes stay out, but for one
+    /// that starts or restarts the correction.
     fn fuse(
         &mut self,
         timestamp_ns: i64,
@@ -1674,13 +1686,16 @@ impl CorrectedRun {
             self.fixes_used += 1;
             self.last_used_fix = Some((timestamp_ns, map_from_imu.clone()));
         }
-        if weak {
+        // A weak fix that starts (or restarts) the correction starts the
+        // fusion too, so that a runaway odometry can be left out from the
+        // first map pose on; other weak fixes stay out of it.
+        if weak && !matches!(outcome, FixOutcome::Initialized | FixOutcome::Reset) {
             return;
         }
         let Some(fusion) = &mut self.fusion else {
             return;
         };
-        if self.fusion_seed_ns > 0 {
+        if self.fusion_seed_ns > 0 && !weak {
             self.recent_fixes
                 .retain(|(stamp, _, _)| timestamp_ns - stamp <= self.fusion_seed_ns);
             self.recent_fixes

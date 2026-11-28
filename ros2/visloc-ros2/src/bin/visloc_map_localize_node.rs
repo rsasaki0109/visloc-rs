@@ -45,7 +45,8 @@ USAGE:
 PARAMETERS (--name value  or  -p name:=value):
   profile                default, or dynamic_indoor: the defaults measured with people
                          about (docs/dynamic_obstacle_localization.md): init_warmup_s 3
-                         and, with fusion, fusion_source_check_s 1 and fusion_seed_s 3;
+                         and, with fusion, fusion_source_check_s 1, fusion_seed_s 3 and
+                         fusion_max_speed_m_s 2;
                          parameters given explicitly still win                [default]
   map                    saved map directory (map.json, sparse/, landmark_descriptors.txt) [required]
   camera                 Basalt camera index of the image topic                       [0]
@@ -93,6 +94,9 @@ PARAMETERS (--name value  or  -p name:=value):
                          the fixes of the last this many seconds that agree with that
                          fix under one odometry, so the source check judges the VIO
                          from the start; 3 (with init_warmup_s 3) measured in RNE [0: off]
+  fusion_max_speed_m_s   leave out an odometry moving faster than this (m/s) while
+                         the other moves slower: a runaway VIO before a second fix
+                         can show it                                             [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -226,6 +230,7 @@ fn run() -> Result<(), String> {
         if dynamic_indoor {
             fusion.source_check_window_s = 1.0;
             fusion.seed_s = 3.0;
+            fusion.max_speed_m_s = 2.0;
         }
         if let Some(name) = args.string("odom_noise") {
             fusion.noise = odometry_noise_by_name(&name).map_err(|e| format!("odom_noise: {e}"))?;
@@ -247,6 +252,10 @@ fn run() -> Result<(), String> {
         if !(fusion.seed_s >= 0.0 && fusion.seed_s.is_finite()) {
             return Err("fusion_seed_s must be a non-negative number".into());
         }
+        fusion.max_speed_m_s = args.parsed_or("fusion_max_speed_m_s", fusion.max_speed_m_s)?;
+        if !(fusion.max_speed_m_s >= 0.0 && fusion.max_speed_m_s.is_finite()) {
+            return Err("fusion_max_speed_m_s must be a non-negative number".into());
+        }
         options.fusion = Some(fusion);
     } else {
         for key in [
@@ -255,6 +264,7 @@ fn run() -> Result<(), String> {
             "odom2_body_offset",
             "fusion_source_check_s",
             "fusion_seed_s",
+            "fusion_max_speed_m_s",
         ] {
             if args.string(key).is_some() {
                 return Err(format!("{key} needs fusion:=true"));
@@ -268,8 +278,8 @@ fn run() -> Result<(), String> {
             options.fusion.as_ref().map_or_else(
                 || ", no fusion (set fusion:=true with a wheel odometry on odom2)".to_owned(),
                 |f| format!(
-                    ", fusion_source_check_s {}, fusion_seed_s {}",
-                    f.source_check_window_s, f.seed_s
+                    ", fusion_source_check_s {}, fusion_seed_s {}, fusion_max_speed_m_s {}",
+                    f.source_check_window_s, f.seed_s, f.max_speed_m_s
                 ),
             ),
         );
