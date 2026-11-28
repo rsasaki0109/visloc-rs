@@ -533,3 +533,25 @@ time. Not kept. **The online windows starting with 480 keyframes at once** (run 
 the online first eighth of sequence_1_20 comes to 1.0090 instead of 1.0153, but R_11 −0.71, R_12 −10.42,
 sequence_1_19 −12.94, 1_20 −23.06: from the VIO with zero biases a four-minute window does not settle. Next: the
 two small gains together, the paper's SIFT thresholds and the 8 px stereo pairs (run 46094318543).
+
+**The paper's SIFT thresholds and the 8 px stereo pairs together** (run 46094318543):
+
+| Recording | Default CP | Both | Change | Recall at 1 m, default → both (%) |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 87.75 | 84.95 | −2.79 | 100.0 → 100.0 |
+| R_12_10cp | 75.64 | 76.34 | +0.70 | 90.0 → 90.0 |
+| R_13_15cp | 76.18 | 76.66 | +0.48 | 100.0 → 100.0 |
+| sequence_1_19 | 87.28 | 92.58 | +5.30 | 100.0 → 100.0 |
+| sequence_1_20 | 87.38 | 83.54 | −3.84 | 100.0 → 100.0 |
+| sequence_2_11 | 85.29 | 85.79 | +0.50 | 100.0 → 100.0 |
+| sequence_2_12 | 45.49 | 54.39 | +8.91 | 20.0 → 40.0 |
+| sequence_3_17 | 82.36 | 83.53 | +1.18 | 96.3 → 96.3 |
+| sequence_3_18 | 64.57 | 62.61 | −1.96 | 50.0 → 45.8 |
+| sequence_4_10, 4_11 | low light: the default chain | | 0 | |
+| sequence_5_11 | 64.72 | 67.34 | +2.62 | 85.7 → 85.7 |
+| sequence_5_12 | 6.98 | 7.13 | +0.15 | 0.0 → 0.0 |
+
+Mean 69.84 → 70.70 (**+0.86**), 8 of 13 gain: kept, the driver's default since (`--ba-pass-keypoint-args`,
+`--ba-pass-keypoint-match-args`). The two single changes gained +0.27 and +0.37; sequence_2_12 carries much of
+the sum (without it, +0.19 over the other twelve), and sequence_1_20 and R_11_5cp lose. Track 2, the one track the
+RootSIFT pass lost, gains 4.7.

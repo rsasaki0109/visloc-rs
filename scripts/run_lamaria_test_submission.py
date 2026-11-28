@@ -133,6 +133,8 @@ R sequences then reach 97.02 and 79.31 instead of 92.20 and 73.96 (submission 6)
 By day, without learned keypoints, the pass reads 1,500 RootSIFT keypoints of its own matched with the ratio
 test at 0.78 (`--ba-pass-keypoints rootsift`, the default; `sift` keeps the online windows' SIFT): +1.29 over
 the thirteen training recordings, 7 gain (docs/lamaria_slam_dunk_comparison.md).
+They are detected at SIFT contrast threshold 0.006 and edge threshold 12, and the two cameras of each keyframe
+are matched within an 8 px band (SLAM Dunk's settings): +0.86 more, 8 gain.
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
@@ -626,11 +628,13 @@ def main() -> int:
                         help="--ba-chain: by day, the pass on RootSIFT keypoints of its own (default; with "
                              "--ba-pass-keypoint-args and --ba-pass-keypoint-match-args), or on the online windows' "
                              "SIFT ('sift'); learned --ba-pass-features take precedence")
-    parser.add_argument("--ba-pass-keypoint-args", default="",
-                        help="--ba-pass-keypoints rootsift: options of their features step (default: 1,500 keypoints)")
-    parser.add_argument("--ba-pass-keypoint-match-args", default="--ratio,0.78",
+    parser.add_argument("--ba-pass-keypoint-args", default="--contrast-threshold,0.006,--edge-threshold,12",
+                        help="--ba-pass-keypoints rootsift: options of their features step (default: 1,500 keypoints "
+                             "at the paper's SIFT contrast threshold 0.006 and edge threshold 12)")
+    parser.add_argument("--ba-pass-keypoint-match-args", default="--ratio,0.78,--stereo,--stereo-tau,8",
                         help="--ba-pass-keypoints rootsift: options of their match steps (default the ratio test at "
-                             "0.78; commas may stand for the spaces)")
+                             "0.78 and the two cameras of each keyframe within an 8 px band; commas may stand for "
+                             "the spaces)")
     parser.add_argument("--ba-experiment-pass-features", choices=("sift", "rootsift"), default=None,
                         help="--ba-chain: SIFT or RootSIFT keypoints of their own for the pass by day, in the "
                              "submitted chain only (with --ba-compare: the experiment, not the default chain)")
