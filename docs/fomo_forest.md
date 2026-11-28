@@ -202,30 +202,39 @@ baseline. It is never worse by more than 0.22 m, and its worst run is 2.23 m
 against 4.76 m. This makes it the recommended default for FoMo-like
 forest driving, not only for snow.
 
-Online SLAM on these routes:
+Online SLAM on these routes (forest config throughout; loops accepted in
+brackets):
 
-| Route | VIO in the SLAM run | Forest, default loop thresholds | Forest + loose loops |
-|---|---:|---:|---:|
-| green January | 1.58 m | - | 1.58 m (7 loops) |
-| green August | 1.64 m | - | 1.65 m (0 loops) |
-| magenta January | 2.22 m | 2.24 m (99 loops) | 2.89 m |
-| magenta August | 1.83 m | 1.84 m (0 loops) | 2.58 m |
+| Route | VIO in the SLAM run | Default loop thresholds | Loose loops | Loose + `--loop-min-travelled-m 100` |
+|---|---:|---:|---:|---:|
+| green January | 1.58 m | - | 1.58 m (7) | 1.56 m (0) |
+| green August | 1.64 m | - | 1.65 m (0) | - |
+| magenta January | 2.22 m | 2.24 m (99) | 2.31 m (563) | 2.37 m (7) |
+| magenta August | 1.83 m | 1.84 m (0) | 1.93 m (7) | 1.91 m (0) |
+| blue January | 1.32 m | 0.99 m (33) | 0.95 m (98) | 0.95 m (93) |
+| blue August | 1.56 m | 1.49 m (0) | 1.38 m (7) | 1.60 m (5) |
 
 (The VIO inside the SLAM demo is not bit-identical to `basalt_euroc_vio_demo`,
 so compare each row with its own VIO column.)
 
-- **The mapper does not help on these routes,** and **the loose thresholds
-  hurt magenta.** Most "loops" it accepts there are pairs only 26 m of
-  driving apart (the median), just over the 30-keyframe loop gap, along
-  straight trail. They are geometrically valid but add no global
-  information. They pull in VIO drift and slow the global optimisation
-  down (January magenta: 757 accepted, 1271 s of optimisation in total).
-- So the loose thresholds are **not a general default**. Use them when the
-  route revisits a place only briefly, like blue's return to its start. On
-  long trails without revisits, run the default thresholds or plain VIO.
-  A gate on driven distance (e.g. ignore "loops" with < 100 m travelled)
-  is the obvious mapper fix, but it is not implemented yet.
+- **On green and magenta the mapper does not help:** with default
+  thresholds the online trajectory equals the VIO, and the loose
+  thresholds cost 0.07-0.10 m on magenta. The trade is still worth it:
+  loose thresholds gain 0.11 m on blue August and 0.22 m on blue October.
+- **Most loose "loops" on magenta are near-sequential:** pairs a median 26 m
+  of driving apart, just past the 30-keyframe loop gap, along straight
+  trail (January: 563 accepted).
+- **The distance gate is implemented but not recommended:**
+  `--loop-min-travelled-m`, default off, rejects such pairs as
+  `[loop] reject-short`. It removes them (January magenta: 563 -> 7 loops),
+  but the error does not drop, and on blue August it rejects 2 pairs that
+  were helping (1.38 -> 1.60 m). So the short pairs were not what cost
+  accuracy. Leave the gate off.
+- **Correction:** an earlier version of this page put the magenta loss at
+  2.89 / 2.58 m and blamed the short loops. Those runs used the *baseline*
+  config with loose loops, so they are not comparable with this table.
 
+## Open
 ## Open
 
 - **Startup run-away:** on a 10 s slice from rest, the VIO's speed overshoots
@@ -234,8 +243,6 @@ so compare each row with its own VIO column.)
   `basalt_euroc_localize_demo`) is the candidate fix.
 - **Other routes:** orange and yellow (2-2.7 km). The 2025-11-03 night
   deployment has all six routes.
-- **Loop gate by distance driven:** stop the mapper from counting
-  near-sequential matches on straight trails as loops.
 - **Night loop closure:** the BoW place recognition does not survive
   headlights + rain. That needs a different descriptor, not looser
   thresholds.
