@@ -35,6 +35,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- docs: the OpenLORIS market VIO's 6 % scale error comes from that session's
+  shipped stereo calibration (the ground truth and wheels agree). Corrected from
+  the wheels (baseline x 0.9185), the market map's ATE halves (222 to 112 cm),
+  and localization with the wheels fused goes from 244 to 152 cm.
 - docs: an outdoor run in RNE (Tanks and Temples truck street, people
   walking just ahead). The walkers make the VIO run off (all fixes then
   rejected); with `--vio-wheel-velocity` the recommended setting holds at

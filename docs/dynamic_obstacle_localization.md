@@ -863,8 +863,45 @@ from office: `--imu-from-body
   Wheels alone reset 31 times and are the worst by far.
 - **Wheel fusion helps here, as on office1-7:** 311 to 244 cm. The
   recommended setting adds nothing to that (243).
-- What this needs is a map without the scale error, i.e. finding the
-  market VIO's scale bias first.
+
+### The market VIO's scale: the shipped calibration
+
+The scale error is the VIO's, and it comes from the stereo geometry:
+
+- **The ground truth is right.** Over 3 s windows, wheels / ground truth
+  is 0.995, 0.974 and 0.983 on office1-1, cafe1-1 and market1-1. The VIO /
+  ground truth is 1.021, 1.015 and **1.064**.
+- **The stereo geometry sets it.** On the first 2500 frames of market1-1,
+  the baseline × 0.94 takes the VIO from 1.067 to 1.003 of the ground
+  truth's scale. Its shape stays the same: Sim3 ATE 0.67 m either way. The
+  monocular VIO, which would take its scale from the IMU alone, diverges
+  here (2.0x).
+- **It is the session's calibration, not one error for the camera.**
+  Turning the right camera by -0.2 deg about its y axis fixes market as
+  well (0.994), but overshoots office (0.956) and cafe (0.939), which need
+  about -0.05 deg. The dataset ships a calibration per scene, and market's
+  differs slightly from office's.
+
+So market is corrected as office was ([OpenLORIS map
+localization](openloris_map_localization.md#correcting-the-scale)), from
+the wheels and without the ground truth. `scripts/calibrate_wheel_offset.py`
+gives a VIO scale of 1.0887 against the wheels for the market1-1 SLAM. The
+baseline × 0.9185 (`scripts/scale_stereo_baseline.py`) goes to both
+sessions, and the map is rebuilt:
+
+| Setting | Shipped calibration | Baseline × 0.9185 |
+| --- | --- | --- |
+| map: SLAM ATE (its VIO) | 222 (164) cm | 112 (114) cm |
+| VIO + map | 311 | 174 |
+| wheels + map | 276 | 247 |
+| VIO + wheels + source check | 244 | **152** |
+| recommended | 243 | **153** |
+
+The map's error halves, and every setting with it. 1.1 m is left over
+153 m (0.7 %). The 8 loop merges no longer improve on the VIO, so the
+map's error still decides the localization, about a metre at every
+setting. Showing what the parts for people do in this crowd needs a
+better map, which is a mapping problem, not a localization one.
 
 ## A map built with people walking about (F3)
 
