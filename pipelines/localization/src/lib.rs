@@ -41,7 +41,9 @@ pub use correspondence::{
     CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
-pub use fusion::{fixes_agree_under_a_source, MapFusion, MapFusionConfig, OdometryNoise};
+pub use fusion::{
+    fixes_agree_under_a_source, fixes_move_as_one_source, MapFusion, MapFusionConfig, OdometryNoise,
+};
 pub use keyframe_retrieval::KeyframeRetrieval;
 pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,

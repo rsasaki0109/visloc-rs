@@ -315,7 +315,10 @@ impl MapFusion {
         let window_ns = (self.config.source_check_window_s * 1e9) as i64;
         let start_ns = self.nodes[newest].timestamp_ns - window_ns;
         let sources = self.config.sources.len();
-        let mut disagree = vec![None::<usize>; sources];
+        // Per source: None when it cannot be checked (no pose, or no earlier
+        // fix in the window), Some(None) when it agrees, Some(Some(a)) when
+        // it disagrees since node a.
+        let mut disagree = vec![None::<Option<usize>>; sources];
         for (source, verdict) in disagree.iter_mut().enumerate() {
             let Some(pose_b) = self.nodes[newest].odometry[source].clone() else {
                 continue;
@@ -340,18 +343,30 @@ impl MapFusion {
             let off = (source_delta - fix_delta).norm() > tolerance
                 || wrap_angle(source_turn - fix_turn).abs().to_degrees()
                     > self.config.source_check_tolerance_yaw_deg;
-            if off {
-                *verdict = Some(a);
-            }
+            *verdict = Some(off.then_some(a));
         }
         // Every source disagreeing says more about the fixes than about the
         // sources: leave them all in.
-        let checked = (0..sources)
-            .filter(|&s| self.nodes[newest].odometry[s].is_some())
+        let checked = disagree.iter().filter(|d| d.is_some()).count();
+        let disagreeing = disagree
+            .iter()
+            .filter(|d| matches!(d, Some(Some(_))))
             .count();
-        let disagreeing = disagree.iter().filter(|d| d.is_some()).count();
         let drop = disagreeing > 0 && disagreeing < checked;
-        for (source, from) in disagree.iter().enumerate() {
+        if disagreeing > 0 && !drop {
+            // All disagree: the fix is the odd one out, which says nothing
+            // new about the sources; keep their verdicts (a runaway source
+            // cleared here would get the prediction until the next check).
+            return;
+        }
+        for (source, verdict) in disagree.iter().enumerate() {
+            // A source that could not be checked (the first fix after a gap
+            // longer than the window) keeps its verdict: clearing it would
+            // hand the prediction back to a runaway source until the next
+            // check.
+            let Some(from) = verdict else {
+                continue;
+            };
             self.suspect[source] = drop && from.is_some();
             if !drop {
                 continue;
@@ -676,6 +691,39 @@ pub fn fixes_agree_under_a_source(
     })
 }
 
+/// Whether consecutive `fixes` (stamp, map pose, the odometries' poses)
+/// all moved as one and the same odometry did between them: within
+/// `tolerance_m` and `tolerance_deg` per pair. A caller that gates fixes on
+/// a fusion's prediction restarts it from such a run of rejected fixes, so
+/// a fusion carried off by a runaway odometry takes fixes again.
+pub fn fixes_move_as_one_source<S: AsRef<[Option<SE3>]>>(
+    fixes: &[(i64, SE3, S)],
+    tolerance_m: f64,
+    tolerance_deg: f64,
+) -> bool {
+    let sources = fixes
+        .iter()
+        .map(|(_, _, s)| s.as_ref().len())
+        .max()
+        .unwrap_or(0);
+    (0..sources).any(|source| {
+        fixes.windows(2).all(|pair| {
+            let (_, fix_a, sources_a) = &pair[0];
+            let (_, fix_b, sources_b) = &pair[1];
+            let (Some(Some(odom_a)), Some(Some(odom_b))) = (
+                sources_a.as_ref().get(source),
+                sources_b.as_ref().get(source),
+            ) else {
+                return false;
+            };
+            let fix_motion = fix_a.inverse().compose(fix_b);
+            let odom_motion = odom_a.inverse().compose(odom_b);
+            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
+                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= tolerance_deg.to_radians()
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,8 +844,13 @@ mod tests {
     /// fused with exact wheels and exact fixes every 0.5 s. Returns the worst
     /// map pose error from the first fix after the VIO runs off (the check
     /// runs at fixes, so until then nothing tells the two sources apart),
-    /// and the fusion.
-    fn runaway_vio(check_window_s: f64) -> (f64, MapFusion) {
+    /// and the fusion. No fixes come at the indices in `gap`; the fix at
+    /// `outlier` is 1 m off.
+    fn runaway_vio(
+        check_window_s: f64,
+        gap: std::ops::Range<usize>,
+        outlier: Option<usize>,
+    ) -> (f64, MapFusion) {
         let mut fusion = MapFusion::new(MapFusionConfig {
             sources: vec![OdometryNoise::VIO, OdometryNoise::WHEEL],
             source_check_window_s: check_window_s,
@@ -816,10 +869,14 @@ mod tests {
             }
             let poses = [Some(vio.clone()), Some(wheel_frame.compose(&truth(index)))];
             fusion.observe(index as i64 * 50_000_000, &poses);
-            if index % 10 == 0 {
-                fusion.add_fix(index as i64 * 50_000_000, &truth(index), &poses);
+            if index % 10 == 0 && !gap.contains(&index) {
+                let mut fix = truth(index);
+                if outlier == Some(index) {
+                    fix.translation.x += 1.0;
+                }
+                fusion.add_fix(index as i64 * 50_000_000, &fix, &poses);
             }
-            if index >= 110 {
+            if index >= 110 && outlier.is_none_or(|o| !(o..o + 10).contains(&index)) {
                 let estimate = fusion.map_from_body(&poses).expect("set");
                 worst = worst.max((estimate.translation - truth(index).translation).norm());
             }
@@ -829,14 +886,63 @@ mod tests {
 
     #[test]
     fn the_source_check_drops_a_runaway_vio_that_the_wheels_and_fixes_contradict() {
-        let (without, plain) = runaway_vio(0.0);
-        let (with, checked) = runaway_vio(1.0);
+        let (without, plain) = runaway_vio(0.0, 0..0, None);
+        let (with, checked) = runaway_vio(1.0, 0..0, None);
         assert!(without > 0.1, "without the check: {without}");
         assert!(with < 0.05, "with the check: {with}");
         assert_eq!(plain.excluded_edges(), &[0, 0]);
         assert!(checked.excluded_edges()[0] > 0);
         assert_eq!(checked.excluded_edges()[1], 0);
         assert_eq!(checked.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn a_runaway_source_stays_out_after_a_gap_longer_than_the_check_window() {
+        // No fixes for 2 s (people in front of the camera): the first fix
+        // after the gap has no earlier one within the 1 s window, so the
+        // VIO cannot be checked there; it must stay out, not be handed the
+        // prediction back until the next fix.
+        let (worst, fusion) = runaway_vio(1.0, 160..200, None);
+        assert!(worst < 0.05, "after the gap: {worst}");
+        assert_eq!(fusion.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn a_runaway_source_stays_out_past_a_fix_that_every_source_disagrees_with() {
+        // One fix 1 m off (a wrong match): the wheels disagree with it too,
+        // so it says nothing about the sources and the VIO must stay out
+        // (the poses until the next fix, pulled by the bad one, are not
+        // scored).
+        let (worst, fusion) = runaway_vio(1.0, 0..0, Some(200));
+        assert!(worst < 0.05, "after the outlier: {worst}");
+        assert_eq!(fusion.suspect_sources(), &[true, false]);
+    }
+
+    #[test]
+    fn fixes_move_as_one_source_needs_one_source_for_every_pair() {
+        // The fixes walk 0.1 m per step; source 0 runs off (0.3 m per step),
+        // source 1 follows them; a source with no pose cannot vouch.
+        let fix = |i: usize| pose(0.1 * i as f64, 0.0, 0.0, 0.0);
+        let odom = |i: usize, step: f64| pose(step * i as f64, 1.0, 0.0, 0.0);
+        let fixes: Vec<(i64, SE3, Vec<Option<SE3>>)> = (0..3)
+            .map(|i| {
+                (
+                    i as i64,
+                    fix(i),
+                    vec![Some(odom(i, 0.3)), Some(odom(i, 0.1))],
+                )
+            })
+            .collect();
+        assert!(fixes_move_as_one_source(&fixes, 0.05, 3.0));
+        let mut runaway_only = fixes.clone();
+        for (_, _, sources) in &mut runaway_only {
+            sources[1] = None;
+        }
+        assert!(!fixes_move_as_one_source(&runaway_only, 0.05, 3.0));
+        // One fix 1 m off breaks the run for every source.
+        let mut outlier = fixes;
+        outlier[1].1.translation.y += 1.0;
+        assert!(!fixes_move_as_one_source(&outlier, 0.05, 3.0));
     }
 
     #[test]

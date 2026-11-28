@@ -183,7 +183,19 @@ def fit_double_sphere(kb4, width, height, max_theta_deg=60.0):
     us, vs = np.meshgrid(np.linspace(0, width - 1, 80), np.linspace(0, height - 1, 80))
     pixels = np.stack([us.ravel(), vs.ravel()], axis=1)
     rays, theta = kb4_unproject(kb4, pixels)
-    keep = theta < math.radians(max_theta_deg)
+    # Newton can stop on no root, or a wrong one (theta < 0), where the
+    # polynomial turns over near the corners (market1-1's fisheye2): keep
+    # only pixels whose theta reprojects to their own radius.
+    k1, k2, k3, k4 = kb4[4:8]
+    t2 = theta * theta
+    radius = np.hypot((pixels[:, 0] - kb4[2]) / kb4[0], (pixels[:, 1] - kb4[3]) / kb4[1])
+    reprojected = theta * (1 + t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4))))
+    keep = (
+        np.isfinite(theta)
+        & (theta >= 0.0)
+        & (np.abs(reprojected - radius) < 1e-6)
+        & (theta < math.radians(max_theta_deg))
+    )
     pixels, rays = pixels[keep], rays[keep]
     fx, fy, cx, cy = kb4[:4]
     params = np.array([fx, fy, cx, cy, 0.0, 0.6])
@@ -204,6 +216,9 @@ def fit_double_sphere(kb4, width, height, max_theta_deg=60.0):
         gradient = jacobian.T @ current
         delta = np.linalg.solve(normal + damping * np.diag(np.diag(normal)), -gradient)
         candidate = params + delta
+        # Keep alpha in the Double Sphere's valid range [0, 1): unbounded,
+        # one market1-1 lens ran off to alpha 2 and a 159 px fit.
+        candidate[5] = min(max(candidate[5], 0.0), 0.999)
         trial = residual(candidate)
         if np.isfinite(trial).all() and trial @ trial < current @ current:
             params, current = candidate, trial

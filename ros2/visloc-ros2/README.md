@@ -506,11 +506,14 @@ measurements behind the defaults.
 
 **With people about** (a VIO on `odom`, the wheels on `odom2`): measured in
 RNE with people walking just ahead of the robot, 1–2 cm through the nodes
-(`docs/dynamic_obstacle_localization.md`):
+indoors and 2.4 cm outdoors (`docs/dynamic_obstacle_localization.md`). Give
+the VIO the wheels' velocity too: outdoors the people made a VIO without it
+run away at the start (metres off until the fusion could leave it out):
 
 ```sh
 visloc_vio_node --calibration calib.json --config config.json \
-  --ros-args -p map_prior:=true -r left/image_raw:=cam0/image_raw \
+  --ros-args -p map_prior:=true -p wheel_odom_topic:=wheel/odom \
+  -p wheel_velocity:=true -r left/image_raw:=cam0/image_raw \
   -r right/image_raw:=cam1/image_raw -r imu:=imu0
 visloc_map_localize_node --map runs/map --ros-args -p profile:=dynamic_indoor \
   -p fusion:=true -r odom2:=wheel/odom -r image:=cam0/image_raw \

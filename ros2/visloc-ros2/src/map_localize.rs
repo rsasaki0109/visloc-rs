@@ -40,10 +40,10 @@ use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureRea
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
-    apply_inlier_spread_gate, fixes_agree_under_a_source, AllLandmarksSelector,
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid, LocalizationConfig,
-    LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection, OdomCorrectionConfig,
-    OdometryNoise, PackedDescriptors,
+    apply_inlier_spread_gate, fixes_agree_under_a_source, fixes_move_as_one_source,
+    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, ImageGrid,
+    LocalizationConfig, LocalizationPipeline, MapFusion, MapFusionConfig, OdomCorrection,
+    OdomCorrectionConfig, OdometryNoise, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PSolver, P3P};
@@ -1277,7 +1277,12 @@ impl OdomCorrector {
                                 }
                                 fusion.add_fix(stamp_ns, &map_from_body, &sources);
                                 self.fusion_rejected.clear();
-                            } else if fusion.is_set() {
+                            } else if fusion.is_set() || self.correction.map_from_odom().is_some() {
+                                // Not started yet although the correction
+                                // is (it started from weak fixes, then
+                                // rejects every fix against a runaway first
+                                // odometry): start from agreeing fixes below,
+                                // as after a fusion gone wrong.
                                 let close = fusion.map_from_body(&sources).is_some_and(|p| {
                                     (p.translation - map_from_body.translation).norm()
                                         <= FUSION_GATE_M
@@ -1305,9 +1310,10 @@ impl OdomCorrector {
                                             .drain(..self.fusion_rejected.len() - needed);
                                     }
                                     if self.fusion_rejected.len() == needed
-                                        && fixes_agree_under_an_odometry(
+                                        && fixes_move_as_one_source(
                                             &self.fusion_rejected,
                                             self.options.correction.agreement_m,
+                                            3.0,
                                         )
                                     {
                                         fusion.reset();
@@ -1354,25 +1360,6 @@ impl OdomCorrector {
         }
         events
     }
-}
-
-/// Whether each pair of consecutive `fixes` moved as one odometry did
-/// between them (the same odometry for all pairs): within `tolerance_m`
-/// and 3 deg.
-fn fixes_agree_under_an_odometry(fixes: &[(i64, SE3, [Option<SE3>; 2])], tolerance_m: f64) -> bool {
-    (0..2).any(|source| {
-        fixes.windows(2).all(|pair| {
-            let (_, fix_a, sources_a) = &pair[0];
-            let (_, fix_b, sources_b) = &pair[1];
-            let (Some(odom_a), Some(odom_b)) = (&sources_a[source], &sources_b[source]) else {
-                return false;
-            };
-            let fix_motion = fix_a.inverse().compose(fix_b);
-            let odom_motion = odom_a.inverse().compose(odom_b);
-            (fix_motion.translation - odom_motion.translation).norm() <= tolerance_m
-                && fix_motion.rotation.angle_to(&odom_motion.rotation) <= 3f64.to_radians()
-        })
-    })
 }
 
 /// Which received images to localize: every `every`-th once the odometry
@@ -1716,6 +1703,74 @@ mod tests {
             8.0,
         );
         assert!(fused < 0.05, "fused after the gap: {fused}");
+    }
+
+    #[test]
+    fn a_fusion_never_started_starts_from_agreeing_fixes() {
+        // Weak fixes start the correction (no fusion yet: it starts on a
+        // used full fix); then the VIO runs off and the correction rejects
+        // every full fix against it. The fusion must start from fixes that
+        // agree under the wheels instead of leaving the map pose on the VIO.
+        let body_from_wheels = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
+            Vector3::new(0.2, -0.1, -0.4),
+        );
+        let mut core = OdomCorrector::new(&MapLocalizeOptions {
+            fusion: Some(FusionOptions {
+                source_check_window_s: 1.0,
+                body_from_second_body: body_from_wheels.clone(),
+                ..FusionOptions::default()
+            }),
+            ..MapLocalizeOptions::default()
+        });
+        let odom_from_map = offset().inverse();
+        let wheels_from_map = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, -1.1),
+            Vector3::new(-4.0, 3.0, 0.0),
+        );
+        let mut vio = odom_from_map.compose(&circle(0.0));
+        let (mut weakly_started, mut worst) = (false, 0.0_f64);
+        for k in 0..300_i64 {
+            let t = k as f64 * 0.05;
+            let stamp = k * 50 * MS;
+            if k > 0 {
+                let mut step = circle(t - 0.05).inverse().compose(&circle(t));
+                if t >= 1.0 {
+                    step.translation *= 3.0;
+                }
+                vio = vio.compose(&step);
+            }
+            core.add_second_odom(
+                stamp,
+                wheels_from_map
+                    .compose(&circle(t))
+                    .compose(&body_from_wheels),
+            );
+            core.add_odom(stamp, vio.clone());
+            if k % 2 == 0 {
+                if t < 2.0 {
+                    weakly_started |= core.add_weak_fix(stamp, circle(t)).iter().any(|event| {
+                        matches!(
+                            event,
+                            FixEvent::Applied {
+                                outcome: FixOutcome::Initialized,
+                                ..
+                            }
+                        )
+                    });
+                } else {
+                    core.add_fix(stamp, circle(t));
+                }
+            }
+            if t >= 8.0 {
+                if let Some(map_pose) = core.latest_map_pose() {
+                    worst = worst
+                        .max((map_pose.map_from_body.translation - circle(t).translation).norm());
+                }
+            }
+        }
+        assert!(weakly_started, "the weak fixes start the correction");
+        assert!(worst < 0.05, "map pose after the VIO ran off: {worst}");
     }
 
     #[test]
