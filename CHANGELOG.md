@@ -13,7 +13,6 @@ All notable changes to `visloc-rs` will be documented here.
   pulled the depth short by `cos θ` off the axis. A fisheye view's map is now
   turned into distances when it is read
   (`PinholeCamera::depth_z_to_render`); pinhole views are unchanged.
-
 - `basalt_euroc_localize_demo --fusion` now feeds its fusion as
   `visloc_map_localize_node` does (gated on its own prediction, restarted
   from fixes that move as one odometry, weak fixes left out, the
