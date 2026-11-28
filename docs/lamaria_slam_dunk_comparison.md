@@ -555,3 +555,6 @@ Mean 69.84 → 70.70 (**+0.86**), 8 of 13 gain: kept, the driver's default since
 `--ba-pass-keypoint-match-args`). The two single changes gained +0.27 and +0.37; sequence_2_12 carries much of
 the sum (without it, +0.19 over the other twelve), and sequence_1_20 and R_11_5cp lose. Track 2, the one track the
 RootSIFT pass lost, gains 4.7.
+
+The new default chain on its own (run 46120446210, commit 9c22a67): mean of the thirteen **71.14** (70.18 before
+the thresholds and the stereo pairs), sequence_1_19 92.58, 2_12 54.39, 5_11 73.52.
