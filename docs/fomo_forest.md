@@ -103,6 +103,7 @@ python3 scripts/fomo_to_euroc.py --trajectory data/2025-01-29/blue_2025-01-30-10
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-08-20/blue_2025-08-20-11-25 --out /data/fomo/summer_blue
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-03-10/blue_2025-03-10-16-59 --out /data/fomo/march_blue
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-10-14/blue_2025-10-14-11-46 --out /data/fomo/october_blue
+python3 scripts/fomo_to_euroc.py --trajectory data/2025-11-03/blue_2025-11-03-18-37 --out /data/fomo/night_blue
 
 cargo build --release --example basalt_euroc_vio_demo --features basalt-lm-workspace-reuse
 S=/data/fomo/winter_blue
@@ -156,12 +157,39 @@ target/release/examples/basalt_euroc_online_slam_demo --euroc-dir $S --calibrati
 python3 scripts/fomo_eval.py --sequence $S --estimate target/fomo_winter_slam/trajectory_online.tum
 ```
 
+## Night and rain (2025-11-03, 18:37)
+
+The same blue loop driven after dark in the rain: 583 m, 344 s. The only
+light is the robot's headlights. The near ground is motion-blurred,
+everything beyond about 15 m is black, and large raindrops sit on the
+lens (a different set at the start and at the end).
+
+| Run | ATE SE(3) | Drift | Loops |
+|---|---:|---:|---:|
+| VIO, baseline config | 4.13 m | 2.26% | - |
+| **VIO, forest config** | **1.35 m** | **0.56%** | - |
+| Online SLAM, baseline + loose loops | 1.96 m | 0.90% | 0 |
+| Online SLAM, forest + loose loops | 1.57 m | 0.89% | 0 |
+
+- The forest config cuts the error by 3x, as on the January snowfield. The
+  shared trait is a scene where good texture sits only in part of the
+  image and the ground moves fast through it. So it is a hard-conditions
+  config more than a snow config.
+- No loop closes, not even a verified candidate. The robot returns within
+  0.5 m of the start, as in August. The night revisit frames share little
+  besides a lit fence and building corner: the headlights light different
+  ground, and different raindrops cover the middle of the image.
+- Without loops the online trajectory is 0.26 m worse than the VIO it is
+  built from. At night, use the VIO output.
+
 ## Open
 
 - **Startup run-away:** on a 10 s slice from rest, the VIO's speed overshoots
   by up to 2x in the first seconds of hard acceleration. Over the whole run
   it does not show, but `StaticHold` (only wired into
   `basalt_euroc_localize_demo`) is the candidate fix.
-- **Other routes and night:** the other FoMo routes (green and magenta are
-  more forest; orange and yellow are 2-2.7 km) and the 2025-11-03 night/rain
-  deployment.
+- **Other routes:** green and magenta are more forest; orange and yellow
+  are 2-2.7 km. The 2025-11-03 night deployment has all six routes.
+- **Night loop closure:** the BoW place recognition does not survive
+  headlights + rain. That needs a different descriptor, not looser
+  thresholds.
