@@ -28,9 +28,16 @@ VectorNav's +z (up at rest) is the left camera's -y, the camera pitched
 18 deg down, which is where the horizon sits in the images.
 
 The ZED X images are already rectified (the published K is shared by both
-cameras, no distortion); matched ORB rows still differ by about 2 px at full
-resolution, which is the 0.3 deg residual rotation transforms.json gives
-between the cameras, so the extrinsic is used as published.
+cameras, no distortion), so the right camera is put at the published
+baseline's length along the left camera's +x with no rotation. The rotation
+transforms.json gives between the cameras (0.5 deg, mostly yaw) is the
+factory one before rectification: applied to the rectified images it moves
+every disparity by about 3 px at 960 px width, and the VIO on summer blue
+comes out 1.4x too long (Sim(3) scale 0.71, ATE 28.5 m instead of 1.2 m).
+Stereo block matching with a pure translation puts the ground 1.08 m under
+base_link (the footprint is 1.114 m) and matches the ground truth's
+frame-to-frame displacement (median ratio 0.996). `--published-stereo-rotation`
+keeps the published rotation for comparison.
 
 `--trajectory` is an S3 prefix such as
 `data/2025-08-20/blue_2025-08-20-11-25` (downloaded over HTTPS, images
@@ -196,6 +203,9 @@ def main() -> int:
                         help="skip this many seconds from the first image")
     parser.add_argument("--duration-s", type=float, help="keep only this many seconds")
     parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--published-stereo-rotation", action="store_true",
+                        help="use transforms.json's left-right rotation (wrong for the "
+                             "rectified images; for comparison only)")
     args = parser.parse_args()
 
     source = Source(args.trajectory)
@@ -213,7 +223,11 @@ def main() -> int:
     calib_left = json.loads(source.read("calib/zedx_left.json"))
     calib_right = json.loads(source.read("calib/zedx_right.json"))
     frames = frame_transforms(json.loads(source.read("calib/transforms.json")))
-    cam_r_l = frames[("zedx_left", "zedx_right")]  # T_left_right
+    cam_r_l = frames[("zedx_left", "zedx_right")]  # T_left_right, as published
+    if not args.published_stereo_rotation:
+        rectified = np.eye(4)
+        rectified[0, 3] = np.linalg.norm(cam_r_l[:3, 3])
+        cam_r_l = rectified
     left_imu = frames[("zedx_left", args.imu)]  # T_left_imu
     imu_left = np.linalg.inv(left_imu)
     imu_right = imu_left @ cam_r_l
