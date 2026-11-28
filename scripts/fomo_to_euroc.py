@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import http.client
 import io
+import time
 import json
 import re
 import sys
@@ -122,9 +124,10 @@ class Source:
             try:
                 with urllib.request.urlopen(url, timeout=60) as response:
                     return response.read()
-            except OSError:
+            except (OSError, http.client.HTTPException):
                 if attempt == 4:
                     raise
+                time.sleep(2 ** attempt)
         raise AssertionError("unreachable")
 
     def list(self, directory: str) -> list[str]:
