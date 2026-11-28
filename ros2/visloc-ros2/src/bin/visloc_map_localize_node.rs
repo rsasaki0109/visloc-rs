@@ -73,6 +73,9 @@ PARAMETERS (--name value  or  -p name:=value):
                          rejected localizations that agree, over more travel than they
                          agree within, replace its correction (an odometry that drifted
                          metres while only weak localizations came)               [0: off]
+  settle_gate_per_m      right after the map pose is set or replaced, the fix gate widens
+                         by this much per metre of travel (instead of 0.05) until two
+                         fixes are accepted (a monocular VIO whose scale drifted)  [0: off]
   min_inlier_cells       turn down a localization whose inliers occupy fewer cells of a
                          4x4 image grid (bunched on one patch, e.g. the rest of the view
                          hidden by people); 6 was measured on TUM walking          [0: off]
@@ -212,6 +215,13 @@ fn run() -> Result<(), String> {
     }
     options.correction.weak_reset_after =
         args.parsed_or("weak_reset_after", options.correction.weak_reset_after)?;
+    options.correction.settle_gate_per_m =
+        args.parsed_or("settle_gate_per_m", options.correction.settle_gate_per_m)?;
+    if !(options.correction.settle_gate_per_m >= 0.0
+        && options.correction.settle_gate_per_m.is_finite())
+    {
+        return Err("settle_gate_per_m must be a non-negative number".into());
+    }
     options.min_inlier_cells = args.parsed_or("min_inlier_cells", options.min_inlier_cells)?;
     if options.min_inlier_cells > 16 {
         return Err("min_inlier_cells must be between 0 and 16".into());

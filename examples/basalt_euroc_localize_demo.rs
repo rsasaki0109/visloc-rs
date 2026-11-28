@@ -58,6 +58,9 @@
 //! With `--weak-reset-after N`, N consecutive weak or rejected fixes that
 //! agree with each other replace the correction's offset, for an odometry
 //! that drifted beyond any gate while only weak fixes came.
+//! With `--settle-gate-per-m M`, right after the correction is set or
+//! replaced its gate widens by M per metre of travel (instead of 5 cm) until
+//! two fixes are accepted, for a monocular VIO whose scale drifted.
 //! Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
@@ -287,6 +290,9 @@ struct Args {
     /// With `--weak-reset-after N`: N consecutive weak or rejected fixes
     /// that agree replace the correction's offset.
     weak_reset_after: usize,
+    /// With `--settle-gate-per-m M`: the correction's gate after it is set
+    /// or replaced, per metre of travel, until two fixes are accepted.
+    settle_gate_per_m: f64,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -359,7 +365,7 @@ impl Args {
          [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
          [--stale-projection-min-inliers N] \
-         [--weak-gate-cm CM] [--weak-reset-after N] \
+         [--weak-gate-cm CM] [--weak-reset-after N] [--settle-gate-per-m M] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE] [--diagnostics FILE [--eval-mask-dir DIR]] [--diag-grid N] [--min-inlier-cells K] [--min-inlier-ratio R] [--init-fixes N] [--reset-after N] [--init-min-inliers N] [--init-min-travel-cm CM] [--init-min-turn-deg DEG] [--init-warmup-s S] [--object-boxes FILE] [--fusion-source-check-s S] [--fusion-seed-s S]"
             .into()
@@ -376,6 +382,7 @@ impl Args {
         let mut weak_min_inliers = None::<usize>;
         let mut weak_gate_cm = None::<f64>;
         let mut weak_reset_after = None::<usize>;
+        let mut settle_gate_per_m = None::<f64>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -422,6 +429,7 @@ impl Args {
             weak_min_inliers: 15,
             weak_gate_m: 0.0,
             weak_reset_after: 0,
+            settle_gate_per_m: 0.0,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -562,6 +570,9 @@ impl Args {
                 "--weak-min-inliers" => weak_min_inliers = Some(number(&option, value()?)?),
                 "--weak-gate-cm" => weak_gate_cm = Some(number::<f64>(&option, value()?)?),
                 "--weak-reset-after" => weak_reset_after = Some(number(&option, value()?)?),
+                "--settle-gate-per-m" => {
+                    settle_gate_per_m = Some(number::<f64>(&option, value()?)?)
+                }
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -684,6 +695,12 @@ impl Args {
             if let Some(n) = weak_reset_after {
                 args.weak_reset_after = n;
             }
+            if let Some(per_m) = settle_gate_per_m {
+                if !(per_m >= 0.0 && per_m.is_finite()) {
+                    return Err("--settle-gate-per-m must be a non-negative number".into());
+                }
+                args.settle_gate_per_m = per_m;
+            }
             if let Some(gate) = weak_gate_cm {
                 if !(gate >= 0.0 && gate.is_finite()) {
                     return Err("--weak-gate-cm must be a non-negative number".into());
@@ -696,11 +713,12 @@ impl Args {
             || weak_min_inliers.is_some()
             || weak_gate_cm.is_some()
             || weak_reset_after.is_some()
+            || settle_gate_per_m.is_some()
             || projection_radius_px.is_some()
         {
             return Err(
                 "--localize-every, --initial-localize-every, --initial-window-s, \
-                 --weak-min-inliers, --weak-gate-cm, --weak-reset-after and \
+                 --weak-min-inliers, --weak-gate-cm, --weak-reset-after, --settle-gate-per-m and \
                  --projection-radius-px need --vio \
                  or --odometry"
                     .into(),
@@ -1427,6 +1445,7 @@ impl CorrectedRun {
                 OdomCorrectionConfig {
                     weak_gate_m: args.weak_gate_m,
                     weak_reset_after: args.weak_reset_after,
+                    settle_gate_per_m: args.settle_gate_per_m,
                     init_fixes: args.init_fixes.unwrap_or(defaults.init_fixes),
                     init_fixes_weak: args.init_fixes.map_or(defaults.init_fixes_weak, |n| {
                         n.max(defaults.init_fixes_weak)
@@ -2256,6 +2275,14 @@ mod tests {
         assert!(with(&["--weak-min-inliers", "15"]).is_err());
         assert!(with(&["--weak-gate-cm", "5"]).is_err());
         assert!(with(&["--weak-reset-after", "3"]).is_err());
+        assert!(with(&["--settle-gate-per-m", "0.15"]).is_err());
+        assert!(with(&[&vio[..], &["--settle-gate-per-m", "-1"]].concat()).is_err());
+        assert_eq!(
+            with(&[&vio[..], &["--settle-gate-per-m", "0.15"]].concat())
+                .expect("parses")
+                .settle_gate_per_m,
+            0.15
+        );
         assert_eq!(
             with(&[&vio[..], &["--weak-reset-after", "3"]].concat())
                 .expect("parses")

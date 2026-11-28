@@ -93,6 +93,14 @@ pub struct OdomCorrectionConfig {
     pub weak_gate_m: f64,
     /// Yaw gate, in degrees, for accepting a weak fix (`weak_gate_m`).
     pub weak_gate_yaw_deg: f64,
+    /// When positive: right after the offset is set or replaced, until
+    /// `init_fixes` fixes have been accepted, the position gate widens by
+    /// this much per metre of travel instead of `gate_per_m`. The new offset
+    /// fits an odometry whose scale may be off (a monocular VIO without
+    /// wheels drifts some 15% in scale while no fix comes), and the fixes
+    /// that would correct it fall outside the usual gate. 0, the default:
+    /// `gate_per_m` throughout.
+    pub settle_gate_per_m: f64,
     /// Once the offset is set, this many consecutive fixes that it rejects,
     /// weak ones among them, replace it when they agree with each other and
     /// the odometry moved more than `agreement_m` (or turned more than
@@ -137,6 +145,7 @@ impl Default for OdomCorrectionConfig {
             weak_gate_m: 0.0,
             weak_gate_yaw_deg: 2.0,
             weak_reset_after: 0,
+            settle_gate_per_m: 0.0,
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_window_s: 10.0,
@@ -240,6 +249,8 @@ pub struct OdomCorrection {
     /// (sampled at fixes) since the last accepted one.
     previous_odom_position: Option<Vector3<f64>>,
     travel_since_accept_m: f64,
+    /// Accepted fixes still to come under `settle_gate_per_m`.
+    settling: usize,
     /// Observed odometry, oldest first: stamp and path length from the first
     /// observed pose. Covers at most `PATH_HISTORY_NS`.
     path: VecDeque<(i64, f64)>,
@@ -260,6 +271,7 @@ impl OdomCorrection {
             candidates: Vec::new(),
             previous_odom_position: None,
             travel_since_accept_m: 0.0,
+            settling: 0,
             path: VecDeque::new(),
             path_end: None,
             path_at_accept_m: None,
@@ -418,6 +430,7 @@ impl OdomCorrection {
         let Some(offset) = self.offset else {
             return if self.push_initial(fix) {
                 Self::adopt(&mut self.window, &mut self.candidates);
+                self.start_settling();
                 self.refit();
                 self.restart_travel(path_m);
                 FixOutcome::Initialized
@@ -443,6 +456,7 @@ impl OdomCorrection {
             }
             return if self.push_rejected(fix) {
                 Self::adopt(&mut self.window, &mut self.candidates);
+                self.start_settling();
                 self.refit();
                 self.restart_travel(path_m);
                 FixOutcome::Reset
@@ -454,9 +468,15 @@ impl OdomCorrection {
             (Some(now), Some(then)) => self.travel_since_accept_m.max(now - then),
             _ => self.travel_since_accept_m,
         };
-        let accepted = position_residual <= self.config.gate_m + self.config.gate_per_m * travel
+        let gate_per_m = if self.settling > 0 {
+            self.config.settle_gate_per_m.max(self.config.gate_per_m)
+        } else {
+            self.config.gate_per_m
+        };
+        let accepted = position_residual <= self.config.gate_m + gate_per_m * travel
             && yaw_residual <= self.config.gate_yaw_deg + self.config.gate_yaw_per_m_deg * travel;
         if accepted {
+            self.settling = self.settling.saturating_sub(1);
             self.candidates.clear();
             self.window.push_back(fix);
             self.refit();
@@ -465,11 +485,20 @@ impl OdomCorrection {
         }
         if self.push_rejected(fix) {
             Self::adopt(&mut self.window, &mut self.candidates);
+            self.start_settling();
             self.refit();
             self.restart_travel(path_m);
             FixOutcome::Reset
         } else {
             FixOutcome::Rejected
+        }
+    }
+
+    /// With `settle_gate_per_m`: the next `init_fixes` accepted fixes get the
+    /// wider gate.
+    fn start_settling(&mut self) {
+        if self.config.settle_gate_per_m > 0.0 {
+            self.settling = self.config.init_fixes.max(1);
         }
     }
 
@@ -1161,6 +1190,56 @@ mod tests {
                 assert!((moved - drifted).norm() < 1e-9, "{moved:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_settle_gate_follows_a_mis_scaled_odometry_right_after_the_offset() {
+        // The odometry runs 30% long: after the first offset, each fix lies
+        // farther from where the offset puts the odometry pose.
+        let run = |settle_gate_per_m: f64| {
+            let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+                settle_gate_per_m,
+                ..OdomCorrectionConfig::default()
+            });
+            let odom_at = |i: usize| {
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(1.3 * i as f64, 0.0, 0.0),
+                )
+            };
+            let map_at = |i: usize| {
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(1.0 * i as f64, 0.0, 0.0),
+                )
+            };
+            // Two fixes 10 cm apart set the offset (they agree within 10 cm).
+            let mut outcomes = Vec::new();
+            for (k, i) in [(0, 0.0), (1, 0.1)] {
+                let odom = SE3::new(UnitQuaternion::identity(), Vector3::new(1.3 * i, 0.0, 0.0));
+                let map = SE3::new(UnitQuaternion::identity(), Vector3::new(i, 0.0, 0.0));
+                outcomes.push(correction.add_fix(k * SECOND, &map, &odom));
+            }
+            // A fix 1 m on: 30 cm off, beyond 15 cm + 5 cm/m.
+            outcomes.push(correction.add_fix(2 * SECOND, &map_at(1), &odom_at(1)));
+            outcomes
+        };
+        assert_eq!(
+            run(0.0),
+            [
+                FixOutcome::Pending,
+                FixOutcome::Initialized,
+                FixOutcome::Rejected
+            ]
+        );
+        assert_eq!(
+            run(0.15),
+            [
+                FixOutcome::Pending,
+                FixOutcome::Initialized,
+                FixOutcome::Accepted
+            ]
+        );
     }
 
     #[test]
