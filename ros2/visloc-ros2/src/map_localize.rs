@@ -1329,6 +1329,11 @@ impl OdomCorrector {
                                 .push((stamp_ns, map_from_odom.inverse().compose(&map_from_body)));
                         }
                     }
+                    // A weak reset (`weak_reset_after`) puts the odometry
+                    // back on the map, like a full one.
+                    if weak && outcome == FixOutcome::Reset {
+                        self.rejected_in_a_row = 0;
+                    }
                     if !weak && self.options.recover_after > 0 {
                         match outcome {
                             FixOutcome::Rejected => self.rejected_in_a_row += 1,
@@ -1853,6 +1858,40 @@ mod tests {
             quiet.add_fix(i * 100 * MS, offset().compose(&still));
         }
         assert_eq!(quiet.recovery_requests(), 0);
+    }
+
+    #[test]
+    fn agreeing_weak_fixes_replace_a_drifted_correction_with_weak_reset_after() {
+        let run = |weak_reset_after: usize| {
+            let mut options = MapLocalizeOptions::default();
+            options.correction.weak_reset_after = weak_reset_after;
+            let mut core = OdomCorrector::new(&options);
+            for i in 0..3_i64 {
+                let odom = pose(0.2 * i as f64, 0.0);
+                core.add_odom(i * 100 * MS, odom.clone());
+                core.add_fix(i * 100 * MS, offset().compose(&odom));
+            }
+            assert!(core.is_set());
+            // The odometry drifted 2 m while no full fix came; the weak
+            // fixes see the robot where it is, 20 cm apart.
+            let drift = SE3::new(UnitQuaternion::identity(), Vector3::new(2.0, 0.0, 0.0));
+            let mut outcomes = Vec::new();
+            for i in 3..6_i64 {
+                let truth = pose(0.2 * i as f64, 0.0);
+                core.add_odom(i * 100 * MS, drift.compose(&truth));
+                for event in core.add_weak_fix(i * 100 * MS, offset().compose(&truth)) {
+                    if let FixEvent::Applied { outcome, .. } = event {
+                        outcomes.push(outcome);
+                    }
+                }
+            }
+            outcomes
+        };
+        assert_eq!(run(0), [FixOutcome::Unused; 3]);
+        assert_eq!(
+            run(3),
+            [FixOutcome::Unused, FixOutcome::Unused, FixOutcome::Reset]
+        );
     }
 
     #[test]
