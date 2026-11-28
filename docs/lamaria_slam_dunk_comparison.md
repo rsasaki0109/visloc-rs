@@ -523,3 +523,13 @@ windows; `--ba-experiment-online-args` gives an experiment its own (run 46053914
 6 of 13 gain, just under the rule; repeated in run 46076486039. **The online windows without the gyroscope's
 warm-up walk** (run 46053914300, four recordings): R_11 −0.84, R_12 −1.12, sequence_1_19 +1.00, 1_20 −0.36, and
 the online first eighth of sequence_1_20 stays 1.0148: not the warm-up.
+
+The repeat of the 8 px stereo pairs (run 46076486039, stopped after four recordings) reproduced the first run
+(R_11 −0.78, sequence_1_19 +3.18, 1_20 −0.35): +0.37, not kept. **The pass's matches by essential-matrix RANSAC**
+on unguided ratio-test matches (`match --verify essential` for SIFT, the paper's verification; run 46063184158,
+stopped with eleven done): R_11 −0.38, R_12 +1.06, R_13 +0.96, sequence_1_19 −0.40, 1_20 −4.39, 2_11 +1.58, 2_12
++5.29, 3_17 −12.53, 3_18 −5.48, 4_10 0, 4_11 0; fewer matches (1.8 M against 2.4 M on R_11) at twenty times the
+time. Not kept. **The online windows starting with 480 keyframes at once** (run 46076673577, four recordings):
+the online first eighth of sequence_1_20 comes to 1.0090 instead of 1.0153, but R_11 −0.71, R_12 −10.42,
+sequence_1_19 −12.94, 1_20 −23.06: from the VIO with zero biases a four-minute window does not settle. Next: the
+two small gains together, the paper's SIFT thresholds and the 8 px stereo pairs (run 46094318543).
