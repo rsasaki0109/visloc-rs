@@ -42,6 +42,15 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `OdomCorrectionConfig::weak_reset_after` (`basalt_euroc_localize_demo
+  --weak-reset-after N`, `visloc_map_localize_node`'s `weak_reset_after`,
+  opt-in): N consecutive fixes the correction rejects, weak ones among
+  them, replace its offset when they agree and the odometry moved farther
+  than they agree within. For a VIO that drifted beyond every gate while
+  only weak fixes came. OpenLORIS corridor1-1 against a corridor1-5 map,
+  monocular VIO without wheels: 20.1 to 7.0 cm median; the office matrix
+  is unchanged except office1-7 on the old mono map (32.3 to 20.0 cm). See
+  docs/odometry_fusion.md.
 - docs: the OpenLORIS market VIO's 6 % scale error comes from that session's
   shipped stereo calibration (the ground truth and wheels agree). Corrected from
   the wheels (baseline x 0.9185), the market map's ATE halves (222 to 112 cm),
