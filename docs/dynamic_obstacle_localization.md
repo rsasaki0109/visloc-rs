@@ -1068,6 +1068,50 @@ OpenLORIS office1-7 is unchanged: 1.77 cm recommended, 1.83 cm with fusion
 and the source check (1.84 before). The start without wheel velocity
 remains, as through the nodes.
 
+### The start without wheel velocity: a speed cap
+
+What was left was the start of the outdoor people run when the VIO gets no
+wheel velocity: metres off for the first seconds. There were two reasons.
+
+- **The fusion was not running yet.** The correction starts from weak
+  fixes, which did not start the fusion, so the first map poses were the
+  correction's, on the runaway VIO. A weak fix that starts (or resets)
+  the correction now starts the fusion too. Other weak fixes still stay
+  out of it.
+- **With one fix, nothing tells the sources apart.** The source check
+  needs two fixes, and they were rare in those seconds. But the VIO runs
+  away at speeds no robot drives: 7 m/s within 3 s, 19 m/s within 8 s.
+  `MapFusionConfig::max_speed_m_s` now leaves out a source moving faster
+  than that while another moves slower. It does so at once, when predicting
+  as well as when adding a node, and keeps it out until the source check
+  finds it agreeing. With the cap on, no map pose comes from such a source
+  alone; that frame gets none, rather than one metres off. Speeds are
+  measured over at least 0.1 s. Set it with `--fusion-max-speed`
+  (demo) or `fusion_max_speed_m_s` (node); `profile:=dynamic_indoor` sets
+  2 m/s.
+
+Map pose RMSE (max), before 35 s / from 35 s on:
+
+| Run | Before | Fusion from a weak start | + speed cap 2 m/s |
+| --- | --- | --- | --- |
+| people, nodes, recommended | 20.6 m / 2.2 cm | — | **31.6 (58) cm / 2.2 (4.4) cm** |
+| people, nodes, + `wheel_velocity` | 37.4 (105) cm / 2.4 | — | **4.2 (12) cm / 2.4 (7.5)** |
+| people, demo, fusion + source check | 15.8 m / 2.2 cm | 1.13 m / 2.2 cm | **5.6 (17) cm / 2.2** |
+| people, demo, recommended | 12.8 m / 2.2 cm | 0.93 m / 2.2 cm | **12.3 (42) cm / 2.2** |
+| no people, nodes, recommended | 28.7 (81) cm / 1.8 | — | 37.2 (92) cm / 1.8 |
+| no people, demo, recommended | 32.0 (82) cm / 1.8 | 40.2 (90) cm / 1.8 | 40.2 (90) cm / 1.8 |
+
+- The whole people run through the nodes, without wheel velocity: 12.2 cm
+  RMSE, max 58 cm (7.85 m, max 52 m before).
+- A first try without the "no pose from a too-fast source alone" rule had
+  one frame 17.5 m off: the wheels' newest pose had not arrived, so only
+  the VIO could carry the pose.
+- **Unchanged:** RNE indoors through the nodes, one core, gives a4 / q0 / a2
+  1.9 / 1.1 / 1.2 cm (2.1 / 1.2 / 1.3 before). OpenLORIS office1-7 (demo)
+  gives 1.77 / 1.84 cm. The run without people is unchanged after 35 s. Its
+  start is the warm-up's weak start (up to 0.9 m for about 8 s), which the
+  cap cannot catch: that VIO is not running away.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon

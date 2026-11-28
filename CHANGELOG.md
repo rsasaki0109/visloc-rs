@@ -42,6 +42,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `MapFusionConfig::max_speed_m_s` (`basalt_euroc_localize_demo
+  --fusion-max-speed`, `visloc_map_localize_node` `fusion_max_speed_m_s`, 2 in
+  `profile:=dynamic_indoor`): a source moving faster than the robot can is left
+  out at once while another moves slower, and no pose comes from it alone. A weak
+  fix that starts or resets the correction now starts the fusion too. RNE outdoors
+  with people ahead and no wheel velocity, through the nodes: the first seconds go
+  from 20.6 m to 32 cm, the run from 7.85 m to 12.2 cm. Indoors unchanged.
 - docs: the OpenLORIS market VIO's 6 % scale error comes from that session's
   shipped stereo calibration (the ground truth and wheels agree). Corrected from
   the wheels (baseline x 0.9185), the market map's ATE halves (222 to 112 cm),
