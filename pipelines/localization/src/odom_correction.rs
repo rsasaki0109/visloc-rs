@@ -41,8 +41,11 @@
 //! inliers for a fix. Once the offset is set, weak fixes are not used by
 //! default; with `weak_gate_m` set, one that lies that close to where the
 //! offset puts the odometry pose is accepted, which keeps the offset
-//! following the odometry's drift where full fixes are rare. It never
-//! counts toward a reset.
+//! following the odometry's drift where full fixes are rare. It counts
+//! toward a reset only with `weak_reset_after` set: that many consecutive
+//! weak or rejected fixes that agree with each other replace the offset,
+//! as weak fixes set the first one (an odometry that drifted metres while
+//! no full fix came leaves its weak fixes outside any gate).
 //!
 //! The offset is the mean over the accepted fixes of the last `window_s`
 //! seconds (circular mean for the yaw), which averages out localization noise
@@ -89,6 +92,11 @@ pub struct OdomCorrectionConfig {
     pub weak_gate_m: f64,
     /// Yaw gate, in degrees, for accepting a weak fix (`weak_gate_m`).
     pub weak_gate_yaw_deg: f64,
+    /// Once the offset is set, this many consecutive fixes that it rejects,
+    /// weak ones among them, replace it when they agree with each other
+    /// (rejected full fixes alone still need `reset_after`). 0, the default:
+    /// weak fixes never reset the offset.
+    pub weak_reset_after: usize,
     /// When either is positive, the fixes that set the first offset must
     /// span this much odometry travel (m) or turn (deg), between any two of
     /// them; they are then drawn from the fixes of the last `init_window_s`,
@@ -125,6 +133,7 @@ impl Default for OdomCorrectionConfig {
             window_s: 5.0,
             weak_gate_m: 0.0,
             weak_gate_yaw_deg: 2.0,
+            weak_reset_after: 0,
             init_min_travel_m: 0.0,
             init_min_turn_deg: 0.0,
             init_window_s: 10.0,
@@ -426,7 +435,17 @@ impl OdomCorrection {
                 self.restart_travel(path_m);
                 return FixOutcome::Accepted;
             }
-            return FixOutcome::Unused;
+            if self.config.weak_reset_after == 0 {
+                return FixOutcome::Unused;
+            }
+            return if self.push_rejected(fix) {
+                Self::adopt(&mut self.window, &mut self.candidates);
+                self.refit();
+                self.restart_travel(path_m);
+                FixOutcome::Reset
+            } else {
+                FixOutcome::Unused
+            };
         }
         let travel = match (path_m, self.path_at_accept_m) {
             (Some(now), Some(then)) => self.travel_since_accept_m.max(now - then),
@@ -441,7 +460,7 @@ impl OdomCorrection {
             self.restart_travel(path_m);
             return FixOutcome::Accepted;
         }
-        if self.push_candidate(fix, self.config.reset_after) {
+        if self.push_rejected(fix) {
             Self::adopt(&mut self.window, &mut self.candidates);
             self.refit();
             self.restart_travel(path_m);
@@ -455,6 +474,34 @@ impl OdomCorrection {
     fn restart_travel(&mut self, path_m: Option<f64>) {
         self.travel_since_accept_m = 0.0;
         self.path_at_accept_m = path_m;
+    }
+
+    /// Appends a fix the offset rejects to the candidate run and reports
+    /// whether it now replaces the offset: the last `reset_after` fixes, all
+    /// full, agree, or (with `weak_reset_after`) the last `weak_reset_after`
+    /// do. The run then keeps only the agreeing fixes.
+    fn push_rejected(&mut self, fix: Fix) -> bool {
+        let weak_needed = self.config.weak_reset_after;
+        if weak_needed == 0 {
+            return self.push_candidate(fix, self.config.reset_after);
+        }
+        let strong_needed = self.config.reset_after.max(1);
+        self.candidates.push(fix);
+        let keep = strong_needed.max(weak_needed);
+        if self.candidates.len() > keep {
+            self.candidates.drain(..self.candidates.len() - keep);
+        }
+        for (needed, all_full) in [(strong_needed, true), (weak_needed, false)] {
+            let Some(start) = self.candidates.len().checked_sub(needed) else {
+                continue;
+            };
+            let run = &self.candidates[start..];
+            if (!all_full || run.iter().all(|fix| !fix.weak)) && self.agree(run) {
+                self.candidates.drain(..start);
+                return true;
+            }
+        }
+        false
     }
 
     /// Appends to the candidate run, keeping only its last `needed` fixes,
@@ -1066,6 +1113,75 @@ mod tests {
             weak_fix_at(&mut correction, 3, Vector3::new(0.08, 0.0, 0.0)),
             FixOutcome::Unused
         );
+    }
+
+    #[test]
+    fn agreeing_weak_fixes_reset_a_drifted_offset_only_when_asked() {
+        // The odometry drifted 2 m while no full fix came: its weak fixes all
+        // lie outside the weak gate and agree on the new offset.
+        let drifted = Vector3::new(2.0, 0.0, 0.0);
+        for weak_reset_after in [0, 3] {
+            let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+                weak_gate_m: 0.05,
+                weak_reset_after,
+                ..OdomCorrectionConfig::default()
+            });
+            for index in 0..2 {
+                fix_at(&mut correction, index, &truth(), Vector3::zeros());
+            }
+            let outcomes: Vec<_> = (2..5)
+                .map(|index| weak_fix_at(&mut correction, index, drifted))
+                .collect();
+            let moved = correction.map_from_odom().unwrap().translation - truth().translation;
+            if weak_reset_after == 0 {
+                assert_eq!(outcomes, [FixOutcome::Unused; 3]);
+                assert!(moved.norm() < 1e-9, "{moved:?}");
+            } else {
+                assert_eq!(
+                    outcomes,
+                    [FixOutcome::Unused, FixOutcome::Unused, FixOutcome::Reset]
+                );
+                assert!((moved - drifted).norm() < 1e-9, "{moved:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn weak_fixes_that_disagree_do_not_reset_the_offset() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            weak_reset_after: 3,
+            ..OdomCorrectionConfig::default()
+        });
+        for index in 0..2 {
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
+        }
+        for (index, shift) in [(2, 2.0), (3, -1.0), (4, 2.0), (5, 0.5)] {
+            assert_eq!(
+                weak_fix_at(&mut correction, index, Vector3::new(shift, 0.0, 0.0)),
+                FixOutcome::Unused
+            );
+        }
+        assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
+        // Two rejected full fixes and one weak one that agree: a reset with
+        // `weak_reset_after`, though two full ones alone are not enough.
+        let shift = Vector3::new(0.0, 3.0, 0.0);
+        let jumped = SE3::new(truth().rotation, truth().translation + shift);
+        let mut mixed = OdomCorrection::new(OdomCorrectionConfig {
+            weak_reset_after: 3,
+            ..OdomCorrectionConfig::default()
+        });
+        for index in 0..2 {
+            fix_at(&mut mixed, index, &truth(), Vector3::zeros());
+        }
+        assert_eq!(
+            fix_at(&mut mixed, 2, &jumped, Vector3::zeros()),
+            FixOutcome::Rejected
+        );
+        assert_eq!(
+            fix_at(&mut mixed, 3, &jumped, Vector3::zeros()),
+            FixOutcome::Rejected
+        );
+        assert_eq!(weak_fix_at(&mut mixed, 4, shift), FixOutcome::Reset);
     }
 
     #[test]
