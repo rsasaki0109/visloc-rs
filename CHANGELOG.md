@@ -6,6 +6,15 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- `visloc_map_localize_node` with `fusion:=true`: three faults that kept a
+  runaway VIO in the map pose (RNE outdoors with people ahead, through the
+  nodes: 1756 m to 2.2 cm after the start):
+  - the fusion never started when the correction had started from weak
+    fixes and then rejected every full fix against the VIO; it now starts
+    from three fixes that agree under one odometry;
+  - `MapFusion`'s source check cleared a runaway source's verdict at the
+    first fix after a gap longer than its window, and at a fix that every
+    source disagreed with; such checks now leave the verdicts as they were.
 - The mapper drops detector corners that the Double Sphere model cannot
   unproject instead of failing the map (OpenLORIS market's right fisheye).
 - `scripts/openloris_to_euroc.py`: the Double Sphere fit keeps only the

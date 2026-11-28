@@ -963,6 +963,45 @@ after 27.5 s, when every setting has joined the path:
   query starts off the map's path), not from the people: it is there
   without them too.
 
+### Through the ROS 2 nodes: three fusion faults
+
+Replayed over DDS in real time (`euroc_dds_replay` at 1.0x, the nodes on
+three cores), with `profile:=dynamic_indoor`, `fusion:=true` and the VIO's
+`map_prior:=true`. The people run then showed three faults the offline runs
+had hidden (the offline demo's fusion only takes the fixes its correction
+used). Map pose RMSE (max), split at 35 s:
+
+| Run | Before 35 s | From 35 s on |
+| --- | --- | --- |
+| people, as merged | 30.5 m (67 m) | 1756 m (4314 m) |
+| people, fixed | 20.6 m (52 m) | **2.2 (4.4) cm** |
+| people, fixed, + VIO `wheel_velocity:=true` | 37.4 (105) cm | 2.4 (7.5) |
+| no people, fixed | 28.7 (81) cm | 1.8 (3.6) |
+| no people, fixed, + `wheel_velocity` | 29.0 (87) cm | 1.8 (3.6) |
+
+- **The fusion never started.** The correction started from weak fixes,
+  which do not start the fusion. Then it rejected every full fix against
+  the runaway VIO, so no fix ever started the fusion either. Now, once the
+  correction is set, fixes that the fusion lacks or rejects go to its
+  restart: three in a row that move as one odometry (here the wheels) did.
+- **A gap in the fixes handed the prediction back to the VIO.** After more
+  than the check window without fixes (people in front of the camera), the
+  first fix found no earlier one to check the VIO against. The VIO then
+  counted as sound again, and the prediction followed it, 37 m off within
+  a second. Now a source that cannot be checked keeps its verdict.
+- **So did one fix that every source disagreed with.** A wrong fix that the
+  wheels contradict too says nothing about the sources. It used to clear
+  the VIO's verdict as well (46 m spikes); now the verdicts stand.
+- **The start remains.** For the first seconds the fusion has a single
+  fix and cannot tell a runaway VIO from the wheels, so it is metres off
+  until the source check has a second fix to compare. With `wheel_velocity`
+  the VIO never runs away and the start stays within a metre.
+- Indoors (RNE a4 / a2 / q0, one core, as for seeding above) the fixed nodes
+  give 2.1 / 1.3 / 1.2 cm against 1.86 / 1.17 / 1.07 before, one run each.
+- The early start without people (from 19.7 s, up to 81 cm off) is the
+  warm-up's weak start described above. A run of the unfixed nodes that
+  happened to start at 27.4 s gave 2.5 (10.2) cm before 35 s.
+
 ## Compute budget (towards a Jetson)
 
 No Jetson here, so the budget was measured on this machine's Xeon
