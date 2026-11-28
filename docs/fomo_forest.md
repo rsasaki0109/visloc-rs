@@ -104,6 +104,8 @@ python3 scripts/fomo_to_euroc.py --trajectory data/2025-08-20/blue_2025-08-20-11
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-03-10/blue_2025-03-10-16-59 --out /data/fomo/march_blue
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-10-14/blue_2025-10-14-11-46 --out /data/fomo/october_blue
 python3 scripts/fomo_to_euroc.py --trajectory data/2025-11-03/blue_2025-11-03-18-37 --out /data/fomo/night_blue
+# Other routes: data/2025-01-29/green_2025-01-30-14-45, data/2025-08-20/green_2025-08-20-11-39,
+#               data/2025-01-29/magenta_2025-01-30-15-03, data/2025-08-20/magenta_2025-08-20-12-41
 
 cargo build --release --example basalt_euroc_vio_demo --features basalt-lm-workspace-reuse
 S=/data/fomo/winter_blue
@@ -144,8 +146,8 @@ closure), `--optimize-every-k 100 --periodic-iterations 4`, scoring
   geometrically verified candidates were rejected, and every run is equal or
   better than with the default thresholds. End-point drift is 0.03-0.15% on three runs (March with
   the forest config: 0.57%).
-- Forest + loose loops is the best single setting (mean 1.17 m, worst
-  1.66 m). Per season, the baseline config with loose loops is better
+- Forest + loose loops is the best single setting on blue (mean 1.17 m,
+  worst 1.66 m). On green and magenta it does not hold (see below). Per season, the baseline config with loose loops is better
   on March (1.10 m) and October (0.49 m), so the snow/no-snow choice is not
   clean once the mapper runs.
 
@@ -182,14 +184,58 @@ lens (a different set at the start and at the end).
 - Without loops the online trajectory is 0.26 m worse than the VIO it is
   built from. At night, use the VIO output.
 
+## Other routes: green and magenta (held out)
+
+Two more forest-heavy routes, January and August, with no further tuning.
+VIO ATE SE(3):
+
+| Route | Length | Returns to start | Baseline | Forest config |
+|---|---:|---|---:|---:|
+| green 2025-01-30 | 216 m | 7 m away | 1.49 m | 1.44 m |
+| green 2025-08-20 | 816 m | 6 m away | 1.59 m | 1.63 m |
+| magenta 2025-01-30 | 868 m | no (one-way) | 2.23 m | 2.23 m |
+| magenta 2025-08-20 | 810 m | 5 m away | 2.11 m | **1.60 m** |
+
+Over all nine runs on this page (blue x4, blue at night, green x2, magenta
+x2), the forest config averages **1.49 m** against **2.22 m** for the
+baseline. It is never worse by more than 0.22 m, and its worst run is 2.23 m
+against 4.76 m. This makes it the recommended default for FoMo-like
+forest driving, not only for snow.
+
+Online SLAM on these routes:
+
+| Route | VIO in the SLAM run | Forest, default loop thresholds | Forest + loose loops |
+|---|---:|---:|---:|
+| green January | 1.58 m | - | 1.58 m (7 loops) |
+| green August | 1.64 m | - | 1.65 m (0 loops) |
+| magenta January | 2.22 m | 2.24 m (99 loops) | 2.89 m |
+| magenta August | 1.83 m | 1.84 m (0 loops) | 2.58 m |
+
+(The VIO inside the SLAM demo is not bit-identical to `basalt_euroc_vio_demo`,
+so compare each row with its own VIO column.)
+
+- **The mapper does not help on these routes,** and **the loose thresholds
+  hurt magenta.** Most "loops" it accepts there are pairs only 26 m of
+  driving apart (the median), just over the 30-keyframe loop gap, along
+  straight trail. They are geometrically valid but add no global
+  information. They pull in VIO drift and slow the global optimisation
+  down (January magenta: 757 accepted, 1271 s of optimisation in total).
+- So the loose thresholds are **not a general default**. Use them when the
+  route revisits a place only briefly, like blue's return to its start. On
+  long trails without revisits, run the default thresholds or plain VIO.
+  A gate on driven distance (e.g. ignore "loops" with < 100 m travelled)
+  is the obvious mapper fix, but it is not implemented yet.
+
 ## Open
 
 - **Startup run-away:** on a 10 s slice from rest, the VIO's speed overshoots
   by up to 2x in the first seconds of hard acceleration. Over the whole run
   it does not show, but `StaticHold` (only wired into
   `basalt_euroc_localize_demo`) is the candidate fix.
-- **Other routes:** green and magenta are more forest; orange and yellow
-  are 2-2.7 km. The 2025-11-03 night deployment has all six routes.
+- **Other routes:** orange and yellow (2-2.7 km). The 2025-11-03 night
+  deployment has all six routes.
+- **Loop gate by distance driven:** stop the mapper from counting
+  near-sequential matches on straight trails as loops.
 - **Night loop closure:** the BoW place recognition does not survive
   headlights + rain. That needs a different descriptor, not looser
   thresholds.
