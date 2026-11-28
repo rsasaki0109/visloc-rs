@@ -45,8 +45,8 @@ USAGE:
 PARAMETERS (--name value  or  -p name:=value):
   profile                default, or dynamic_indoor: the defaults measured with people
                          about (docs/dynamic_obstacle_localization.md): init_warmup_s 3
-                         and, with fusion, fusion_source_check_s 1, fusion_seed_s 3 and
-                         fusion_max_speed_m_s 2;
+                         map_pose_needs_full true and, with fusion, fusion_source_check_s 1,
+                         fusion_seed_s 3 and fusion_max_speed_m_s 2;
                          parameters given explicitly still win                [default]
   map                    saved map directory (map.json, sparse/, landmark_descriptors.txt) [required]
   camera                 Basalt camera index of the image topic                       [0]
@@ -112,6 +112,8 @@ PARAMETERS (--name value  or  -p name:=value):
   projection_fresh_m     ... and this many metres of odometry travel from it          [2]
   reset_prior_s          after a VIO reset (odom_reset), the last map pose is the
                          prior for this many seconds (0: off)                         [30]
+  map_pose_needs_full    publish no map pose until a full fix has been used (a start
+                         from weak fixes can be off; they still steer the search)  [false]
   recover_after          after this many full fixes in a row are rejected without
                          agreeing (the odometry left the map), ask the VIO to reset
                          on vio_recover (0: off)                                      [0]
@@ -225,6 +227,7 @@ fn run() -> Result<(), String> {
     if !(options.correction.init_warmup_s >= 0.0 && options.correction.init_warmup_s.is_finite()) {
         return Err("init_warmup_s must be a non-negative number".into());
     }
+    options.map_pose_needs_full = args.flag("map_pose_needs_full", dynamic_indoor)?;
     if args.flag("fusion", false)? {
         let mut fusion = FusionOptions::default();
         if dynamic_indoor {
@@ -273,8 +276,9 @@ fn run() -> Result<(), String> {
     }
     if dynamic_indoor {
         eprintln!(
-            "visloc_map_localize_node: profile dynamic_indoor: init_warmup_s {}{}",
+            "visloc_map_localize_node: profile dynamic_indoor: init_warmup_s {}, map_pose_needs_full {}{}",
             options.correction.init_warmup_s,
+            options.map_pose_needs_full,
             options.fusion.as_ref().map_or_else(
                 || ", no fusion (set fusion:=true with a wheel odometry on odom2)".to_owned(),
                 |f| format!(

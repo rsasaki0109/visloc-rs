@@ -99,6 +99,11 @@ pub struct MapLocalizeOptions {
     /// gates as any; 0 turns it off (map-wide matching only until the
     /// correction is set again).
     pub reset_prior_s: f64,
+    /// No map pose until a full fix has been used, by the correction or the
+    /// fusion. A correction started from weak fixes still steers the
+    /// localization meanwhile ([`OdomCorrector::prior`]): weak fixes from
+    /// views off the map's path can agree on a wrong pose.
+    pub map_pose_needs_full: bool,
     /// After this many full fixes in a row are rejected (without agreeing
     /// among themselves, which resets the correction instead), the odometry
     /// has left the map: [`OdomCorrector::recovery_requests`] counts one
@@ -164,6 +169,7 @@ impl Default for MapLocalizeOptions {
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
             reset_prior_s: 30.0,
+            map_pose_needs_full: false,
             recover_after: 0,
             match_threads: 1,
             prior_radius_m: None,
@@ -943,6 +949,8 @@ pub struct OdomCorrector {
     /// ([`MapLocalizeOptions::recover_after`]); the count survives resets.
     rejected_in_a_row: usize,
     recovery_requests: u32,
+    /// Whether a full fix has been used (`map_pose_needs_full`).
+    full_fix_used: bool,
 }
 
 impl OdomCorrector {
@@ -973,6 +981,7 @@ impl OdomCorrector {
             recent_fixes: VecDeque::new(),
             rejected_in_a_row: 0,
             recovery_requests: 0,
+            full_fix_used: false,
         }
     }
 
@@ -1032,7 +1041,7 @@ impl OdomCorrector {
         let latest_fix_ns = self.latest_fix_ns;
         let recovery_requests = self.recovery_requests;
         let carried = self
-            .latest_map_pose()
+            .map_pose_now()
             .map(|pose| (pose.stamp_ns, pose.map_from_body))
             .or_else(|| self.carried.clone());
         *self = Self::new(&self.options);
@@ -1189,6 +1198,14 @@ impl OdomCorrector {
 
     /// The newest odometry pose in the map frame, once the correction is set.
     pub fn latest_map_pose(&self) -> Option<MapPose> {
+        if self.options.map_pose_needs_full && !self.full_fix_used {
+            return None;
+        }
+        self.map_pose_now()
+    }
+
+    /// [`Self::latest_map_pose`] before `map_pose_needs_full`.
+    fn map_pose_now(&self) -> Option<MapPose> {
         let (stamp_ns, odom_from_body) = self.latest_odom.as_ref()?;
         let mut map_from_odom = self.correction.map_from_odom()?;
         let (fix_ns, fix_position) = self.correction.last_fix()?;
@@ -1303,6 +1320,7 @@ impl OdomCorrector {
                                 if close {
                                     fusion.add_fix(stamp_ns, &map_from_body, &sources);
                                     self.fusion_rejected.clear();
+                                    self.full_fix_used = true;
                                 } else {
                                     // Gating only on its own prediction, a
                                     // fusion that went wrong (both
@@ -1332,6 +1350,7 @@ impl OdomCorrector {
                                         {
                                             fusion.add_fix(stamp, &fix, &sources);
                                         }
+                                        self.full_fix_used = true;
                                     }
                                 }
                             }
@@ -1341,6 +1360,7 @@ impl OdomCorrector {
                         outcome,
                         FixOutcome::Initialized | FixOutcome::Accepted | FixOutcome::Reset
                     ) {
+                        self.full_fix_used |= !weak;
                         if let Some(map_from_odom) = self.correction.map_from_odom() {
                             self.odom_fixes
                                 .push((stamp_ns, map_from_odom.inverse().compose(&map_from_body)));
@@ -1714,6 +1734,30 @@ mod tests {
             8.0,
         );
         assert!(fused < 0.05, "fused after the gap: {fused}");
+    }
+
+    #[test]
+    fn map_pose_needs_full_waits_for_a_full_fix() {
+        let run = |needs_full: bool| {
+            let mut core = OdomCorrector::new(&MapLocalizeOptions {
+                map_pose_needs_full: needs_full,
+                ..MapLocalizeOptions::default()
+            });
+            let odom = |i: i64| pose(i as f64 * 0.05, 0.0);
+            let mut after_weak = None;
+            for i in 0..10 {
+                core.add_odom(i * 50 * MS, odom(i));
+                core.add_weak_fix(i * 50 * MS, offset().compose(&odom(i)));
+                if core.correction.map_from_odom().is_some() && after_weak.is_none() {
+                    after_weak = Some(core.latest_map_pose().is_some());
+                }
+            }
+            core.add_odom(10 * 50 * MS, odom(10));
+            core.add_fix(10 * 50 * MS, offset().compose(&odom(10)));
+            (after_weak, core.latest_map_pose().is_some())
+        };
+        assert_eq!(run(false), (Some(true), true));
+        assert_eq!(run(true), (Some(false), true));
     }
 
     #[test]

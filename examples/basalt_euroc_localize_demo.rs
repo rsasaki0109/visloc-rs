@@ -1539,14 +1539,18 @@ impl CorrectedRun {
 
     /// One frame: the odometry's IMU pose and, on a frame to localize, its
     /// image.
+    /// Whether map poses are written: always, but with
+    /// `--map-pose-needs-full` only once a full fix has been used. The map
+    /// pose still steers the localization before.
+    fn publishing(&self) -> bool {
+        !self.map_pose_needs_full || self.full_fix_used
+    }
+
     /// The map pose of the IMU now: the fusion's with `--fusion` once it has
     /// one, else the correction's.
     fn map_pose(&self, odom_from_imu: Option<&SE3>, sources: &[Option<SE3>]) -> Option<SE3> {
         // The fusion's pose once it has one; until then (it starts on a full
         // fix) the correction's, as `visloc_map_localize_node` publishes.
-        if self.map_pose_needs_full && !self.full_fix_used {
-            return None;
-        }
         match &self.fusion {
             Some(fusion) if fusion.is_set() => fusion.map_from_body(sources),
             _ => self.correction.map_from_body(odom_from_imu?),
@@ -1654,9 +1658,10 @@ impl CorrectedRun {
                 self.mask_dir.as_deref(),
             )?;
         }
-        if let (Some(map_from_imu), Some((fix_ns, fix_position))) = (
+        if let (Some(map_from_imu), Some((fix_ns, fix_position)), true) = (
             self.map_pose(Some(odom_from_imu), sources),
             self.correction.last_fix(),
+            self.publishing(),
         ) {
             self.map_tum
                 .push_str(&tum_line(timestamp_ns, &map_from_imu));
@@ -1817,7 +1822,7 @@ impl CorrectedRun {
                 self.mask_dir.as_deref(),
             )?;
         }
-        if let Some(map_from_imu) = self.map_pose(None, sources) {
+        if let (Some(map_from_imu), true) = (self.map_pose(None, sources), self.publishing()) {
             self.map_tum
                 .push_str(&tum_line(timestamp_ns, &map_from_imu));
             self.map_poses += 1;
